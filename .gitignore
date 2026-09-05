@@ -1,0 +1,56 @@
+# ==========================================
+# Core LaTeX Temporary Artifacts
+# ==========================================
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+
+# ==========================================
+# Bibliography & Indexing Artifacts
+# ==========================================
+*.bcf
+*.run.xml
+*.glg
+*.glo
+*.gls
+*.idx
+*.ilg
+*.ind
+*.ist
+*.lof
+*.lot
+*.maf
+*.mtc
+*.mtc0
+
+# ==========================================
+# Package Specific Auxiliaries (Beamer, TikZ, etc.)
+# ==========================================
+*.nav
+*.snm
+*.vrb
+*.pdfsync
+*.tikz
+*.canvas
+
+# ==========================================
+# Dynamic/Backup Outputs
+# ==========================================
+*.bak
+*.dvi
+*.ps
+*~
+
+# ==========================================
+# Target Deliverables (Optional)
+# ==========================================
+# Uncomment the line below if you generate your PDF locally 
+# but only want to track your source files in your Git repo.
+# *.pdf
