@@ -1,0 +1,4 @@
+grpcio>=1.62          # gRPC runtime: channels, server, interceptors, statuses
+grpcio-tools>=1.62    # bundled protoc + Python/gRPC plugins for codegen
+protobuf>=4.25        # message runtime used by generated *_pb2 modules
+pytest>=8             # test runner for the offline suite

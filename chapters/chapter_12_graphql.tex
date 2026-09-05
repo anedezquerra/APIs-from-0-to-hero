@@ -1,0 +1,3186 @@
+\chapter{GraphQL: Schema-Driven APIs}
+\label{ch:graphql}
+
+\section*{Executive Summary}
+\addcontentsline{toc}{section}{Executive Summary}
+
+REST asks the server to guess what clients need; GraphQL makes the client
+say it. That single inversion --- the client composes the response shape,
+the server guarantees it against a typed schema --- is the whole idea, and
+everything else in this chapter is a consequence of it. The consequences
+are larger than they look. A schema that clients query against directly is
+a \emph{contract with an algebra}: fields compose, fragments factor out
+shared selection, nullability propagates errors along formally specified
+paths, and the type system is introspectable at runtime. The same property
+that makes GraphQL delightful for a mobile team --- one endpoint, one
+round trip, exactly the fields requested --- makes it dangerous by
+default: the client, not the server, decides how much work a request
+costs. A REST endpoint's worst case is bounded by its implementation; a
+GraphQL endpoint's worst case is bounded by the attacker's imagination,
+unless you bound it yourself.
+
+This chapter treats GraphQL as a specification first and a library second.
+We work through the October 2021 specification's type system \cite{graphqlspec}
+--- scalars, objects, interfaces, unions, enums, input objects, and the
+list/nullability algebra --- and formalize the rule that makes GraphQL
+error handling unlike anything in REST: when a non-null field errors, the
+\texttt{null} bubbles upward to the nearest nullable position, and the
+response arrives as \emph{partial data} in an HTTP 200 with a populated
+\texttt{errors} array. We trace an operation through the parse, validate,
+and execute phases; we dissect the request/response wire shape; and we
+confront the two production taxes every GraphQL server pays. The first tax
+is the $N{+}1$ query problem, which field-level resolution creates by
+construction: we reproduce it with an instrumented repository and watch a
+single innocent query execute 11 store reads, then collapse it to 3 with
+per-request DataLoader batching --- measured, not asserted. The second tax
+is cost control: depth limiting, complexity analysis, operation
+allow-lists, and Automatic Persisted Queries, which we implement as a
+pre-execution gate that rejects expensive documents before a single
+resolver runs.
+
+The reference implementation is a Strawberry-GraphQL catalog API for the
+fictional Northwind Robotics parts universe: Relay-style cursor
+connections, typed mutation errors via union payloads, field-level error
+extensions, an instrumented repository, a cost-control layer, an
+APQ-capable httpx client, and a 21-test in-process suite --- all
+deterministic, all offline, all runnable on a Windows workstation with
+PowerShell. The chapter closes with an honest GraphQL-versus-REST-versus-gRPC
+decision matrix and a scoped primer on federation, because the correct
+answer to ``should we use GraphQL?'' is sometimes ``no,'' and a principal
+engineer should be able to say when.
+
+\begin{keyconceptbox}
+A GraphQL schema is a \emph{queryable contract}: clients compose responses
+from typed fields, and the server guarantees shape, nullability, and error
+semantics per the specification \cite{graphqlspec}. The power inversion is
+real --- the client chooses the work --- so production GraphQL is defined
+less by resolvers than by its guardrails: depth and complexity budgets,
+persisted-query allow-lists, gated introspection, per-request DataLoaders,
+and an error model that treats partial success as a first-class outcome.
+\end{keyconceptbox}
+
+%% ============================================================================
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch12-objectives}
+
+\subsection{Learning Objectives}
+
+After completing this chapter and its lab, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}]
+  \item Define every kind in the GraphQL type system --- scalar, object,
+        interface, union, enum, input object, list, and non-null --- and
+        predict the schema a Strawberry definition generates.
+  \item State and apply the null-propagation rule formally: an error at a
+        non-null position replaces that position with \texttt{null} and
+        propagates to the nearest nullable ancestor, up to the
+        \texttt{data} root.
+  \item Explain the three operation types (query, mutation, subscription)
+        and the parse $\to$ validate $\to$ execute pipeline, including
+        where static cost analysis must hook in.
+  \item Read and produce the GraphQL-over-HTTP wire shape: the
+        \texttt{query}/\texttt{variables}/\texttt{operationName} request
+        envelope and the \texttt{data}+\texttt{errors} response envelope,
+        including partial responses.
+  \item Reproduce the $N{+}1$ query problem with an instrumented
+        repository, count the queries, and eliminate it with DataLoader
+        batching --- including the one-DataLoader-per-request rule and its
+        caching semantics.
+  \item Implement Relay-style cursor connections
+        (\texttt{edges}/\texttt{node}/\texttt{pageInfo},
+        \texttt{first}/\texttt{after}) with opaque, decodable cursors.
+  \item Distinguish field errors from top-level errors, use
+        \texttt{extensions.code} as the machine-readable channel, and
+        choose between union-typed mutation payloads and raised errors.
+  \item Design a cost-control layer: depth limits, argument-weighted
+        complexity estimation, operation allow-lists, Automatic Persisted
+        Queries, and timeouts.
+  \item Enumerate the GraphQL-specific attack surface --- introspection
+        abuse, batching attacks, god-queries, resolver-side injection ---
+        and map each to its mitigation.
+  \item Choose between REST, GraphQL, and gRPC on evidence: cacheability,
+        uploads, versioning philosophy, tooling gravity, and team shape.
+\end{enumerate}
+
+\subsection{Prerequisites}
+
+This chapter assumes Chapters~0--8. Concretely:
+
+\begin{itemize}
+  \item \textbf{Chapter~0:} reproducible-measurement discipline and the
+        synthetic Northwind Robotics universe.
+  \item \textbf{Chapters~1--2:} HTTP request/response mechanics, POST
+        semantics, and Python HTTP clients \cite{rfc9110,httpxdocs}.
+  \item \textbf{Chapter~3:} REST resource modeling --- the baseline this
+        chapter contrasts GraphQL against.
+  \item \textbf{Chapter~4:} JSON serialization contracts; GraphQL response
+        envelopes are exactly such contracts.
+  \item \textbf{Chapter~5:} client-side credential and transport hygiene.
+  \item \textbf{Chapter~6:} building FastAPI services; the GraphQL server
+        here mounts on FastAPI \cite{fastapidocs}.
+  \item \textbf{Chapter~7:} error modeling; GraphQL's
+        \texttt{errors} array and \texttt{extensions} extend that chapter's
+        problem-details thinking into a partial-success world.
+  \item \textbf{Chapter~8:} cursor versus offset pagination; the Relay
+        connection spec is that chapter's keyset idea in GraphQL clothing.
+\end{itemize}
+
+%% ============================================================================
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch12-mechanics}
+
+\subsection{What GraphQL Actually Is}
+
+Strip away the tooling and GraphQL is three documents. The \emph{schema}
+is a typed, introspectable description of everything clients may ask for.
+An \emph{operation} is a document the client sends, written in the same
+type system, selecting exactly the fields it wants. The \emph{response}
+is a JSON document whose shape mirrors the operation, key for key. The
+server's job is to resolve each requested field against the schema,
+nowhere else; the client's job is to tolerate partial data, because a
+GraphQL response can be simultaneously a success and a failure.
+
+\begin{definition}[GraphQL request execution]
+Given a schema $S$, an operation document $O$, variable values $V$, and an
+initial root value $R$, \emph{execution} is the function
+$\mathrm{Execute}(S, O, V, R) \mapsto (\mathrm{data}, \mathrm{errors})$
+where $\mathrm{data}$ mirrors $O$'s selection set, field errors are
+collected into $\mathrm{errors}$ with their paths, and the null-propagation
+rule (Definition~\ref{def:null-propagation}) governs how field errors
+mutate $\mathrm{data}$ \cite{graphqlspec}.
+\end{definition}
+
+Three contrasts with REST matter architecturally. First, \textbf{one
+endpoint, many shapes}: REST fixes the response shape per resource; GraphQL
+fixes the \emph{universe} of shapes and lets the client project. Second,
+\textbf{the type system is the documentation and the validator}: there is
+no drift between docs and behavior, because the schema that documents the
+API is the schema that validates the query. Third, \textbf{the client
+controls cost}: a REST server author bounds each endpoint's work; a
+GraphQL server author bounds the \emph{space of expressible queries}, which
+is the subject of Section~\ref{sec:ch12-cost-control} and of half this
+chapter's war stories.
+
+\subsection{The Type System}
+\label{sec:ch12-type-system}
+
+GraphQL's type system has eight kinds, and production fluency means knowing
+what each one \emph{refuses} to express.
+
+\textbf{Scalars} are leaves: the built-ins \texttt{Int}, \texttt{Float},
+\texttt{String}, \texttt{Boolean}, \texttt{ID}, plus custom scalars (a
+\texttt{DateTime} is the canonical example) whose serialization the server
+defines. \texttt{ID} serializes as a string and means ``opaque identifier;
+do not parse.''
+
+\textbf{Object types} are the workhorses: named sets of typed fields,
+where field types may themselves be objects --- this recursion is what
+makes a GraphQL API a \emph{graph}. \textbf{Interfaces} are abstract
+objects: they declare fields that every implementing object must carry,
+and selecting through an interface uses inline fragments for
+concrete-type-only fields. \textbf{Unions} are interfaces without the
+contract: member types share nothing, so \emph{every} field selection goes
+through inline fragments --- which is exactly why unions are the right
+tool for typed mutation results (Section~\ref{sec:ch12-errors}).
+\textbf{Enums} are closed sets of string values, validated at the
+operation layer. \textbf{Input objects} are objects that flow the other
+way, into the server as arguments; they may contain scalars, enums, lists,
+and other input objects, but never unions or interfaces --- input types
+are closed under a smaller algebra than output types, by design.
+
+\textbf{Lists and non-null} are type \emph{modifiers}, and their
+composition is where the specification's subtlety lives. \texttt{[Review]}
+means ``nullable list of nullable reviews''; \texttt{[Review!]!} means
+``non-null list of non-null reviews.'' The four combinations are
+semantically distinct, and choosing among them is the schema author's
+error-propagation policy expressed as syntax.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{SDL type} & \textbf{May be} & \textbf{Error in one element does} \\
+    \midrule
+    \texttt{[Review]}   & null, [null] & nulls only that element \\
+    \texttt{[Review!]}  & null         & nulls the whole list \\
+    \texttt{[Review]!}  & [null]       & nulls only that element; list never null \\
+    \texttt{[Review!]!} & neither      & propagates past the list to the parent \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The four list/nullability combinations as error-containment policy.}
+  \label{tab:ch12-nullability}
+\end{table}
+
+\begin{definition}[Null propagation on errors]
+\label{def:null-propagation}
+Let a field position $p$ with declared type $T$ raise an error during
+execution. If $T$ is nullable, $p$ is set to \texttt{null} and an entry is
+appended to \texttt{errors}. If $T$ is non-null, the error \emph{bubbles}:
+$p$'s parent object is set to \texttt{null}, and the bubbling repeats at
+each ancestor until a nullable position absorbs it; if no nullable
+position exists, the entire \texttt{data} entry becomes \texttt{null}
+\cite{graphqlspec}. Non-null is therefore not ``this cannot fail'' --- it
+is ``if this fails, the failure voids my parent too.''
+\end{definition}
+
+The practical reading: make fields non-null when a client cannot
+meaningfully render anything without them, and nullable when partial
+degradation is useful. A product page can render without a margin; a
+payment screen cannot render without an amount. Our reference schema
+encodes exactly this: \texttt{marginPercent} is \texttt{Int!}, so its
+failure (cost data missing for one discontinued product) nulls the
+enclosing node while sibling products survive ---
+Listing~\ref{lst:ch12-tests} proves both halves of that sentence.
+
+\subsection{Schema Definition Language and Introspection}
+\label{sec:ch12-sdl}
+
+The schema definition language (SDL) is the human-readable notation for
+the type system. The catalog API's core, as SDL, is:
+
+\begin{minted}{graphql}
+type Query {
+  products(first: Int = 10, after: String, status: ProductStatus): ProductConnection
+  product(productId: Int!): Product
+}
+
+type Product {
+  id: Int!
+  sku: String!
+  name: String!
+  unitPriceCents: Int!
+  stock: Int!
+  discontinued: Boolean!
+  category: Category
+  reviews: [Review!]!
+  marginPercent: Int!
+}
+
+type Mutation {
+  addReview(input: AddReviewInput!): AddReviewResult!
+}
+
+union AddReviewResult = AddReviewSuccess | AddReviewError
+\end{minted}
+
+SDL is one authoring style; Strawberry's is \emph{code-first}, where Python
+classes generate the SDL. The choice matters less than the invariant:
+\textbf{the schema is the single source of truth}, and anything claiming
+to describe the API must be derived from it.
+
+Introspection is the schema describing \emph{itself} at runtime: the
+meta-fields \texttt{\_\_schema} and \texttt{\_\_type} expose every type,
+field, and argument, which is what powers GraphiQL's autocompletion and
+every code generator. It is also a complete map of your attack surface,
+served fresh to anyone who asks.
+
+\begin{warningbox}
+Introspection is not an authentication bypass --- it reveals only types,
+not data --- but it hands an adversary your entire field inventory,
+including the internal field you forgot carried something sensitive.
+Production policy: introspection \textbf{off} for unauthenticated traffic
+in production, \textbf{on} in development and staging, and gate it in the
+validation layer (an AST check for \texttt{\_\_schema}/\texttt{\_\_type}),
+never by substring matching --- Listing~\ref{lst:ch12-cost} implements the
+AST gate that aliases and fragments cannot evade.
+\end{warningbox}
+
+\subsection{Operations: Queries, Mutations, Subscriptions}
+\label{sec:ch12-operations}
+
+A \textbf{query} is a read with no observable side effects; a
+\textbf{mutation} is a write whose top-level fields execute \emph{in
+series}, in order --- the only ordering guarantee the specification makes,
+and the reason multi-step writes belong in one mutation's sequential
+fields rather than in parallel mutations; a \textbf{subscription} is a
+query plus a stream: the server pushes a response each time an event
+invalidates the selection, typically over WebSockets (the
+\texttt{graphql-ws} protocol) or server-sent events.
+
+Operations accept \textbf{variables}: typed, separately-serialized
+arguments declared in the operation header (\texttt{query Page(\$first:
+Int!)}). Variables are the only correct way to pass client input --- a
+query is a parse tree, and variables travel in their own JSON object, so
+\emph{variable injection is structurally impossible}: there is no string
+to escape from. \textbf{Aliases} (\texttt{active: products(...)}) rename
+result keys, permitting the same field twice with different arguments.
+\textbf{Fragments} name reusable selection sets; the directives
+\texttt{@include(if:)} and \texttt{@skip(if:)} condition fields on
+variables, letting one cached operation serve several UI states.
+
+\begin{minted}{graphql}
+query CatalogPage($first: Int!, $after: String, $withReviews: Boolean!) {
+  products(first: $first, after: $after) {
+    edges {
+      cursor
+      node {
+        ...ProductCard
+        reviews @include(if: $withReviews) { rating }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
+fragment ProductCard on Product {
+  sku
+  name
+  unitPriceCents
+}
+\end{minted}
+
+\subsection{The Execution Pipeline and the Wire Shape}
+\label{sec:ch12-pipeline}
+
+Every GraphQL request walks the same three phases, and each phase has its
+own failure channel (Figure~\ref{fig:ch12-pipeline}). \textbf{Parse} turns
+the document text into an AST; failure is a syntax error, HTTP 400, before
+any schema involvement. \textbf{Validate} checks the AST against the schema
+--- every field exists, every argument type-checks, fragments terminate ---
+failure again pre-execution. This is also where cost control belongs:
+depth and complexity are properties of the \emph{document}, so an
+over-budget operation must be rejected before a resolver runs, or the
+meter is already spinning. \textbf{Execute} resolves fields; failures here
+are field errors, folded into the response under the null-propagation rule.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      node distance=0.55cm,
+      phase/.style={rectangle, draw=packtgray, thick, fill=blue!5,
+        minimum width=2.5cm, minimum height=1.0cm, align=center},
+      gate/.style={rectangle, draw=packtorange, thick, fill=packtorange!10,
+        minimum width=3.2cm, minimum height=0.9cm, align=center},
+      io/.style={rectangle, draw=packtgray!70, fill=lightgray,
+        minimum width=3.4cm, minimum height=0.9cm, align=center},
+      flow/.style={->, thick, packtgray},
+      reject/.style={->, thick, packtorange, dashed},
+    ]
+    \node[io] (req) {request envelope\\\texttt{query}, \texttt{variables}, \texttt{operationName}};
+    \node[phase, below=of req] (parse) {\textbf{Parse}\\text $\to$ AST};
+    \node[gate, below=of parse] (budget) {\textbf{Cost gate}\\depth, complexity,\\persisted allow-list};
+    \node[phase, below=of budget] (validate) {\textbf{Validate}\\AST vs.\ schema};
+    \node[phase, below=of validate] (execute) {\textbf{Execute}\\resolvers, DataLoaders};
+    \node[io, below=of execute] (resp) {response envelope\\\texttt{data} + \texttt{errors}};
+    \node[io, right=1.3cm of parse] (r1) {HTTP 400\\\texttt{GRAPHQL\_PARSE\_FAILED}};
+    \node[io, right=1.3cm of budget] (r2) {HTTP 400\\\texttt{DEPTH\_LIMIT\_EXCEEDED}};
+    \node[io, right=1.3cm of validate] (r3) {HTTP 400\\validation errors};
+    \node[io, right=1.3cm of execute, align=center] (r4) {HTTP 200, partial\\\texttt{errors} with \texttt{path}};
+    \draw[flow] (req) -- (parse);
+    \draw[flow] (parse) -- (budget);
+    \draw[flow] (budget) -- (validate);
+    \draw[flow] (validate) -- (execute);
+    \draw[flow] (execute) -- (resp);
+    \draw[reject] (parse) -- (r1);
+    \draw[reject] (budget) -- (r2);
+    \draw[reject] (validate) -- (r3);
+    \draw[reject] (execute) -- (r4);
+    \node[note, below=0.25cm of resp] {phases left of the dashed rejects never touch a resolver};
+  \end{tikzpicture}
+  \caption{Request lifecycle. Static cost control sits between parse and
+           validate: cheap to compute, before any field executes.}
+  \label{fig:ch12-pipeline}
+\end{figure}
+
+The wire shape is austere. The request is a JSON object with
+\texttt{query}, optional \texttt{variables}, optional
+\texttt{operationName}, and optional \texttt{extensions}; over HTTP it is
+almost always POST \cite{rfc9110}. The response is a JSON object with
+\texttt{data} (possibly partial, possibly \texttt{null}) and, on field
+errors, an \texttt{errors} array whose entries carry \texttt{message},
+\texttt{path}, \texttt{locations}, and the open extension point
+\texttt{extensions} --- where \texttt{code} belongs, because clients need
+machine-readable failure kinds, not prose.
+
+\begin{minted}{json}
+{
+  "data": { "product": null },
+  "errors": [
+    {
+      "message": "cost data unavailable for product",
+      "path": ["product", "marginPercent"],
+      "extensions": { "code": "COST_DATA_UNAVAILABLE" }
+    }
+  ]
+}
+\end{minted}
+
+Read that response carefully, because it breaks two REST instincts at
+once: the HTTP status is 200 \emph{and} the operation failed, and the
+failure voided exactly one field's parent, not the request. A client that
+checks only \texttt{resp.status\_code} will render garbage; a client that
+treats any \texttt{errors} entry as total failure wastes the partial data
+the server worked to produce. Both behaviors are bugs.
+
+\subsection{Resolver Architecture and the N+1 Problem}
+\label{sec:ch12-resolvers}
+
+Execution is field-at-a-time: for each field in the selection set, the
+executor calls that field's \emph{resolver} with the parent value, the
+arguments, and the \emph{context} --- a per-request bag holding
+repositories, the authenticated principal, and (critically) DataLoaders.
+This design is what makes GraphQL composable: the \texttt{category}
+resolver does not know or care whether the parent product came from
+\texttt{products} or \texttt{product}. It is also what makes GraphQL
+dangerous, because resolution composes \emph{multiplicatively} with list
+sizes.
+
+\begin{examplebox}
+The query \texttt{products(first: 5) \{ edges \{ node \{ name category
+\{ name \} reviews \{ rating \} \} \} \} } looks like one request. With
+naive resolvers --- \texttt{category} calls
+\texttt{repo.category\_by\_id}, \texttt{reviews} calls
+\texttt{repo.reviews\_for\_product} --- it is $1 + 5 + 5 = 11$ store
+reads: one for the page, then one \emph{per product} per relationship
+field. At \texttt{first: 50} it is 101 reads. The $N{+}1$ is not a bug in
+a resolver; it is the default physics of field-level resolution.
+Listing~\ref{lst:ch12-nplus1} measures exactly these counts.
+\end{examplebox}
+
+DataLoader collapses the fan-out by exploiting the executor's scheduling:
+all product nodes' \texttt{category} resolvers run within the same event
+loop tick, so each one, instead of querying, \emph{enqueues its key} and
+awaits. At the tick boundary the loader calls the batch function once with
+the deduplicated keys --- \texttt{[1, 1, 2, 2, 3]} becomes
+\texttt{categories\_by\_ids([1, 2, 3])} --- and distributes results back
+to the waiting futures by position. Eleven reads become three: the page,
+one batched category read, one batched review read
+(Figure~\ref{fig:ch12-dataloader}).
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      lifeline/.style={rectangle, draw=packtgray, thick, fill=blue!5,
+        minimum width=2.6cm, minimum height=0.8cm, align=center},
+      msg/.style={->, thick, packtgray},
+      ret/.style={->, thick, dashed, packtgray!80},
+      lbl/.style={font=\footnotesize, align=center, midway, above},
+    ]
+    \node[lifeline] (r1) {resolver: product 1};
+    \node[lifeline, right=0.7cm of r1] (r2) {resolver: product 2};
+    \node[lifeline, right=0.7cm of r2] (dl) {CategoryLoader};
+    \node[lifeline, right=0.7cm of dl] (db) {repository};
+    \draw[packtgray!40, dashed] (r1.south) -- ++(0,-4.6);
+    \draw[packtgray!40, dashed] (r2.south) -- ++(0,-4.6);
+    \draw[packtgray!40, dashed] (dl.south) -- ++(0,-4.6);
+    \draw[packtgray!40, dashed] (db.south) -- ++(0,-4.6);
+    \draw[msg] ([yshift=-0.5cm]r1.south) -- ([yshift=-0.5cm]dl.south)
+      node[lbl] {\texttt{load(1)} --- enqueue, await};
+    \draw[msg] ([yshift=-1.1cm]r2.south) -- ([yshift=-1.1cm]dl.south)
+      node[lbl] {\texttt{load(1)} --- cache hit, same future};
+    \draw[msg] ([yshift=-1.9cm]dl.south) -- ([yshift=-1.9cm]db.south)
+      node[lbl] {tick boundary: \texttt{categories\_by\_ids([1])} --- 1 query};
+    \draw[ret] ([yshift=-2.9cm]db.south) -- ([yshift=-2.9cm]dl.south)
+      node[lbl] {\texttt{[Category(1)]}};
+    \draw[ret] ([yshift=-3.7cm]dl.south) -- ([yshift=-3.7cm]r1.south)
+      node[lbl] {resolve futures};
+    \draw[ret] ([yshift=-4.4cm]dl.south) -- ([yshift=-4.4cm]r2.south);
+  \end{tikzpicture}
+  \caption{DataLoader batching: per-field loads within one tick collapse
+           into a single keyed batch read; the per-request cache dedupes
+           repeated keys.}
+  \label{fig:ch12-dataloader}
+\end{figure}
+
+Two rules keep DataLoader correct. \textbf{One loader instance per
+request}: its cache is request-scoped identity memoization; sharing a
+loader across requests serves stale data across user boundaries, which is
+not a performance bug but a security incident. \textbf{The batch function
+is the only place queries happen}: it must return results positionally
+aligned with the keys, with \texttt{None} for misses --- never raise for
+one bad key, or every awaiting field in the tick fails together.
+
+\subsection{Pagination: The Relay Connection Spec}
+\label{sec:ch12-pagination}
+
+Chapter~8 established that value-based (cursor) pagination beats
+position-based (offset) pagination; the Relay connection spec is the
+GraphQL community's standard encoding of that idea. A paginated field
+returns a \emph{connection} object: \texttt{edges} (each with an opaque
+\texttt{cursor} and a \texttt{node}), \texttt{pageInfo} (with
+\texttt{hasNextPage}, \texttt{hasPreviousPage}, \texttt{startCursor},
+\texttt{endCursor}), and forward arguments \texttt{first}/\texttt{after}
+(backward: \texttt{last}/\texttt{before}). The conventions that matter in
+production: cursors are \emph{opaque to clients} (ours are
+Base64\texttt{("product:<id>")}, decodable server-side, forged ones
+rejected with \texttt{BAD\_CURSOR}); \texttt{hasNextPage} is computed with
+the fetch-$p{+}1$ trick, never with a \texttt{COUNT}; and every list a
+client can size needs a server-side maximum --- our schema caps
+\texttt{first} at 50 and rejects out-of-range values at the resolver.
+
+\subsection{The Error Model}
+\label{sec:ch12-errors}
+
+GraphQL has exactly two error channels, and choosing between them is
+design. \textbf{Top-level errors} (the \texttt{errors} array) are for
+\emph{exceptional} failure: the resolver could not produce the field ---
+downstream timeout, missing cost data, invalid cursor. They compose with
+null propagation and partial data. \textbf{Typed mutation errors} model
+\emph{expected} failure --- validation, business-rule rejection --- as
+data: the mutation returns a union of success and error payloads, and the
+client selects with inline fragments:
+
+\begin{minted}{graphql}
+mutation Add($input: AddReviewInput!) {
+  addReview(input: $input) {
+    __typename
+    ... on AddReviewSuccess { review { id rating } }
+    ... on AddReviewError { code message }
+  }
+}
+\end{minted}
+
+The distinction is operational, not stylistic. Top-level errors page the
+on-call engineer; typed errors inform the end user. A rating of 6 is not
+an incident, and a database connection failure is not a form-validation
+message. Chapter~7's discipline --- machine-readable codes, actionable
+messages --- applies to both channels via \texttt{extensions.code} on the
+one hand and the \texttt{code} field on the other.
+
+\subsection{API Cost Control}
+\label{sec:ch12-cost-control}
+
+Because the client chooses the work, an unguarded GraphQL endpoint has an
+unbounded worst case. The controls, in the order they should fire:
+
+\textbf{Depth limiting} rejects documents whose longest field path exceeds
+a budget (ours: 7). Depth is the crudest measure but catches the classic
+abuse --- cyclic traversals like \texttt{friends \{ friends \{ friends
+\ldots\ \} \}} --- before they cost anything.
+
+\textbf{Complexity analysis} weights fields so that list-returning fields
+multiply their subtree's cost by the requested page size:
+$\mathrm{cost}(f) = 1 + m(f) \cdot \sum_{c \in \mathrm{children}(f)}
+\mathrm{cost}(c)$, where $m(f)$ is the field's \texttt{first}/\texttt{last}
+argument, a conservative default when absent, and 1 for scalar fields. The
+estimator runs on the parsed AST (Listing~\ref{lst:ch12-cost}), so a
+\texttt{first: 50} god-query is rejected with
+\texttt{COMPLEXITY\_LIMIT\_EXCEEDED} while a \texttt{first: 2} variant of
+the same shape sails through --- the suite proves both.
+
+\textbf{Timeouts} bound what static analysis cannot predict; complexity
+estimates are adversarial games, and a resolver deadline is the backstop
+for the estimation errors you did not know you had.
+
+\textbf{Operation allow-lists} invert the trust model entirely: in
+production the server executes only pre-registered documents, identified
+by hash. Nothing else parses, so depth and complexity limits become
+defense in depth rather than the perimeter. \textbf{Automatic Persisted
+Queries} (APQ) is the ergonomic half of that idea: the client sends only
+\texttt{extensions.persistedQuery.sha256Hash}; on
+\texttt{PersistedQueryNotFound} (HTTP 200 with an error entry, per the
+protocol) it retries once with the full query plus hash; the server
+verifies the hash matches the text --- \texttt{PersistedQueryMismatch}
+otherwise --- registers the document, and executes. Subsequent requests
+carry 64 bytes instead of kilobytes, and a CDN can cache hash-keyed GETs.
+Listing~\ref{lst:ch12-client} implements both halves of the handshake.
+
+\subsection{Security: The GraphQL-Specific Attack Surface}
+\label{sec:ch12-security}
+
+GraphQL inherits every web-API threat and adds a few of its own.
+
+\textbf{Introspection abuse} --- covered in
+Section~\ref{sec:ch12-sdl}: gate it at the validation layer.
+\textbf{Query-based DoS} --- deep, wide, or aliased-multiplied documents;
+mitigated by the cost gate above. Note the amplifier most teams miss:
+\textbf{batching abuse}. GraphQL-over-HTTP conventionally accepts an
+\emph{array} of operations per request, so one HTTP request can carry a
+hundred god-queries, and request-count rate limiting sees ``1 request.''
+Mitigations: disable array batching if your clients do not need it, cap
+the array length, and --- the durable fix --- \textbf{rate-limit by
+estimated cost, not by request count}, summing complexity across the
+batch. \textbf{Injection}: variable injection into the \emph{query
+document} is structurally impossible (variables are a separate JSON
+object), but \emph{resolver-side} injection is exactly as real as in any
+stack --- a resolver that string-concatenates a variable into SQL is a SQL
+injection wearing a typed costume. Parameterized queries remain
+non-negotiable \cite{kleppmann2017ddia}. \textbf{Field-level
+authorization} moves the perimeter into resolvers: the schema advertises
+\texttt{salaryHistory} to everyone, so authorization must live at the
+field, via context-carrying checks --- and union payloads let you return
+\texttt{NOT\_AUTHORIZED} as data where partial visibility is legitimate.
+Finally, \textbf{disable the GraphiQL IDE in production}: it is a
+developer tool that leaks the endpoint's shape and invites interactive
+probing; its presence is a config flag, and that flag belongs in the same
+policy file as the introspection gate.
+
+\subsection{GraphQL vs.\ REST vs.\ gRPC: An Honest Matrix}
+\label{sec:ch12-comparison}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    \textbf{Dimension} & \textbf{REST (HTTP+JSON)} & \textbf{GraphQL} & \textbf{gRPC} \\
+    \midrule
+    Contract & OpenAPI, retrofitted & Schema, intrinsic \cite{graphqlspec} & Protobuf, intrinsic \\
+    Response shape & Server-fixed & Client-composed & Server-fixed \\
+    HTTP caching & Native: GET + CDN + ETag & POST defeats it; APQ+GET partially restores & No (HTTP/2 frames) \\
+    Over/under-fetching & Common & Eliminated & Eliminated \\
+    File uploads & Native multipart & Multipart spec, awkward & Streaming, good \\
+    Versioning & \texttt{/v2} or headers & Continuous evolution: deprecate, never break & Field numbers, additive \\
+    Worst-case cost & Bounded per endpoint & Unbounded without cost gate & Bounded per method \\
+    Tooling gravity & Ubiquitous & Strong for frontends & Strong for service mesh \\
+    Fit & Public APIs, webhooks, CDNs & Product graphs, many clients, one backend & Internal low-latency RPC \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Decision matrix. No column is ``best''; each optimizes a
+           different constraint.}
+  \label{tab:ch12-matrix}
+\end{table}
+
+Three rows deserve emphasis. \textbf{Cacheability}: REST's use of GET with
+status codes and validators is the largest operational advantage in the
+table --- a CDN can absorb a product launch; a GraphQL POST endpoint
+cannot, and the mitigations (APQ over GET, response-caching extensions)
+are exactly that: mitigations. \textbf{Versioning philosophy}: GraphQL's
+orthodoxy is \emph{continuous evolution} --- add fields freely, deprecate
+with \texttt{@deprecated}, never remove --- which trades REST's explicit
+\texttt{/v2} flag days for an eternal compatibility obligation backed by
+usage telemetry on every field. Neither is cheaper; they bill different
+teams. \textbf{The request topology} differs structurally
+(Figure~\ref{fig:ch12-topology}): REST spreads a screen's data need across
+$k$ endpoints and $k$ round trips; GraphQL concentrates it in one request
+whose cost you must now govern.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      box/.style={rectangle, draw=packtgray, thick, fill=blue!5,
+        minimum width=1.9cm, minimum height=0.8cm, align=center},
+      ep/.style={rectangle, draw=packtgray, fill=lightgray,
+        minimum width=1.9cm, minimum height=0.7cm, align=center,
+        font=\footnotesize},
+      flow/.style={->, thick, packtgray},
+      ttl/.style={font=\bfseries\small},
+    ]
+    % REST side
+    \node[ttl] at (2.2, 0.4) {REST: $k$ endpoints, $k$ round trips};
+    \node[box] (c1) at (0.2, -0.6) {mobile client};
+    \node[ep] (e1) at (4.3, 0.0) {\texttt{GET /products}};
+    \node[ep] (e2) at (4.3, -0.9) {\texttt{GET /products/1/category}};
+    \node[ep] (e3) at (4.3, -1.8) {\texttt{GET /products/1/reviews}};
+    \draw[flow] (c1) -- (e1);
+    \draw[flow] (c1) -- (e2);
+    \draw[flow] (c1) -- (e3);
+    % GraphQL side
+    \node[ttl] at (9.6, 0.4) {GraphQL: 1 endpoint, 1 request};
+    \node[box] (c2) at (7.6, -0.6) {mobile client};
+    \node[ep, minimum height=1.6cm] (g1) at (11.6, -0.6)
+      {\texttt{POST /graphql}\\one composed operation};
+    \draw[flow] (c2) -- (g1);
+    \node[note] at (9.6, -2.0) {cost governance moves server-side};
+  \end{tikzpicture}
+  \caption{Request topology: REST distributes a screen's data need across
+           endpoints; GraphQL concentrates it into one operation whose
+           cost the server must bound.}
+  \label{fig:ch12-topology}
+\end{figure}
+
+\subsection{Federation Primer (Scope Note)}
+\label{sec:ch12-federation}
+
+When one schema is owned by fifteen teams, the monolith reappears wearing
+a schema's clothes. Federation splits the graph into \emph{subgraphs} ---
+each a standalone GraphQL service owning its types --- that a
+\emph{gateway} composes into one supergraph; \emph{entities} are types
+with a key (say, \texttt{Product @key(fields: "id")}) that several
+subgraphs can extend, so the reviews service adds
+\texttt{Product.reviews} without owning products. The gateway plans each
+operation across subgraphs and stitches the results. That is the entire
+scope of this chapter's treatment: federation is an organizational
+scaling tool with its own failure modes (composition conflicts, gateway as
+a chokepoint, entity-resolution $N{+}1$s \emph{across services}), and it
+deserves the same rigor this chapter gave the single graph before you
+adopt it.
+
+%% ============================================================================
+\section{Production-Ready Code Implementation}
+\label{sec:ch12-code}
+
+The reference implementation is a six-file lab, deliberately offline and
+deterministic. \textbf{Dependencies.} We use
+\textbf{Strawberry} rather than Ariadne or Graphene: it is code-first
+(Python type hints \emph{are} the schema, so the listing teaches the type
+system instead of an SDL mapping layer), it is actively maintained on
+modern \texttt{graphql-core}, its DataLoader and FastAPI integration are
+first-class, and --- decisive for a textbook --- its resolvers are plain
+async Python that reads like the specification. Ariadne (SDL-first) and
+Graphene (the incumbent) are surveyed in the Dependencies Appendix.
+
+\textbf{Layout.} \texttt{catalog\_repository.py} (seeded store with query
+counter), \texttt{catalog\_schema.py} (schema, connections, mutations,
+DataLoaders), \texttt{cost\_control.py} (depth/complexity/APQ/HTTP entry
+point), \texttt{server.py} (FastAPI host), \texttt{graphql\_client.py}
+(httpx client with APQ), \texttt{test\_catalog.py} (21 in-process tests).
+Windows paths below assume the lab lives at
+\texttt{C:\textbackslash{}training\textbackslash{}graphql\_lab}.
+
+\subsection{Listing 1: Instrumented Repository}
+\label{subsec:ch12-code-repository}
+
+The repository (Listing~\ref{lst:ch12-repository}) is the lab's ground
+truth: five synthetic products across three categories with five reviews,
+one of them (product~4, the discontinued sensor array) deliberately missing
+cost data to drive the null-propagation demonstration. Every read path
+increments \texttt{query\_count}, which converts the $N{+}1$ problem from
+anecdote into an assertion a test can make.
+
+\begin{minted}[caption={Instrumented in-memory repository (\texttt{catalog\_repository.py}).},label={lst:ch12-repository}]{python}
+"""In-memory repository for the Northwind Robotics catalog.
+
+Synthetic, deterministic, offline: the same seed data on every run.
+The repository exposes an instrumentation counter so the N+1 problem is
+measurable rather than anecdotal.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CategoryRow:
+    id: int
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class ProductRow:
+    id: int
+    sku: str
+    name: str
+    category_id: int
+    unit_price_cents: int
+    unit_cost_cents: int | None  # None = cost data missing (drives null-propagation demo)
+    stock: int
+    discontinued: bool
+
+
+@dataclass(frozen=True)
+class ReviewRow:
+    id: int
+    product_id: int
+    rating: int
+    headline: str
+
+
+_CATEGORIES: tuple[CategoryRow, ...] = (
+    CategoryRow(1, "Actuators", "Linear and rotary motion components"),
+    CategoryRow(2, "Sensors", "LIDAR, vision, and tactile sensing"),
+    CategoryRow(3, "Controllers", "Real-time motor and fleet controllers"),
+)
+
+_PRODUCTS: tuple[ProductRow, ...] = (
+    ProductRow(1, "NWR-ACT-100", "Servo Linear Actuator 100mm", 1, 459_00, 210_00, 34, False),
+    ProductRow(2, "NWR-ACT-200", "Rotary Torque Actuator 12Nm", 1, 899_00, 401_00, 12, False),
+    ProductRow(3, "NWR-SEN-310", "Solid-State LIDAR Unit", 2, 1_299_00, 620_00, 8, False),
+    ProductRow(4, "NWR-SEN-410", "Tactile Gripper Sensor Array", 2, 349_00, None, 0, True),
+    ProductRow(5, "NWR-CTL-900", "Fleet Motion Controller X9", 3, 2_499_00, 1_150_00, 5, False),
+)
+
+_REVIEWS: tuple[ReviewRow, ...] = (
+    ReviewRow(1, 1, 5, "Silky smooth travel"),
+    ReviewRow(2, 1, 4, "Solid, runs warm under load"),
+    ReviewRow(3, 2, 5, "Best torque-per-dollar we tested"),
+    ReviewRow(4, 3, 4, "Great range, tricky mounting"),
+    ReviewRow(5, 5, 5, "Runs our whole warehouse fleet"),
+)
+
+
+class CatalogRepository:
+    """In-memory catalog store with a query counter for N+1 measurement."""
+
+    def __init__(self) -> None:
+        self._categories = {c.id: c for c in _CATEGORIES}
+        self._products = {p.id: p for p in _PRODUCTS}
+        self._reviews: dict[int, list[ReviewRow]] = {}
+        for review in _REVIEWS:
+            self._reviews.setdefault(review.product_id, []).append(review)
+        self._next_review_id = max(r.id for r in _REVIEWS) + 1
+        self.query_count = 0  # incremented on every store read
+
+    def reset_counter(self) -> None:
+        self.query_count = 0
+
+    # --- single-record reads (the naive path uses these in a loop) ---
+
+    def product_by_id(self, product_id: int) -> ProductRow | None:
+        self.query_count += 1
+        return self._products.get(product_id)
+
+    def category_by_id(self, category_id: int) -> CategoryRow | None:
+        self.query_count += 1
+        return self._categories.get(category_id)
+
+    def reviews_for_product(self, product_id: int) -> list[ReviewRow]:
+        self.query_count += 1
+        return list(self._reviews.get(product_id, []))
+
+    # --- batched reads (the DataLoader path calls these once per tick) ---
+
+    def categories_by_ids(self, ids: list[int]) -> list[CategoryRow | None]:
+        self.query_count += 1
+        return [self._categories.get(i) for i in ids]
+
+    def reviews_for_products(self, ids: list[int]) -> list[list[ReviewRow]]:
+        self.query_count += 1
+        return [list(self._reviews.get(i, [])) for i in ids]
+
+    # --- connection page read ---
+
+    def products_page(
+        self, after_id: int, first: int
+    ) -> tuple[list[ProductRow], bool]:
+        """Return up to ``first`` products with id > after_id, plus has-next."""
+        self.query_count += 1
+        ordered = sorted(self._products.values(), key=lambda p: p.id)
+        page = [p for p in ordered if p.id > after_id][: first + 1]
+        return page[:first], len(page) > first
+
+    def total_products(self) -> int:
+        self.query_count += 1
+        return len(self._products)
+
+    # --- mutation ---
+
+    def add_review(self, product_id: int, rating: int, headline: str) -> ReviewRow | None:
+        """Insert a review; returns None when the product does not exist."""
+        if product_id not in self._products:
+            return None
+        self._next_review_id += 1
+        row = ReviewRow(self._next_review_id, product_id, rating, headline)
+        self._reviews.setdefault(product_id, []).append(row)
+        return row
+\end{minted}
+
+Note the deliberate asymmetry: single-record reads
+(\texttt{category\_by\_id}, \texttt{reviews\_for\_product}) exist alongside
+batched reads (\texttt{categories\_by\_ids},
+\texttt{reviews\_for\_products}). The naive resolvers use the first set;
+the DataLoaders use the second. Same store, same data --- the only
+difference is \emph{how many round trips the resolvers ask for}.
+
+\subsection{Listing 2: The Strawberry Schema}
+\label{subsec:ch12-code-schema}
+
+Listing~\ref{lst:ch12-schema} is the chapter in one file. Code-first type
+definitions with Python hints generating the SDL of
+Section~\ref{sec:ch12-sdl}; a \texttt{Context} constructed \emph{once per
+request} carrying the repository and two DataLoaders; a Relay-style
+connection with opaque Base64 cursors; a mutation returning a union of
+\texttt{AddReviewSuccess} and \texttt{AddReviewError} so expected failures
+are data; and \texttt{margin\_percent} --- a non-null field that raises a
+\texttt{GraphQLError} carrying \texttt{extensions.code} when cost data is
+missing, so the tests can watch null propagation happen.
+
+\begin{minted}[caption={Catalog schema with connections, union-typed mutations, and DataLoaders (\texttt{catalog\_schema.py}).},label={lst:ch12-schema}]{python}
+"""Strawberry schema for the Northwind Robotics catalog.
+
+Demonstrates: object types, enums, input types, union-typed mutation
+results, Relay-style connections, context injection, per-request
+DataLoaders, field-level errors with extensions, and null propagation.
+"""
+
+from __future__ import annotations
+
+import base64
+import enum
+from typing import Annotated, Optional
+
+import strawberry
+from graphql import GraphQLError
+from strawberry.dataloader import DataLoader
+from strawberry.types import Info
+
+from catalog_repository import CatalogRepository, CategoryRow, ProductRow, ReviewRow
+
+MAX_PAGE_SIZE = 50
+
+
+# ---------------------------------------------------------------------------
+# Enum and context
+# ---------------------------------------------------------------------------
+
+
+@strawberry.enum
+class ProductStatus(enum.Enum):
+    ACTIVE = "active"
+    DISCONTINUED = "discontinued"
+
+
+class Context:
+    """Per-request context: one repository, one set of DataLoaders.
+
+    NOT a Strawberry type: it is constructed once per request and handed
+    to resolvers via ``info.context``. ``use_loaders`` exists only so the
+    N+1 demo can switch resolvers between naive and batched reads.
+    """
+
+    def __init__(self, repo: CatalogRepository, use_loaders: bool = True) -> None:
+        self.repo = repo
+        self.use_loaders = use_loaders
+        self.category_loader = make_category_loader(repo)
+        self.review_loader = make_review_loader(repo)
+
+
+def get_context() -> Context:
+    return Context(CatalogRepository())
+
+
+# ---------------------------------------------------------------------------
+# Object types
+# ---------------------------------------------------------------------------
+
+
+@strawberry.type
+class Category:
+    id: int
+    name: str
+    description: str
+
+
+@strawberry.type
+class Review:
+    id: int
+    rating: int
+    headline: str
+
+
+@strawberry.type
+class Product:
+    id: int
+    sku: str
+    name: str
+    unit_price_cents: int
+    stock: int
+    discontinued: bool
+    _category_id: strawberry.Private[int]
+
+    @strawberry.field
+    async def category(self, info: Info[Context, None]) -> Optional[Category]:
+        ctx = info.context
+        if ctx.use_loaders:
+            row = await ctx.category_loader.load(self._category_id)
+        else:  # naive path: one store read per product (the N in N+1)
+            row = ctx.repo.category_by_id(self._category_id)
+        if row is None:
+            return None
+        return Category(id=row.id, name=row.name, description=row.description)
+
+    @strawberry.field
+    async def reviews(self, info: Info[Context, None]) -> list[Review]:
+        ctx = info.context
+        if ctx.use_loaders:
+            rows = await ctx.review_loader.load(self.id)
+        else:  # naive path
+            rows = ctx.repo.reviews_for_product(self.id)
+        return [Review(id=r.id, rating=r.rating, headline=r.headline) for r in rows]
+
+    @strawberry.field
+    def margin_percent(self, info: Info[Context, None]) -> int:
+        """NON-NULL field that errors when cost data is missing.
+
+        Raising here nulls the entire Product (null propagation), because
+        the schema promises this field is never null.
+        """
+        row = info.context.repo.product_by_id(self.id)
+        if row is None or row.unit_cost_cents is None:
+            raise GraphQLError(
+                "cost data unavailable for product",
+                extensions={"code": "COST_DATA_UNAVAILABLE"},
+            )
+        margin = row.unit_price_cents - row.unit_cost_cents
+        return round(100 * margin / row.unit_price_cents)
+
+
+def _to_product(row: ProductRow) -> Product:
+    return Product(
+        id=row.id,
+        sku=row.sku,
+        name=row.name,
+        unit_price_cents=row.unit_price_cents,
+        stock=row.stock,
+        discontinued=row.discontinued,
+        _category_id=row.category_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Relay-style connection
+# ---------------------------------------------------------------------------
+
+
+def encode_cursor(product_id: int) -> str:
+    raw = f"product:{product_id}".encode("ascii")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def decode_cursor(cursor: str) -> int:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("ascii")
+        prefix, sep, digits = raw.partition(":")
+        if prefix != "product" or sep == "":
+            raise ValueError("bad prefix")
+        return int(digits)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise GraphQLError(
+            "invalid cursor", extensions={"code": "BAD_CURSOR"}
+        ) from exc
+
+
+@strawberry.type
+class PageInfo:
+    has_next_page: bool
+    has_previous_page: bool
+    start_cursor: Optional[str]
+    end_cursor: Optional[str]
+
+
+@strawberry.type
+class ProductEdge:
+    cursor: str
+    node: Optional[Product]  # nullable: a nulled node must not void the page
+
+
+@strawberry.type
+class ProductConnection:
+    edges: list[ProductEdge]
+    page_info: PageInfo
+
+    @strawberry.field
+    def total_count(self, info: Info[Context, None]) -> int:
+        # Lazy: only costs a store read when the client asks for it.
+        return info.context.repo.total_products()
+
+
+# ---------------------------------------------------------------------------
+# Mutation payloads: typed errors via unions
+# ---------------------------------------------------------------------------
+
+
+@strawberry.input
+class AddReviewInput:
+    product_id: int
+    rating: int
+    headline: str
+
+
+@strawberry.type
+class AddReviewSuccess:
+    review: Review
+
+
+@strawberry.type
+class AddReviewError:
+    message: str
+    code: str
+
+
+AddReviewResult = Annotated[
+    AddReviewSuccess | AddReviewError, strawberry.union("AddReviewResult")
+]
+
+
+# ---------------------------------------------------------------------------
+# Root operations
+# ---------------------------------------------------------------------------
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    async def products(
+        self,
+        info: Info[Context, None],
+        first: int = 10,
+        after: Optional[str] = None,
+        status: Optional[ProductStatus] = None,
+    ) -> Optional[ProductConnection]:  # nullable root: errors stay partial
+        if not 1 <= first <= MAX_PAGE_SIZE:
+            raise GraphQLError(
+                f"first must be between 1 and {MAX_PAGE_SIZE}",
+                extensions={"code": "BAD_PAGINATION_ARGUMENT"},
+            )
+        after_id = decode_cursor(after) if after else 0
+        repo = info.context.repo
+        rows, has_next = repo.products_page(after_id, first)
+        if status is ProductStatus.ACTIVE:
+            rows = [r for r in rows if not r.discontinued]
+        elif status is ProductStatus.DISCONTINUED:
+            rows = [r for r in rows if r.discontinued]
+        edges = [
+            ProductEdge(cursor=encode_cursor(r.id), node=_to_product(r)) for r in rows
+        ]
+        return ProductConnection(
+            edges=edges,
+            page_info=PageInfo(
+                has_next_page=has_next,
+                has_previous_page=after_id > 0,
+                start_cursor=edges[0].cursor if edges else None,
+                end_cursor=edges[-1].cursor if edges else None,
+            ),
+        )
+
+    @strawberry.field
+    async def product(self, info: Info[Context, None], product_id: int) -> Optional[Product]:
+        row = info.context.repo.product_by_id(product_id)
+        return _to_product(row) if row else None
+
+
+@strawberry.type
+class Mutation:
+    @strawberry.mutation
+    def add_review(
+        self, info: Info[Context, None], input: AddReviewInput
+    ) -> AddReviewResult:
+        if not 1 <= input.rating <= 5:
+            return AddReviewError(
+                message="rating must be between 1 and 5",
+                code="RATING_OUT_OF_RANGE",
+            )
+        headline = input.headline.strip()
+        if not headline:
+            return AddReviewError(
+                message="headline must not be empty", code="EMPTY_HEADLINE"
+            )
+        row = info.context.repo.add_review(input.product_id, input.rating, headline)
+        if row is None:
+            return AddReviewError(
+                message=f"product {input.product_id} not found",
+                code="PRODUCT_NOT_FOUND",
+            )
+        return AddReviewSuccess(
+            review=Review(id=row.id, rating=row.rating, headline=row.headline)
+        )
+
+
+# ---------------------------------------------------------------------------
+# DataLoaders: one instance per request, batch + per-request cache
+# ---------------------------------------------------------------------------
+
+
+def make_category_loader(repo: CatalogRepository) -> DataLoader:
+    async def batch(keys: list[int]) -> list[Optional[CategoryRow]]:
+        # ONE store read per tick, for all keys queued this tick.
+        return repo.categories_by_ids(keys)
+
+    return DataLoader(load_fn=batch)
+
+
+def make_review_loader(repo: CatalogRepository) -> DataLoader:
+    async def batch(keys: list[int]) -> list[list[ReviewRow]]:
+        return repo.reviews_for_products(keys)
+
+    return DataLoader(load_fn=batch)
+
+
+schema = strawberry.Schema(query=Query, mutation=Mutation)
+\end{minted}
+
+Two details deserve a second look. \texttt{total\_count} is a resolver, not
+a dataclass field: it costs a store read only when the client actually
+selects \texttt{totalCount}, which is the whole philosophy of GraphQL
+cost accounting in miniature --- you pay for what you select, and the
+schema author decides what each selection costs. And
+\texttt{use\_loaders} exists \emph{only} so the next listing can flip the
+same resolvers between naive and batched store access without changing
+the query; it is a lab instrument, not a production pattern.
+
+\subsection{Listing 3: The N+1 Demonstration}
+\label{subsec:ch12-code-nplus1}
+
+Listing~\ref{lst:ch12-nplus1} executes one operation --- five products
+with category and reviews --- twice, counting store reads. The output is
+the chapter's most important four lines:
+
+\begin{minted}{text}
+GraphQL operation asks for 5 products + category + reviews
+  naive resolvers   :  11 store queries (1 page + 5 category + 5 review reads)
+  DataLoader path   :   3 store queries (1 page + 1 batched category read + 1 batched review read)
+N+1 reproduced and collapsed. OK
+\end{minted}
+
+\begin{minted}[caption={Measured N+1 reproduction and DataLoader collapse (\texttt{nplus1\_demo.py}).},label={lst:ch12-nplus1}]{python}
+"""N+1 demonstration: naive per-field store reads vs DataLoader batching.
+
+Runs the same GraphQL operation twice against the same repository and
+prints measured store-query counts. Deterministic and offline.
+
+Run:  python nplus1_demo.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from catalog_repository import CatalogRepository
+from catalog_schema import Context, schema
+
+CATALOG_QUERY = """
+query CatalogPage($first: Int!) {
+  products(first: $first) {
+    edges {
+      node {
+        name
+        category { name }
+        reviews { rating }
+      }
+    }
+  }
+}
+"""
+
+
+async def run_once(use_loaders: bool) -> tuple[int, int]:
+    """Execute CATALOG_QUERY; return (store query count, products returned)."""
+    repo = CatalogRepository()
+    context = Context(repo, use_loaders=use_loaders)
+    result = await schema.execute(
+        CATALOG_QUERY, variable_values={"first": 5}, context_value=context
+    )
+    assert result.errors is None, result.errors
+    assert result.data is not None
+    return repo.query_count, len(result.data["products"]["edges"])
+
+
+def main() -> None:
+    naive_count, n = run_and_count(use_loaders=False)
+    batched_count, _ = run_and_count(use_loaders=True)
+
+    print(f"GraphQL operation asks for {n} products + category + reviews")
+    print(f"  naive resolvers   : {naive_count:3d} store queries "
+          f"(1 page + {n} category + {n} review reads)")
+    print(f"  DataLoader path   : {batched_count:3d} store queries "
+          "(1 page + 1 batched category read + 1 batched review read)")
+    assert naive_count == 1 + 2 * n
+    assert batched_count == 3
+    print("N+1 reproduced and collapsed. OK")
+
+
+def run_and_count(use_loaders: bool) -> tuple[int, int]:
+    return asyncio.run(run_once(use_loaders))
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+Eleven reads is $1 + 2N$ at $N=5$; at \texttt{first: 50} it is 101, and
+each read is a network round trip against a real database. The DataLoader
+path is constant --- 3 reads at any page size --- because batching turns
+``one query per product'' into ``one query per \emph{relationship per
+tick}.'' The five category reads also demonstrate the cache: products 1
+and 2 share category 1, and even the naive count would be worse without
+deduplication --- the loader dedupes keys \emph{and} batches them, which
+is why the batched count is 3 rather than 5.
+
+\subsection{Listing 4: The Cost-Control Layer}
+\label{subsec:ch12-code-cost}
+
+Listing~\ref{lst:ch12-cost} is everything that stands between a curious
+client and your database: an AST-walking analyzer that computes depth and
+argument-weighted complexity, a budget enforcer, the persisted-query
+registry with the server half of the APQ handshake, an AST-based
+introspection gate, and \texttt{execute\_graphql\_http} --- the single
+entry point that wires them in the order of
+Figure~\ref{fig:ch12-pipeline}. Centralizing the pipeline in one function
+is the design decision: there is exactly one way for a document to reach
+a resolver, so there is exactly one place to audit.
+
+\begin{minted}[caption={Depth limiting, complexity estimation, persisted queries, and the execution gate (\texttt{cost\_control.py}).},label={lst:ch12-cost}]{python}
+"""Cost control for GraphQL: depth limiting, complexity estimation, and
+persisted queries (allow-list + APQ protocol), plus an HTTP-shaped
+execution entry point used by the FastAPI server and the offline tests.
+
+Everything here operates on the *parsed document* before execution, so
+expensive operations are rejected without touching a resolver.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
+
+import strawberry
+from graphql import (
+    DocumentNode,
+    FieldNode,
+    FragmentDefinitionNode,
+    FragmentSpreadNode,
+    InlineFragmentNode,
+    IntValueNode,
+    OperationDefinitionNode,
+    parse,
+)
+from graphql.error import GraphQLSyntaxError
+
+MAX_DEPTH = 7
+MAX_COMPLEXITY = 200
+DEFAULT_LIST_MULTIPLIER = 10  # assumed page size when `first` is absent
+
+
+@dataclass(frozen=True)
+class OperationMetrics:
+    depth: int
+    complexity: int
+
+
+class QueryCostExceeded(Exception):
+    """Raised when an operation breaches the depth or complexity budget."""
+
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# ---------------------------------------------------------------------------
+# Static analysis: depth + complexity
+# ---------------------------------------------------------------------------
+
+
+def _int_argument(field: FieldNode, name: str) -> Optional[int]:
+    for arg in field.arguments:
+        if arg.name.value == name and isinstance(arg.value, IntValueNode):
+            return int(arg.value.value)
+    return None
+
+
+def _list_multiplier(field: FieldNode) -> int:
+    """List-returning fields multiply the cost of their sub-selection.
+
+    Only the *top* list field multiplies (the connection); edges/node are
+    structural and cost 1, otherwise nesting multiplies twice.
+    """
+    page = _int_argument(field, "first") or _int_argument(field, "last")
+    if page is not None:
+        return max(1, min(page, 50))
+    if field.name.value in ("products", "reviews"):
+        return DEFAULT_LIST_MULTIPLIER
+    return 1
+
+
+def analyze_document(document: DocumentNode) -> OperationMetrics:
+    """Compute (max depth, total complexity) over all operations.
+
+    Depth = longest field path, fragment spreads expanded (cycles rejected).
+    Complexity = field count, with list fields multiplying their subtree by
+    the requested page size (or a conservative default).
+    """
+    fragments = {
+        d.name.value: d
+        for d in document.definitions
+        if isinstance(d, FragmentDefinitionNode)
+    }
+
+    def walk(
+        selections: tuple, depth: int, seen: frozenset[str]
+    ) -> tuple[int, int]:
+        max_depth, cost = depth, 0
+        for sel in selections:
+            if isinstance(sel, FieldNode):
+                child_depth, child_cost = (
+                    walk(sel.selection_set.selections, depth + 1, frozenset())
+                    if sel.selection_set
+                    else (depth + 1, 0)
+                )
+                cost += 1 + _list_multiplier(sel) * child_cost
+                max_depth = max(max_depth, child_depth)
+            elif isinstance(sel, InlineFragmentNode):
+                d, c = walk(sel.selection_set.selections, depth, seen)
+                cost += c
+                max_depth = max(max_depth, d)
+            elif isinstance(sel, FragmentSpreadNode):
+                name = sel.name.value
+                if name in seen or name not in fragments:
+                    raise QueryCostExceeded(
+                        f"invalid fragment spread: {name}", "BAD_FRAGMENT"
+                    )
+                d, c = walk(
+                    fragments[name].selection_set.selections, depth, seen | {name}
+                )
+                cost += c
+                max_depth = max(max_depth, d)
+        return max_depth, cost
+
+    worst = OperationMetrics(depth=0, complexity=0)
+    for definition in document.definitions:
+        if isinstance(definition, OperationDefinitionNode):
+            d, c = walk(definition.selection_set.selections, 0, frozenset())
+            worst = OperationMetrics(max(worst.depth, d), max(worst.complexity, c))
+    return worst
+
+
+def enforce_cost_budget(
+    document: DocumentNode, max_depth: int = MAX_DEPTH, max_cost: int = MAX_COMPLEXITY
+) -> OperationMetrics:
+    metrics = analyze_document(document)
+    if metrics.depth > max_depth:
+        raise QueryCostExceeded(
+            f"query depth {metrics.depth} exceeds limit {max_depth}",
+            "DEPTH_LIMIT_EXCEEDED",
+        )
+    if metrics.complexity > max_cost:
+        raise QueryCostExceeded(
+            f"query complexity {metrics.complexity} exceeds limit {max_cost}",
+            "COMPLEXITY_LIMIT_EXCEEDED",
+        )
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Persisted queries: allow-list registry + APQ resolution
+# ---------------------------------------------------------------------------
+
+
+class ApqError(Exception):
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class PersistedQueryRegistry:
+    """Allow-list of pre-registered operation documents keyed by SHA-256."""
+
+    def __init__(self) -> None:
+        self._by_hash: dict[str, str] = {}
+
+    def register(self, document: str) -> str:
+        digest = hashlib.sha256(document.encode("utf-8")).hexdigest()
+        self._by_hash[digest] = document
+        return digest
+
+    def get(self, digest: str) -> Optional[str]:
+        return self._by_hash.get(digest)
+
+
+def resolve_document(payload: dict[str, Any], registry: PersistedQueryRegistry) -> str:
+    """Resolve the operation text from a GraphQL-over-HTTP payload.
+
+    Implements the APQ flow server side: a hash-only payload must already
+    be registered; a query+hash payload is verified against its hash and
+    then registered.
+    """
+    query = payload.get("query")
+    extensions = payload.get("extensions") or {}
+    persisted = extensions.get("persistedQuery") or {}
+    digest = persisted.get("sha256Hash")
+
+    if digest is None:
+        if not query:
+            raise ApqError("no query provided", "BAD_REQUEST")
+        return query
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ApqError("malformed persistedQuery hash", "BAD_REQUEST")
+    if query is None:
+        stored = registry.get(digest)
+        if stored is None:
+            raise ApqError("persisted query not found", "PersistedQueryNotFound")
+        return stored
+    actual = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    if actual != digest:
+        raise ApqError("provided hash does not match query", "PersistedQueryMismatch")
+    registry.register(query)
+    return query
+
+
+def uses_introspection(document: DocumentNode) -> bool:
+    """True if any selected field is a meta field (__schema / __type).
+
+    AST-based, not substring-based: aliases and fragments cannot hide it.
+    (``__typename`` is excluded: it is cheap and used by client caches.)
+    """
+    def walk(selections: tuple) -> bool:
+        for sel in selections:
+            if isinstance(sel, FieldNode):
+                if sel.name.value in ("__schema", "__type"):
+                    return True
+                if sel.selection_set and walk(sel.selection_set.selections):
+                    return True
+            elif isinstance(sel, (InlineFragmentNode, FragmentDefinitionNode)):
+                if walk(sel.selection_set.selections):
+                    return True
+        return False
+
+    for definition in document.definitions:
+        if hasattr(definition, "selection_set"):
+            if walk(tuple(definition.selection_set.selections)):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# HTTP-shaped execution entry point (used by server.py and tests)
+# ---------------------------------------------------------------------------
+
+
+def _error_body(message: str, code: str) -> dict[str, Any]:
+    return {"errors": [{"message": message, "extensions": {"code": code}}]}
+
+
+async def execute_graphql_http(
+    payload: dict[str, Any],
+    *,
+    schema: strawberry.Schema,
+    registry: PersistedQueryRegistry,
+    context_factory: Callable[[], Any],
+    max_depth: int = MAX_DEPTH,
+    max_cost: int = MAX_COMPLEXITY,
+    allow_introspection: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    """Parse -> resolve persisted -> budget-check -> execute.
+
+    Returns (HTTP status, response body) with GraphQL semantics: execution
+    errors are HTTP 200 with a populated ``errors`` array; malformed or
+    over-budget requests are HTTP 400.
+    """
+    try:
+        document_text = resolve_document(payload, registry)
+    except ApqError as exc:
+        # APQ misses are HTTP 200 per the protocol: the client retries.
+        status = 200 if exc.code.startswith("PersistedQuery") else 400
+        return status, _error_body(str(exc), exc.code)
+
+    try:
+        document = parse(document_text)
+    except GraphQLSyntaxError as exc:
+        return 400, _error_body(f"syntax error: {exc.message}", "GRAPHQL_PARSE_FAILED")
+
+    if not allow_introspection and uses_introspection(document):
+        return 400, _error_body(
+            "introspection is disabled", "INTROSPECTION_DISABLED"
+        )
+
+    try:
+        enforce_cost_budget(document, max_depth, max_cost)
+    except QueryCostExceeded as exc:
+        return 400, _error_body(str(exc), exc.code)
+
+    result = await schema.execute(
+        document_text,
+        variable_values=payload.get("variables"),
+        operation_name=payload.get("operationName"),
+        context_value=context_factory(),
+    )
+    body: dict[str, Any] = {"data": result.data}
+    if result.errors:
+        body["errors"] = [err.formatted for err in result.errors]
+    return 200, body
+\end{minted}
+
+The complexity estimator encodes one deliberate modeling choice:
+\texttt{\_list\_multiplier} charges the \emph{connection} field
+(\texttt{products}) for its requested page size but treats the structural
+\texttt{edges}/\texttt{node} wrappers as cost 1 --- otherwise nesting
+multiplies twice and a modest \texttt{first: 2} query reads as cost 441.
+Cost models are heuristics with adversaries; calibrate them against real
+traffic and keep the timeout backstop armed.
+
+\subsection{Listing 5: The FastAPI Host}
+\label{subsec:ch12-code-server}
+
+The server (Listing~\ref{lst:ch12-server}) is thin by design: parse JSON,
+call \texttt{execute\_graphql\_http}, return. Introspection policy is an
+environment flag defaulting to \emph{off}; the registry is seeded with the
+mobile app's catalog operation so allow-listed traffic never pays the APQ
+round trip. There is no GraphQL router magic here on purpose --- when the
+endpoint is thirty lines you own, the security review is a short meeting.
+
+\begin{minted}[caption={FastAPI host with introspection gating and a seeded allow-list (\texttt{server.py}).},label={lst:ch12-server}]{python}
+"""FastAPI host for the catalog schema.
+
+The HTTP layer is deliberately thin: all GraphQL policy (persisted-query
+resolution, depth/complexity budgets, execution) lives in cost_control.py
+so it is testable without a web framework. Introspection is gated by an
+explicit policy flag, never by "we forgot".
+
+Run (dev only):  uvicorn server:app --port 8000
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from catalog_repository import CatalogRepository
+from catalog_schema import Context, schema
+from cost_control import PersistedQueryRegistry, execute_graphql_http
+
+INTROSPECTION_ENABLED = os.environ.get("NWR_INTROSPECTION", "off") == "on"
+
+_registry = PersistedQueryRegistry()
+# Pre-register the operations the mobile app ships with (allow-list seed).
+_CATALOG_OP = """
+query CatalogPage($first: Int!) {
+  products(first: $first) {
+    edges { node { name category { name } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+CATALOG_OP_HASH = _registry.register(_CATALOG_OP)
+
+
+def _context_factory() -> Context:
+    # One repository + one set of DataLoaders per request.
+    return Context(CatalogRepository())
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Catalog", version="1.0.0")
+
+    @app.post("/graphql")
+    async def graphql_endpoint(request: Request) -> JSONResponse:
+        payload: dict[str, Any] = await request.json()
+        status, body = await execute_graphql_http(
+            payload,
+            schema=schema,
+            registry=_registry,
+            context_factory=_context_factory,
+            allow_introspection=INTROSPECTION_ENABLED,
+        )
+        return JSONResponse(body, status_code=status)
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    return app
+
+
+app = create_app()
+\end{minted}
+
+\subsection{Listing 6: The httpx Client}
+\label{subsec:ch12-code-client}
+
+Listing~\ref{lst:ch12-client} is the client half of the contract. It
+separates the three failure channels the wire shape creates:
+\texttt{GraphQLTransportError} for transport failure and 5xx,
+\texttt{GraphQLFieldErrors} for requests that never executed (4xx) and
+for callers who prefer exceptions, and a returned
+\texttt{GraphQLResponse} carrying \texttt{data} \emph{and}
+\texttt{errors} together for the partial-success case --- the client
+library does not get to decide whether partial data is usable; the
+application does. \texttt{execute\_persisted} implements the APQ
+handshake: hash first, retry with full text only on
+\texttt{PersistedQueryNotFound}. The demo runs entirely in-process through
+\texttt{httpx.ASGITransport} \cite{httpxdocs}: real HTTP semantics, zero
+sockets.
+
+\begin{minted}[caption={GraphQL-over-HTTP client with variables, error channels, and APQ (\texttt{graphql\_client.py}).},label={lst:ch12-client}]{python}
+"""GraphQL-over-HTTP client with variables, error handling, and APQ.
+
+Transport is injected, so the demo below runs fully offline against the
+in-process FastAPI app (httpx.ASGITransport) -- no socket is opened.
+
+Run:  python graphql_client.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any, Optional
+
+import httpx
+
+GRAPHQL_PATH = "/graphql"
+
+
+class GraphQLTransportError(Exception):
+    """Network failure or non-GraphQL HTTP error (5xx, timeouts)."""
+
+
+class GraphQLFieldErrors(Exception):
+    """The response carried a populated ``errors`` array (HTTP 200)."""
+
+    def __init__(self, errors: list[dict[str, Any]], data: Any) -> None:
+        messages = [e.get("message", "?") for e in errors]
+        super().__init__("; ".join(messages))
+        self.errors = errors
+        self.data = data  # partial data may still be present
+
+
+@dataclass(frozen=True)
+class GraphQLResponse:
+    data: Any
+    errors: list[dict[str, Any]]
+
+
+class GraphQLClient:
+    def __init__(self, base_url: str, transport: Optional[httpx.AsyncBaseTransport] = None,
+                 timeout: float = 10.0) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=base_url, transport=transport, timeout=timeout
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "GraphQLClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()
+
+    async def execute(
+        self,
+        query: str,
+        variables: Optional[dict[str, Any]] = None,
+        operation_name: Optional[str] = None,
+    ) -> GraphQLResponse:
+        payload: dict[str, Any] = {"query": query}
+        if variables is not None:
+            payload["variables"] = variables
+        if operation_name is not None:
+            payload["operationName"] = operation_name
+        return await self._post(payload)
+
+    async def execute_persisted(
+        self, query: str, variables: Optional[dict[str, Any]] = None
+    ) -> GraphQLResponse:
+        """Automatic Persisted Queries: hash first, retry with full text
+        only when the server answers PersistedQueryNotFound."""
+        digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+        ext = {"persistedQuery": {"version": 1, "sha256Hash": digest}}
+        first = await self._post({"extensions": ext, "variables": variables or {}})
+        if not self._is_apq_miss(first):
+            return first
+        # Retry once, sending query text + hash so the server can register it.
+        return await self._post(
+            {"query": query, "extensions": ext, "variables": variables or {}}
+        )
+
+    @staticmethod
+    def _is_apq_miss(response: GraphQLResponse) -> bool:
+        return any(
+            (e.get("extensions") or {}).get("code") == "PersistedQueryNotFound"
+            for e in response.errors
+        )
+
+    async def _post(self, payload: dict[str, Any]) -> GraphQLResponse:
+        try:
+            response = await self._client.post(
+                GRAPHQL_PATH,
+                content=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.HTTPError as exc:
+            raise GraphQLTransportError(f"transport failure: {exc}") from exc
+        if response.status_code >= 500:
+            raise GraphQLTransportError(f"server error: HTTP {response.status_code}")
+        body = response.json()
+        errors = body.get("errors") or []
+        # 4xx here means the request never executed (parse/cost rejection).
+        if response.status_code >= 400:
+            raise GraphQLFieldErrors(errors, data=None)
+        return GraphQLResponse(data=body.get("data"), errors=errors)
+
+
+CATALOG_QUERY = """
+query CatalogPage($first: Int!) {
+  products(first: $first) {
+    edges { node { name category { name } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+async def demo() -> None:
+    import logging
+
+    from server import create_app  # in-process app: zero network
+
+    # Strawberry logs every field error; keep the demo output readable.
+    logging.getLogger("strawberry.execution").setLevel(logging.CRITICAL)
+
+    transport = httpx.ASGITransport(app=create_app())
+    async with GraphQLClient("http://testserver", transport=transport) as client:
+        # 1. Plain query with variables.
+        page = await client.execute(CATALOG_QUERY, variables={"first": 2})
+        edges = page.data["products"]["edges"]
+        print(f"plain query   : {len(edges)} products, "
+              f"hasNextPage={page.data['products']['pageInfo']['hasNextPage']}")
+
+        # 2. APQ: first call misses, second is served hash-only.
+        await client.execute_persisted(CATALOG_QUERY, variables={"first": 2})
+        cached = await client.execute_persisted(CATALOG_QUERY, variables={"first": 3})
+        print(f"APQ round trip: {len(cached.data['products']['edges'])} products")
+
+        # 3. Field-level error: partial data + errors, HTTP 200.
+        bad = await client.execute(
+            "query { product(productId: 4) { name marginPercent } }"
+        )
+        print(f"field error   : data={bad.data} "
+              f"code={bad.errors[0]['extensions']['code']}")
+
+        # 4. Rejected request: over-depth query is refused pre-execution.
+        try:
+            deep = (
+                "query Deep { products { edges { node { "
+                + "reviews { " * 12 + "rating" + " }" * 12
+                + " } } } }"
+            )
+            await client.execute(deep)
+        except GraphQLFieldErrors as exc:
+            print(f"depth rejected: {exc.errors[0]['extensions']['code']}")
+
+
+if __name__ == "__main__":
+    asyncio.run(demo())
+\end{minted}
+
+Run it and you get the whole pipeline in four lines of output --- a
+paginated query, an APQ round trip (miss, register, hash-only hit), a
+field error arriving as partial data, and a depth rejection:
+
+\begin{minted}{text}
+plain query   : 2 products, hasNextPage=True
+APQ round trip: 3 products
+field error   : data={'product': None} code=COST_DATA_UNAVAILABLE
+depth rejected: DEPTH_LIMIT_EXCEEDED
+\end{minted}
+
+\subsection{Listing 7: The Test Suite}
+\label{subsec:ch12-code-tests}
+
+Listing~\ref{lst:ch12-tests} is 21 tests, all in-process via
+\texttt{schema.execute} or \texttt{execute\_graphql\_http}, driven by
+\texttt{asyncio.run} so no pytest plugins are required. It covers the
+contract surface a reviewer should demand: connection walking without
+gaps or duplicates, cursor forgery, aliases and \texttt{@skip}, both
+halves of null propagation (non-null error voids the product; the
+nullable list element voids only itself), all four typed mutation errors,
+the $N{+}1$ counts as \emph{assertions} (11 naive, 3 batched), depth and
+complexity rejection, the full APQ handshake including hash mismatch, and
+introspection denied by default and served when explicitly gated on.
+
+\begin{minted}[caption={In-process test suite: 21 tests, zero network (\texttt{test\_catalog.py}).},label={lst:ch12-tests}]{python}
+"""In-process test suite for the Northwind Robotics GraphQL catalog.
+
+No sockets, no network, deterministic seed data. Async execution is driven
+with asyncio.run so no pytest plugins are required.
+
+Run:  pytest test_catalog.py -q
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Optional
+
+import pytest
+
+from catalog_repository import CatalogRepository
+from catalog_schema import Context, schema
+from cost_control import (
+    PersistedQueryRegistry,
+    analyze_document,
+    enforce_cost_budget,
+    QueryCostExceeded,
+    execute_graphql_http,
+)
+from graphql import parse
+
+logging.getLogger("strawberry.execution").setLevel(logging.CRITICAL)
+
+
+def run(
+    query: str,
+    variables: Optional[dict[str, Any]] = None,
+    repo: Optional[CatalogRepository] = None,
+):
+    """Execute against a fresh repository unless one is supplied."""
+    repo = repo or CatalogRepository()
+    context = Context(repo)
+    result = asyncio.run(
+        schema.execute(query, variable_values=variables, context_value=context)
+    )
+    return result, repo
+
+
+# ---------------------------------------------------------------------------
+# Queries, variables, aliases, fragments
+# ---------------------------------------------------------------------------
+
+
+def test_products_connection_first_page() -> None:
+    result, _ = run(
+        """
+        query Page($first: Int!) {
+          products(first: $first) {
+            edges { cursor node { sku name } }
+            pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+            totalCount
+          }
+        }
+        """,
+        variables={"first": 2},
+    )
+    assert result.errors is None
+    data = result.data["products"]
+    assert [e["node"]["sku"] for e in data["edges"]] == ["NWR-ACT-100", "NWR-ACT-200"]
+    assert data["pageInfo"]["hasNextPage"] is True
+    assert data["pageInfo"]["hasPreviousPage"] is False
+    assert data["totalCount"] == 5
+
+
+def test_connection_walk_is_gapless() -> None:
+    """Walking by cursor visits every product exactly once."""
+    seen: list[str] = []
+    after: Optional[str] = None
+    for _ in range(10):
+        result, _ = run(
+            """
+            query Walk($first: Int!, $after: String) {
+              products(first: $first, after: $after) {
+                edges { cursor node { sku } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+            """,
+            variables={"first": 2, "after": after},
+        )
+        assert result.errors is None
+        page = result.data["products"]
+        seen.extend(e["node"]["sku"] for e in page["edges"])
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = page["pageInfo"]["endCursor"]
+    assert seen == [
+        "NWR-ACT-100", "NWR-ACT-200", "NWR-SEN-310", "NWR-SEN-410", "NWR-CTL-900",
+    ]
+
+
+def test_invalid_cursor_returns_field_error() -> None:
+    result, _ = run(
+        'query { products(first: 2, after: "%%%") { edges { cursor } } }'
+    )
+    assert result.data == {"products": None}
+    assert result.errors is not None
+    assert result.errors[0].extensions["code"] == "BAD_CURSOR"
+
+
+def test_status_filter_and_alias() -> None:
+    result, _ = run(
+        """
+        query {
+          active: products(first: 10, status: ACTIVE) { edges { node { sku } } }
+          retired: products(first: 10, status: DISCONTINUED) {
+            edges { node { sku } }
+          }
+        }
+        """
+    )
+    assert result.errors is None
+    assert [e["node"]["sku"] for e in result.data["active"]["edges"]] == [
+        "NWR-ACT-100", "NWR-ACT-200", "NWR-SEN-310", "NWR-CTL-900",
+    ]
+    assert [e["node"]["sku"] for e in result.data["retired"]["edges"]] == [
+        "NWR-SEN-410"
+    ]
+
+
+def test_fragments_and_skip_directive() -> None:
+    result, _ = run(
+        """
+        query F($withReviews: Boolean!) {
+          product(productId: 1) {
+            ...ProductCard
+          }
+        }
+        fragment ProductCard on Product {
+          name
+          reviews @skip(if: $withReviews) { rating }
+        }
+        """,
+        variables={"withReviews": True},
+    )
+    assert result.errors is None
+    assert result.data == {"product": {"name": "Servo Linear Actuator 100mm"}}
+
+
+# ---------------------------------------------------------------------------
+# Nullability propagation on errors
+# ---------------------------------------------------------------------------
+
+
+def test_non_null_field_error_nulls_the_product() -> None:
+    """marginPercent is Int! and raises for product 4 (no cost data).
+
+    Per the spec's null-propagation rule the error bubbles to the nearest
+    nullable position: the whole `product` field becomes null, and the
+    response is partial: HTTP 200 with data + errors.
+    """
+    result, _ = run("query { product(productId: 4) { name marginPercent } }")
+    assert result.data == {"product": None}
+    assert result.errors is not None
+    error = result.errors[0]
+    assert error.path == ["product", "marginPercent"]
+    assert error.extensions["code"] == "COST_DATA_UNAVAILABLE"
+
+
+def test_nullable_sibling_survives_in_list() -> None:
+    """Inside a nullable list element, only that element nulls out."""
+    result, _ = run(
+        """
+        query {
+          products(first: 5) {
+            edges { node { sku marginPercent } }
+          }
+        }
+        """
+    )
+    assert result.errors is not None
+    nodes = [e["node"] for e in result.data["products"]["edges"]]
+    assert nodes[3] is None  # product 4 nulled by propagation
+    assert nodes[0]["marginPercent"] == 54  # siblings intact
+
+
+# ---------------------------------------------------------------------------
+# Mutations: typed errors via union payloads
+# ---------------------------------------------------------------------------
+
+
+ADD_REVIEW = """
+mutation Add($input: AddReviewInput!) {
+  addReview(input: $input) {
+    __typename
+    ... on AddReviewSuccess { review { id rating headline } }
+    ... on AddReviewError { code message }
+  }
+}
+"""
+
+
+def test_add_review_success() -> None:
+    result, _ = run(
+        ADD_REVIEW,
+        variables={"input": {"productId": 2, "rating": 4, "headline": "Solid"}},
+    )
+    assert result.errors is None
+    payload = result.data["addReview"]
+    assert payload["__typename"] == "AddReviewSuccess"
+    assert payload["review"]["rating"] == 4
+
+
+@pytest.mark.parametrize(
+    "input_vars, code",
+    [
+        ({"productId": 2, "rating": 0, "headline": "Bad"}, "RATING_OUT_OF_RANGE"),
+        ({"productId": 2, "rating": 6, "headline": "Bad"}, "RATING_OUT_OF_RANGE"),
+        ({"productId": 2, "rating": 5, "headline": "   "}, "EMPTY_HEADLINE"),
+        ({"productId": 999, "rating": 5, "headline": "Ghost"}, "PRODUCT_NOT_FOUND"),
+    ],
+)
+def test_add_review_typed_errors(input_vars: dict[str, Any], code: str) -> None:
+    result, _ = run(ADD_REVIEW, variables={"input": input_vars})
+    assert result.errors is None  # expected failure is data, not an exception
+    payload = result.data["addReview"]
+    assert payload["__typename"] == "AddReviewError"
+    assert payload["code"] == code
+
+
+# ---------------------------------------------------------------------------
+# N+1: measured query counts
+# ---------------------------------------------------------------------------
+
+
+CATALOG_QUERY = """
+query CatalogPage($first: Int!) {
+  products(first: $first) {
+    edges { node { name category { name } reviews { rating } } }
+  }
+}
+"""
+
+
+def _count_queries(use_loaders: bool) -> int:
+    repo = CatalogRepository()
+    context = Context(repo, use_loaders=use_loaders)
+    result = asyncio.run(
+        schema.execute(
+            CATALOG_QUERY, variable_values={"first": 5}, context_value=context
+        )
+    )
+    assert result.errors is None
+    return repo.query_count
+
+
+def test_nplus1_naive_explosion() -> None:
+    assert _count_queries(use_loaders=False) == 11  # 1 + 5 + 5
+
+
+def test_dataloader_collapses_nplus1() -> None:
+    assert _count_queries(use_loaders=True) == 3  # 1 + 1 + 1
+
+
+# ---------------------------------------------------------------------------
+# Cost control: depth, complexity, persisted queries
+# ---------------------------------------------------------------------------
+
+
+def test_depth_limiter_rejects_deep_query() -> None:
+    deep = (
+        "query Deep { products { edges { node { "
+        + "reviews { " * 12 + "rating" + " }" * 12 + " } } } }"
+    )
+    with pytest.raises(QueryCostExceeded) as excinfo:
+        enforce_cost_budget(parse(deep))
+    assert excinfo.value.code == "DEPTH_LIMIT_EXCEEDED"
+
+
+def test_complexity_scales_with_page_size() -> None:
+    small = analyze_document(
+        parse("query { products(first: 2) { edges { node { name } } } }")
+    )
+    large = analyze_document(
+        parse("query { products(first: 50) { edges { node { name } } } }")
+    )
+    assert large.complexity > small.complexity
+
+
+def test_complexity_limit_rejects_god_query() -> None:
+    god = "query { " + " ".join(
+        f"p{i}: products(first: 50) {{ edges {{ node {{ name reviews {{ rating }} }} }} }}"
+        for i in range(8)
+    ) + " }"
+    with pytest.raises(QueryCostExceeded) as excinfo:
+        enforce_cost_budget(parse(god))
+    assert excinfo.value.code == "COMPLEXITY_LIMIT_EXCEEDED"
+
+
+def test_persisted_query_apq_flow() -> None:
+    registry = PersistedQueryRegistry()
+    factory = lambda: Context(CatalogRepository())  # noqa: E731
+
+    async def apq_round_trip() -> tuple[int, dict[str, Any]]:
+        import hashlib
+
+        digest = hashlib.sha256(CATALOG_QUERY.encode("utf-8")).hexdigest()
+        ext = {"persistedQuery": {"version": 1, "sha256Hash": digest}}
+        # Step 1: hash only -> PersistedQueryNotFound (HTTP 200)
+        status, body = await execute_graphql_http(
+            {"extensions": ext, "variables": {"first": 2}},
+            schema=schema, registry=registry, context_factory=factory,
+        )
+        assert status == 200
+        assert body["errors"][0]["extensions"]["code"] == "PersistedQueryNotFound"
+        # Step 2: query + hash -> executes and registers
+        return await execute_graphql_http(
+            {"query": CATALOG_QUERY, "extensions": ext, "variables": {"first": 2}},
+            schema=schema, registry=registry, context_factory=factory,
+        )
+
+    status, body = asyncio.run(apq_round_trip())
+    assert status == 200
+    assert "errors" not in body
+    assert len(body["data"]["products"]["edges"]) == 2
+
+
+def test_persisted_query_hash_mismatch_rejected() -> None:
+    registry = PersistedQueryRegistry()
+
+    async def mismatch() -> tuple[int, dict[str, Any]]:
+        return await execute_graphql_http(
+            {
+                "query": "query { product(productId: 1) { name } }",
+                "extensions": {"persistedQuery": {"sha256Hash": "0" * 64}},
+            },
+            schema=schema,
+            registry=registry,
+            context_factory=lambda: Context(CatalogRepository()),
+        )
+
+    status, body = asyncio.run(mismatch())
+    assert status == 200
+    assert body["errors"][0]["extensions"]["code"] == "PersistedQueryMismatch"
+
+
+def test_introspection_blocked_by_default() -> None:
+    async def probe() -> tuple[int, dict[str, Any]]:
+        return await execute_graphql_http(
+            {"query": "{ __schema { types { name } } }"},
+            schema=schema,
+            registry=PersistedQueryRegistry(),
+            context_factory=lambda: Context(CatalogRepository()),
+        )
+
+    status, body = asyncio.run(probe())
+    assert status == 400
+    assert body["errors"][0]["extensions"]["code"] == "INTROSPECTION_DISABLED"
+
+
+def test_introspection_allowed_when_gated_on() -> None:
+    async def probe() -> tuple[int, dict[str, Any]]:
+        return await execute_graphql_http(
+            {"query": "{ __schema { queryType { name } } }"},
+            schema=schema,
+            registry=PersistedQueryRegistry(),
+            context_factory=lambda: Context(CatalogRepository()),
+            allow_introspection=True,
+        )
+
+    status, body = asyncio.run(probe())
+    assert status == 200
+    assert body["data"]["__schema"]["queryType"]["name"] == "Query"
+\end{minted}
+
+\begin{minted}{text}
+.....................                                                    [100%]
+21 passed in 2.78s
+\end{minted}
+
+%% ============================================================================
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch12-pitfalls}
+
+Each entry names the failure mode, why it happens, and the smallest
+durable fix. Most are defaults --- GraphQL ships insecure-by-default in
+the specific sense that its ergonomics and its guardrails are both
+opt-in.
+
+\subsection{N+1 by Construction}
+\textbf{Failure.} Every relationship field performs its own store read;
+latency and database load scale with page size, not with request count.
+\textbf{Why.} Field-level resolution is the default physics; nothing in a
+naive resolver hints it is one of fifty identical calls.
+\textbf{Fix.} DataLoader per request, batch reads in the repository,
+\emph{count queries in tests} --- our suite asserts 3, not ``fast.''
+
+\subsection{Open Introspection in Production}
+\textbf{Failure.} \texttt{\_\_schema} answers anyone who asks with your
+complete type inventory. \textbf{Why.} Frameworks enable it by default
+because GraphiQL needs it. \textbf{Fix.} Gate it at the validation layer
+(AST check, not substring), default off in production, on in development;
+treat the schema as an asset with an audience.
+
+\subsection{Unlimited Depth and Complexity}
+\textbf{Failure.} A cyclic traversal or a \texttt{first: 10000} god-query
+pins the executor and the database. \textbf{Why.} The client chooses the
+work; unguarded servers accept all of it. \textbf{Fix.} Static depth and
+argument-weighted complexity budgets between parse and execution, plus
+resolver timeouts for estimation errors.
+
+\subsection{Treating GraphQL Errors as HTTP 500 Only}
+\textbf{Failure.} The client checks \texttt{status\_code}, sees 200,
+renders \texttt{data.product.name} --- which is \texttt{null} --- and the
+stack trace ships to a user. Or the inverse: any \texttt{errors} entry
+discards a usable partial page. \textbf{Why.} Two error channels with
+different semantics, and REST instincts cover only one. \textbf{Fix.}
+Client libraries expose transport, field-error, and partial-data as
+distinct outcomes (Listing~\ref{lst:ch12-client}); clients render partial
+data where the schema's nullability says it is safe.
+
+\subsection{Schema Equals Database Schema}
+\textbf{Failure.} Tables are exported verbatim as types; every
+re-normalization is a breaking API change; internal columns become public
+surface. \textbf{Why.} Code generation from the ORM is ten minutes of
+work. \textbf{Fix.} Design the schema as the \emph{product contract}
+--- client-shaped, not table-shaped --- and let resolvers be the
+anti-corruption layer. Our \texttt{Product} hides
+\texttt{category\_id} (a storage detail) behind \texttt{category} (a
+concept).
+
+\subsection{God-Queries from Your Own Clients}
+\textbf{Failure.} One team's dashboard composes a 40-field, depth-9
+operation that runs every 30 seconds from every open browser; the
+incident review blames ``traffic.'' \textbf{Why.} Composition is the
+feature; nobody budgets it. \textbf{Fix.} Persisted queries for first-party
+clients (the set of operations is known at build time), per-client cost
+budgets, and complexity telemetry per operation name so the expensive
+ones have owners.
+
+\subsection{DataLoader Shared Across Requests}
+\textbf{Failure.} A module-level loader caches user A's record and serves
+it to user B. \textbf{Why.} The cache is the feature; its scope is the
+footgun --- it must die with the request. \textbf{Fix.} Construct loaders
+in the context factory, one set per request, as
+Listing~\ref{lst:ch12-schema} does; never in module scope.
+
+\subsection{Bypassing the HTTP Cache Without a Plan}
+\textbf{Failure.} Everything is POST \texttt{/graphql}; the CDN is a
+pass-through; a product launch melts the origin that REST would have
+served from cache. \textbf{Why.} The default GraphQL-over-HTTP mapping
+discards the URL-as-cache-key. \textbf{Fix.} Decide deliberately: APQ
+over GET restores cache keys for read-heavy public traffic; private,
+per-user data was never CDN-cacheable anyway --- but know which you are
+serving before you choose the transport \cite{rfc9110}.
+
+%% ============================================================================
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch12-lab}
+
+\subsection{Lab: Build, Break, and Harden the Catalog API}
+
+Four hours, one Windows workstation, zero network. Work in
+\texttt{C:\textbackslash{}training\textbackslash{}graphql\_lab}.
+
+\begin{enumerate}
+  \item \textbf{Stand up the lab.} Create the six files of
+        Section~\ref{sec:ch12-code}. Then:
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install "strawberry-graphql[fastapi]>=0.230" "fastapi>=0.110" "httpx>=0.27" "pytest>=8"
+pytest -q
+\end{minted}
+        All 21 tests pass. You now hold a working GraphQL service with its
+        guardrails already attached --- read them before you remove them.
+  \item \textbf{Reproduce the N+1.} Run \texttt{python nplus1\_demo.py}
+        and record the counts (11 naive, 3 batched). Then edit the schema
+        so \texttt{use\_loaders} defaults to \texttt{False} and re-run
+        \texttt{pytest}: \texttt{test\_dataloader\_collapses\_nplus1}
+        fails. Revert. You have now seen the failure as a test assertion,
+        which is the only way it will ever stay fixed.
+  \item \textbf{Find the threshold.} In a Python REPL, call
+        \texttt{analyze\_document(parse(...))} on
+        \texttt{CATALOG\_QUERY} with \texttt{first} $= 2, 10, 50$ and
+        record complexity. Then raise it until
+        \texttt{COMPLEXITY\_LIMIT\_EXCEEDED} fires. Note the page size at
+        which a \emph{legitimate} query dies --- that number is a product
+        decision, not an implementation detail.
+  \item \textbf{Break the allow-list.} Using the client, POST a hash-only
+        request for an unregistered operation and observe
+        \texttt{PersistedQueryNotFound}; then send a mismatched hash/text
+        pair and observe \texttt{PersistedQueryMismatch}. Explain in one
+        sentence why the mismatch check exists (hint: the hash is the
+        allow-list key).
+  \item \textbf{Harden the endpoint.} With introspection off, attempt
+        \texttt{\{ \_\_schema \{ types \{ name \} \} \} } and an
+        aliased variant; both must fail with
+        \texttt{INTROSPECTION\_DISABLED}. Then try the array-of-queries
+        batch attack (\texttt{[\{"query": ...\}, \{"query": ...\}, ...]})
+        against \texttt{server.py}: it is rejected (the endpoint accepts
+        only objects) --- state which control catches it and what you
+        would add if batching were a product requirement.
+  \item \textbf{Write the regression.} Add a test that walks the entire
+        connection with \texttt{first: 2} and asserts the five SKUs in
+        order with no duplicates --- compare with
+        \texttt{test\_connection\_walk\_is\_gapless}, which already does
+        this. If yours is identical, write a different one: cursor reuse
+        after a mutation that adds a review must not shift the product
+        ordering.
+\end{enumerate}
+
+\subsection{Case Study: The Introspection-Enabled Enumeration Incident}
+\label{sec:ch12-casestudy}
+
+\emph{Composite reconstruction from public incident patterns; all names,
+figures, and timelines fictionalized.}
+
+A mid-size robotics-parts marketplace --- call it Northwind Robotics'
+commerce arm --- shipped a GraphQL gateway in front of its catalog,
+pricing, and dealer-account services to feed a new mobile app. Launch
+went well. Nine weeks later, a security researcher's responsible
+disclosure landed: a complete map of every type and field in the graph,
+\emph{including two that never appeared in any shipped client} ---
+\texttt{dealerAccount \{ terms \{ creditLimitCents \} \}} and an
+undocumented \texttt{internalNotes} field on \texttt{Product}.
+
+The disclosure's reproduction steps were four lines long, and that is the
+lesson. Step one: introspection was enabled in production because nobody
+had turned it off --- GraphiQL had been ``temporarily'' exposed for the
+mobile team and the temporary flag ossified. Step two: with the field
+inventory in hand, the researcher composed valid queries against
+\texttt{dealerAccount} in minutes; field-level authorization existed on
+\emph{most} account fields, but \texttt{creditLimitCents} had been added
+in a hurry and its resolver checked only authentication, not
+dealer-scoping --- any authenticated dealer could page through every
+dealer's credit terms, with cursor pagination doing what it is designed
+to do: make enumeration complete and cheap. Step three: the gateway's
+only rate limit counted \emph{requests}; the enumeration ran inside
+array-of-queries batches of fifty, so a full exfiltration of 38{,}000
+dealer records presented to the WAF as 760 ordinary-looking POSTs over a
+weekend. Step four: the cost gate did not exist. Depth and complexity
+limits had been ticketed as ``post-launch hardening.''
+
+The remediation reads like this chapter's checklist, because this chapter
+is written from incidents like this one. Introspection and GraphiQL gated
+behind the same explicit production flag, default off. Authorization
+moved into a resolver decorator with a deny-by-default audit --- every
+field returning account data declares its required scope, and CI fails on
+undeclared fields. Array batching capped at five operations with cost
+summed across the batch. Rate limiting re-keyed from requests to
+estimated complexity units per token per minute. And the two shadow
+fields were removed from the schema, because the deepest finding was not
+a bug but a governance failure: the schema had drifted from the product
+contract, and introspection made the drift public. The total engineering
+cost of the remediation was about three engineer-weeks; the incident
+review estimated the enumeration itself at under \$50 of compute ---
+attackers get the bulk discount that your missing cost controls hand
+them.
+
+\begin{warningbox}
+Every control in the remediation was a \emph{default} somewhere waiting to
+be flipped: introspection on, batching unbounded, request-count rate
+limits, authorization-by-convention. A production GraphQL review is
+substantially a review of defaults. Write them down as explicit policy ---
+the lab's step 5 --- or the incident review will write them down for you.
+\end{warningbox}
+
+%% ============================================================================
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch12-exercises}
+
+\subsection{Recall and Comprehension}
+
+\begin{enumerate}
+  \item List the eight kinds in the GraphQL type system and give a
+        catalog-domain example of each.
+  \item Write the four list/nullability combinations for
+        \texttt{[Review]} and state, for each, what an error in one
+        element does to the response.
+  \item What are the three phases of request processing, and which
+        failure channel does each use?
+  \item Why can variables not be used to inject into the query document?
+        What injection remains possible?
+  \item In the APQ handshake, what does the client send first, what does
+        the server answer on a miss, and why is the miss an HTTP 200?
+\end{enumerate}
+
+\subsection{Application}
+
+\begin{enumerate}[resume]
+  \item Extend \texttt{catalog\_schema.py} with a
+        \texttt{Category.products} field. Predict the $N{+}1$ count for a
+        query selecting all categories and their products' names before
+        you run it; then instrument and verify.
+  \item Our estimator charges connection fields by their \texttt{first}
+        argument. Construct a query that is cheap by our estimator but
+        expensive to execute. What estimator change closes the hole, and
+        what legitimate traffic does it harm?
+  \item Implement \texttt{last}/\texttt{before} backward pagination in
+        the repository and schema. What does \texttt{hasPreviousPage}
+        require that forward pagination did not?
+  \item Add a \texttt{@deprecated} field to the schema (e.g.\ rename
+        \texttt{unitPriceCents} to \texttt{priceCents} and deprecate the
+        old one). Which client-facing guarantee of continuous evolution
+        does this exercise?
+  \item Using only Listing~\ref{lst:ch12-client}'s error channels, write
+        client logic that renders a product card from partial data when
+        \texttt{COST\_DATA\_UNAVAILABLE} is the only error, but retries
+        the operation on \texttt{GraphQLTransportError}.
+\end{enumerate}
+
+\subsection{Deep-Dive Questions}
+
+\begin{enumerate}[resume]
+  \item The specification executes mutation root fields serially but query
+        fields without ordering. Why is serial mutation execution the only
+        ordering guarantee the spec can make, and what does it imply for
+        client design?
+  \item Null propagation couples error containment to schema design.
+        Argue for and against declaring \texttt{edges: [ProductEdge!]!} in
+        a public schema. What telemetry would tell you whether you chose
+        correctly?
+  \item Persisted-query allow-lists turn an open query language into a
+        closed RPC surface. What does GraphQL still buy you under a full
+        allow-list, and what does it cost?
+  \item Our complexity model multiplies by page size at the connection
+        only. Sketch a model that also prices \emph{resolver heterogeneity}
+        (a field hitting a search index costs more than a field hitting
+        memory). Where does per-field cost metadata live in a code-first
+        schema?
+  \item Federation moves the $N{+}1$ problem from resolver-to-database to
+        gateway-to-subgraph. Does DataLoader-style batching transfer to
+        entity resolution across services? What breaks?
+\end{enumerate}
+
+%% ============================================================================
+\section{Interview Q\&A Vault}
+\label{sec:ch12-interview-vault}
+
+Ordered junior $\to$ staff. Answers are model responses at the depth a
+strong candidate gives verbally.
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=2.6em]
+  % ---- junior ----
+  \item \textbf{What is GraphQL, in one paragraph?}
+        A query language and runtime for APIs: the server publishes a
+        typed schema, the client sends an operation selecting exactly the
+        fields it needs, and the response mirrors that selection. One
+        endpoint, client-composed shapes, strong typing, introspection.
+  \item \textbf{How is a GraphQL request different from a REST request?}
+        REST addresses a resource whose shape the server fixed; GraphQL
+        POSTs a document describing the desired shape to one endpoint.
+        REST spreads a screen's data across $k$ round trips; GraphQL
+        composes it into one --- at the price of server-side cost
+        governance.
+  \item \textbf{Name the built-in scalar types.}
+        \texttt{Int}, \texttt{Float}, \texttt{String}, \texttt{Boolean},
+        \texttt{ID}. \texttt{ID} serializes as a string and means
+        ``opaque; do not parse.'' Custom scalars (e.g.\
+        \texttt{DateTime}) define their own serialization.
+  \item \textbf{What is the difference between an interface and a union?}
+        An interface declares fields every implementor must have, so you
+        can select common fields directly; a union's members share
+        nothing, so all selection goes through inline fragments. Unions
+        are the right tool for typed mutation results; interfaces for
+        genuine ``is-a'' hierarchies.
+  \item \textbf{What does the exclamation mark mean in \texttt{Int!}?}
+        Non-null: the field always resolves to a value. The subtlety is
+        the failure mode --- if a non-null field errors, the null bubbles
+        to the nearest nullable ancestor rather than stopping at the
+        field.
+  \item \textbf{What are the three operation types?}
+        Query (read), mutation (write; root fields execute serially, in
+        order), subscription (selection plus an event stream, usually
+        over WebSockets or SSE).
+  \item \textbf{What are variables and why use them?}
+        Typed arguments serialized in their own JSON object beside the
+        query. They keep the document static and cacheable, and they make
+        query-string injection structurally impossible --- there is no
+        string context to escape from.
+  \item \textbf{What is a fragment?}
+        A named, reusable selection set. With \texttt{@include(if:)} and
+        \texttt{@skip(if:)}, one cached operation can serve several UI
+        states without string-templating the query.
+  \item \textbf{What is an alias?}
+        \texttt{active: products(status: ACTIVE)} --- renames the result
+        key, letting you invoke the same field twice with different
+        arguments in one operation.
+  \item \textbf{What does a GraphQL response look like?}
+        A JSON object with \texttt{data} (mirroring the operation,
+        possibly partial or \texttt{null}) and, on field errors, an
+        \texttt{errors} array whose entries carry \texttt{message},
+        \texttt{path}, \texttt{locations}, and \texttt{extensions}.
+        Field errors arrive as HTTP 200.
+  % ---- mid ----
+  \item \textbf{Explain nullability propagation on errors.}
+        An error at a nullable field nulls that field. An error at a
+        \emph{non-null} field cannot be represented --- the type forbids
+        null --- so the error bubbles: the parent object is nulled, and
+        so on up until a nullable position absorbs it; if none does,
+        \texttt{data} itself becomes \texttt{null}. Non-null is a
+        containment policy, not a reliability claim: it says ``if this
+        fails, void my parent too.'' Design nullability from the client's
+        rendering needs.
+  \item \textbf{What is the N+1 problem in GraphQL and why is it
+        structural?}
+        Field-level resolution means every product's \texttt{category}
+        resolver runs independently: a page of $N$ products plus one page
+        query is $N{+}1$ store reads. It is structural because
+        composability --- resolvers not knowing their caller --- is the
+        feature that causes it. Our demo measures $1{+}2N$ reads naive
+        versus 3 batched at $N{=}5$.
+  \item \textbf{How does DataLoader solve N+1, and what is its caching
+        scope?}
+        Within one event-loop tick, resolvers enqueue keys instead of
+        querying; the loader dedupes keys, issues one batch read, and
+        distributes results positionally to the waiting futures. The
+        cache is \textbf{per request}: one loader instance per request,
+        built in the context factory. Sharing one across requests serves
+        stale data across user boundaries --- a security bug, not a
+        performance bug.
+  \item \textbf{Describe the Relay connection spec.}
+        A paginated field returns a connection: \texttt{edges}
+        (opaque \texttt{cursor} + \texttt{node}), \texttt{pageInfo}
+        (\texttt{hasNextPage}, \texttt{hasPreviousPage},
+        \texttt{startCursor}, \texttt{endCursor}), with
+        \texttt{first}/\texttt{after} forward and
+        \texttt{last}/\texttt{before} backward. Cursors are value-based
+        (keyset) bookmarks, computed with fetch-$p{+}1$ for
+        \texttt{hasNextPage}; server caps \texttt{first}.
+  \item \textbf{Field errors vs.\ top-level errors --- and where do typed
+        mutation errors fit?}
+        Top-level \texttt{errors} entries are exceptional failures
+        (resolver could not produce the field). Expected business
+        failures --- validation, rule rejection --- should be
+        \emph{data}: a union payload of success and error types selected
+        with inline fragments. Rule of thumb: typed errors inform the
+        user; top-level errors page the on-call.
+  \item \textbf{What goes in \texttt{extensions.code}?}
+        The machine-readable error kind ---
+        \texttt{COST\_DATA\_UNAVAILABLE}, \texttt{BAD\_CURSOR} --- so
+        clients branch on codes, not on English \texttt{message} strings.
+        It is the open extension point the spec deliberately leaves for
+        exactly this.
+  \item \textbf{How do you gate introspection, and why?}
+        Reject documents selecting \texttt{\_\_schema} or
+        \texttt{\_\_type} at the validation layer --- an AST check, not a
+        substring match, because aliases and fragments defeat substrings.
+        Why: introspection publishes your complete field inventory,
+        including fields no client ships. Off for unauthenticated
+        production traffic; on in development.
+  \item \textbf{Why is mutation execution serial?}
+        It is the specification's only ordering guarantee, made precisely
+        so multi-step writes have defined semantics: root mutation fields
+        run in document order, each seeing the previous one's effects.
+        Queries have no such guarantee and may resolve in parallel.
+  \item \textbf{What is a persisted query?}
+        A pre-registered operation identified by hash. As an allow-list
+        it closes the query language: unregistered documents never parse.
+        As APQ it is also a bandwidth optimization --- send the hash,
+        retry with full text only on \texttt{PersistedQueryNotFound}.
+  \item \textbf{Walk through the APQ protocol flow.}
+        Client sends \texttt{extensions.persistedQuery.sha256Hash} with
+        no query text. Server misses: HTTP 200 with error code
+        \texttt{PersistedQueryNotFound}. Client retries with query text
+        plus hash; server verifies the hash matches the text
+        (\texttt{PersistedQueryMismatch} if not), registers, executes.
+        Steady state: 64 bytes uphill, and hash-keyed GETs become
+        CDN-cacheable.
+  % ---- senior ----
+  \item \textbf{Design cost limiting for a public GraphQL API.}
+        Layers, firing in order: (1) parse limits (document size);
+        (2) static analysis between parse and execution --- depth cap,
+        argument-weighted complexity (list fields multiply subtree cost
+        by page size), alias and batch multipliers; (3) persisted-query
+        allow-list for first-party clients; (4) per-field resolver
+        timeouts as the backstop for estimation errors; (5) rate limiting
+        keyed on \emph{complexity units per token}, not request count,
+        because one request can carry a batch of fifty.
+  \item \textbf{Why is request-count rate limiting insufficient for
+        GraphQL?}
+        The work per request varies by orders of magnitude --- the client
+        composes it --- and array batching puts many operations in one
+        HTTP request. ``100 requests/minute'' can mean 100 cheap reads or
+        100 batches of god-queries. Limit estimated cost per principal
+        per window; count requests only as a sanity backstop.
+  \item \textbf{How do you version a GraphQL API?}
+        Mostly, you don't: continuous evolution. Additive changes are
+        free; remove nothing --- mark fields \texttt{@deprecated(reason:)}
+        and track per-field usage telemetry until a field's callers reach
+        zero, then remove. When a truly breaking redesign is unavoidable,
+        version the \emph{endpoint} (\texttt{/graphql/v2}) as a last
+        resort. The philosophy trades REST's flag days for an eternal
+        compatibility obligation --- backed by telemetry, or it is a
+        guess.
+  \item \textbf{GraphQL subscriptions: transport choices?}
+        WebSockets with the \texttt{graphql-ws} subprotocol is the
+        mainstream: full-duplex, mature client support. Server-sent
+        events are simpler (HTTP, auto-reconnect, CDN-friendly) and
+        suffice for server-to-client streams. In WebSocket mode, remember
+        authn/z at connection upgrade \emph{and} per-message, and cap
+        concurrent subscriptions per principal --- each one holds server
+        state.
+  \item \textbf{Where does authorization live in a GraphQL server?}
+        At the field, not the route --- the schema advertises everything
+        to everyone, so ``the endpoint requires auth'' says nothing about
+        \texttt{salaryHistory}. Enforce in resolvers or a directive /
+        middleware layer with the principal on the context, deny by
+        default, and audit the schema for fields lacking a declared
+        scope. Where partial visibility is legitimate, return
+        \texttt{NOT\_AUTHORIZED} as typed data.
+  \item \textbf{``Variable injection is impossible'' --- true? What
+        injection remains?}
+        True for the query document: variables are a separate JSON
+        object, never interpolated into the parse. Resolver-side
+        injection is fully real: a resolver concatenating a variable into
+        SQL, a shell command, or a downstream URL is injection in a typed
+        costume. Parameterized queries and boundary validation remain
+        non-negotiable \cite{kleppmann2017ddia}.
+  \item \textbf{When would you refuse GraphQL and ship REST?}
+        When the traffic is public, read-heavy, and CDN-cacheable ---
+        GET with ETags is an operational superpower POST cannot match;
+        when uploads/downloads dominate (multipart in GraphQL is an
+        awkward bolt-on); when consumers are countless and unknown, so
+        cost governance cannot rely on allow-lists; or when the team
+        lacks the appetite for the guardrail stack GraphQL demands.
+  \item \textbf{Your complexity estimator can be gamed. How, and what is
+        the backstop?}
+        Estimators price shapes, not data: a depth-3 query over a
+        low-cardinality field can still fan out expensively in a
+        resolver, and \texttt{first: 1} over a full-table scan is ``cheap''
+        only on paper. Mitigations: per-field cost weights calibrated to
+        measured resolver latency, timeouts per resolver and per
+        operation, and query-count telemetry per operation name. Static
+        analysis is the sieve; timeouts are the floor.
+  % ---- staff ----
+  \item \textbf{Design the error contract for a GraphQL platform serving
+        thirty client teams.}
+        Two documented channels: typed union payloads for expected,
+        user-actionable failure (versioned like the schema, codes
+        enumerated in the contract), and top-level errors with
+        \texttt{extensions.code} for exceptional failure. A written
+        nullability policy per domain (what voids the parent), client
+        guidance on rendering partial data, and SLOs that count
+        \texttt{errors} rates per code --- otherwise every team's alert
+        channel becomes your schema review.
+  \item \textbf{How do you roll out a schema change that is secretly
+        breaking?}
+        ``Breaking'' hides in semantics, not syntax: reinterpreting a
+        field, tightening a non-null, reordering enum members a client
+        switched on. Defense is process: additive-only CI checks on the
+        SDL, per-field usage telemetry before any deprecation completes,
+        contract tests generated from real persisted operations, and
+        staged rollout with per-client pinning where the platform allows
+        it.
+  \item \textbf{When does federation pay for itself, and what new failure
+        modes does it buy?}
+        When schema ownership, not query volume, is the bottleneck ---
+        many teams blocked on one schema's review queue. It buys:
+        composition conflicts discovered at publish time, the gateway as
+        a latency and availability chokepoint, entity resolution
+        re-creating $N{+}1$ \emph{across services}, and distributed
+        tracing becoming a prerequisite rather than a nicety. Federate
+        for organizational scaling; not because the graph is big.
+  \item \textbf{A client team demands \texttt{totalCount} on every
+        connection. Take a position.}
+        Refuse the default, offer the opt-in. \texttt{COUNT(*)} over a
+        filtered relation is the offset problem in disguise --- cost
+        grows with the corpus while the value is usually decorative
+        (``1--50 of 38{,}412''). Ship \texttt{hasNextPage} by default,
+        \texttt{totalCount} behind an explicit argument with a cost
+        weight that prices it honestly, and approximate counts where the
+        UI truly needs magnitude.
+  \item \textbf{Design the migration of a 200-endpoint REST API to
+        GraphQL without a flag day.}
+        Strangler pattern: the GraphQL gateway fronts the existing REST
+        services, resolvers initially delegate to them (and inherit their
+        cacheability problems --- acknowledged, measured). Migrate
+        consumer by consumer behind persisted operations; the allow-list
+        doubles as the migration ledger. Deprecate REST endpoints only
+        when telemetry shows zero traffic. The failure mode to design
+        against is the permanent halfway state --- budget for finishing.
+\end{enumerate}
+
+%% ============================================================================
+\section{External Bibliography \& Further Reading}
+\label{sec:ch12-bibliography}
+
+\begin{itemize}
+  \item \textbf{GraphQL Specification (October 2021)} \cite{graphqlspec}
+        --- the normative text. Read \S3 (type system), \S6 (execution),
+        and \S7 (response) before trusting any tutorial, including this
+        chapter.
+  \item \textbf{graphql.org Learn} (graphql.org/learn) --- the
+        foundation's tutorial track; the clearest prose introduction to
+        schemas, queries, and mutations.
+  \item \textbf{Relay GraphQL Cursor Connections Specification}
+        (relay.dev/graphql/connections.htm) --- the normative
+        \texttt{edges}/\texttt{pageInfo} contract our connection
+        implements.
+  \item \textbf{Apollo Server documentation: Persisted Queries and APQ}
+        (apollographql.com/docs) --- the reference description of the
+        hash-first handshake and its caching motivations.
+  \item \textbf{Marc-Andr\'e Giroux, \emph{Production Ready GraphQL}}
+        (2020) --- the practitioner's treatment of cost limiting,
+        security, and schema design at scale; the closest book-length
+        relative of this chapter.
+  \item \textbf{Shopify's GraphQL API design documentation}
+        (shopify.dev) --- a large public graph's design conventions;
+        notable for connection discipline and cost-based rate limiting in
+        production.
+  \item \textbf{Kleppmann, \emph{Designing Data-Intensive Applications}}
+        \cite{kleppmann2017ddia} --- the storage-side fundamentals that
+        make the $N{+}1$ discussion precise.
+  \item \textbf{RFC 9110, HTTP Semantics} \cite{rfc9110} --- status-code
+        and method semantics for the GraphQL-over-HTTP mapping, and the
+        caching machinery GraphQL opts out of by default.
+  \item \textbf{OpenAPI Specification v3.1} \cite{openapi31} --- the
+        contract document GraphQL renders unnecessary, useful for
+        contrast in the REST-versus-GraphQL decision.
+  \item \textbf{FastAPI and httpx documentation}
+        \cite{fastapidocs,httpxdocs} --- the server host and client
+        transport used in this chapter's listings.
+\end{itemize}
+
+%% ============================================================================
+\section{Capstone Projects}
+\label{sec:ch12-capstones}
+
+Five projects, progressive. Each names its difficulty tier; acceptance
+criteria are checkable facts, not vibes. All run offline against the
+Northwind Robotics lab.
+
+\subsection{Capstone 1: Catalog Schema from Scratch [junior]}
+
+\textbf{Objective.} Re-implement the catalog schema without copying
+Listing~\ref{lst:ch12-schema}: types, enum, input, union mutation result,
+and a cursor connection, over your own seeded repository.
+
+\textbf{Inputs/Datasets.} Synthetic catalog of your own design (10+
+products, 3+ categories, reviews), deterministic seed.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Define \texttt{Product}, \texttt{Category}, \texttt{Review}, and
+        the \texttt{ProductStatus} enum.
+  \item Implement \texttt{products(first, after)} as a Relay connection
+        with opaque decodable cursors and a \texttt{first} cap.
+  \item Implement \texttt{addReview} returning a union of success and
+        typed error payloads.
+  \item Write in-process tests for the happy paths and one typed error.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] A full cursor walk returns every product exactly once.
+  \item[$\square$] A forged cursor yields a field error with a
+        machine-readable \texttt{extensions.code}.
+  \item[$\square$] Out-of-range rating returns the typed error payload
+        with \texttt{errors} absent.
+  \item[$\square$] The generated SDL (printed via the schema object)
+        contains the union and the enum.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add \texttt{@deprecated} to one field and verify
+it appears in the introspected SDL; add backward pagination
+(\texttt{last}/\texttt{before}).
+
+\subsection{Capstone 2: N+1 Hunter [mid]}
+
+\textbf{Objective.} Given a deliberately naive GraphQL service (naive
+resolvers, no loaders), find and eliminate every $N{+}1$ with measured
+proof.
+
+\textbf{Inputs/Datasets.} Your Capstone-1 schema extended with
+\texttt{Category.products} and \texttt{Review.author}; an instrumented
+repository with a query counter.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Write three operations of increasing fan-out and record naive
+        store-query counts.
+  \item Introduce per-request DataLoaders for each relationship.
+  \item Assert batched counts in tests --- the numbers are the
+        deliverable.
+  \item Demonstrate the per-request cache rule: a module-level loader
+        serves stale data after a mutation; write the failing test, then
+        fix by request-scoping.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Each operation's batched count is independent of page
+        size (verified at two page sizes).
+  \item[$\square$] A test proves duplicate keys are deduped into one
+        batch read.
+  \item[$\square$] The stale-cache regression test fails with a shared
+        loader and passes with per-request loaders.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add per-tick batch-size metrics and emit them in
+a response \texttt{extensions} block.
+
+\subsection{Capstone 3: Cost-Control Gateway [mid]}
+
+\textbf{Objective.} Build the static analysis gate of
+Listing~\ref{lst:ch12-cost} as a standalone, schema-agnostic library with
+adversarial tests.
+
+\textbf{Inputs/Datasets.} A corpus of operations: legitimate pages, deep
+cyclic traversals, alias-multiplied god-queries, fragment-heavy
+documents.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement depth and argument-weighted complexity over the parsed
+        AST, expanding fragment spreads with cycle detection.
+  \item Price aliases honestly: \texttt{a: products} and
+        \texttt{b: products} both pay.
+  \item Add a per-operation timeout at execution and prove it fires with
+        a deliberately slow resolver.
+  \item Emit rejection reasons as structured error extensions.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Each corpus operation is accepted or rejected
+        exactly as labeled.
+  \item[$\square$] Complexity is monotonically increasing in
+        \texttt{first} (property-tested across sizes).
+  \item[$\square$] Fragment cycles are rejected with a distinct code,
+        never a hang or crash.
+\end{itemize}
+
+\textbf{Stretch Goals.} Per-field cost weights driven by measured
+resolver latency; complexity reported to the client in response
+extensions.
+
+\subsection{Capstone 4: APQ Production Gateway [senior]}
+
+\textbf{Objective.} Ship the lab as an operations-locked gateway: full
+APQ, a strict allow-list mode, introspection policy, and a client that
+survives every failure channel.
+
+\textbf{Inputs/Datasets.} The chapter lab; a build-time operation
+registry exported from a client repository (JSON hash $\to$ document).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement APQ both directions, including
+        \texttt{PersistedQueryMismatch} defense.
+  \item Add strict mode: only registered hashes execute, no query text
+        accepted.
+  \item Key rate limiting on summed complexity per principal per minute;
+        reject array batches over a cap.
+  \item Write the client: APQ with single retry, partial-data handling,
+        and typed-error branching.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Strict mode rejects an unregistered document with a
+        distinct code and zero resolver executions (proven by the query
+        counter).
+  \item[$\square$] The client completes the miss $\to$ register $\to$
+        hash-only sequence and sends text only once.
+  \item[$\square$] Complexity-based limiting admits small queries while
+        rejecting a burst of god-queries under the same request count.
+\end{itemize}
+
+\textbf{Stretch Goals.} Serve registered read operations over GET for CDN
+cacheability; document the cache-key design.
+
+\subsection{Capstone 5: Federated Robotics Graph [staff]}
+
+\textbf{Objective.} Split the catalog into two subgraphs --- catalog
+(products, categories) and reputation (reviews) --- with
+\texttt{Product} as a shared entity, and compose them behind a gateway
+you implement in miniature, offline.
+
+\textbf{Inputs/Datasets.} Two Strawberry schemas; a hand-rolled gateway
+that parses operations, plans them across subgraphs, and stitches
+results; the seeded datasets of the earlier capstones.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Define the entity boundary: catalog owns \texttt{Product},
+        reputation extends it with \texttt{reviews}.
+  \item Implement gateway query planning for the subset of the language
+        your test operations need; say explicitly what is out of scope.
+  \item Reproduce the \emph{cross-service} N+1 (entity resolution per
+        product) and batch it.
+  \item Write a composition check that fails CI when subgraphs disagree
+        on the entity key.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] One client operation spanning both subgraphs returns
+        correctly stitched data.
+  \item[$\square$] Cross-service entity resolution is batched; counts
+        asserted in tests.
+  \item[$\square$] A subgraph outage degrades only its fields (partial
+        data, typed extensions), proven by a fault-injection test.
+  \item[$\square$] A written scope note lists the federation features
+        deliberately not implemented.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add a subscription to the reputation subgraph and
+carry it through the gateway; add per-subgraph cost budgets at the
+gateway.
+
+%% ============================================================================
+\section{Python Dependencies Appendix}
+\label{sec:ch12-dependencies}
+
+\subsection{Pinned Requirements}
+
+\begin{minted}{text}
+# requirements.txt -- Chapter 12 GraphQL lab
+strawberry-graphql[fastapi]>=0.230
+fastapi>=0.110
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+Install on Windows (PowerShell):
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pytest -q
+\end{minted}
+
+\subsection{strawberry-graphql[fastapi]}
+
+\textbf{Description.} A code-first GraphQL library: Python dataclasses
+and type hints define the schema; resolvers are plain (a)sync functions;
+ships a DataLoader and framework integrations, FastAPI among them (the
+\texttt{[fastapi]} extra).
+
+\textbf{Why included.} Code-first keeps the chapter's listings teaching
+the \emph{type system} rather than an SDL mapping layer; it is actively
+maintained on modern \texttt{graphql-core}; its DataLoader and context
+mechanics map directly onto the specification's execution model.
+
+\textbf{Alternatives.} \textbf{Ariadne} --- SDL-first: you write the
+schema in SDL and bind resolvers to it; choose it when the SDL must be
+the reviewed artifact (multi-language organizations, contract-first
+governance). \textbf{Graphene} --- the incumbent, similar code-first
+style; broader legacy adoption, slower release cadence in recent years.
+\textbf{GraphQL-core} alone --- the reference port; what Strawberry and
+Graphene build on; too low-level to teach from directly.
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+pip install "strawberry-graphql[fastapi]>=0.230"
+\end{minted}
+
+\subsection{fastapi}
+
+\textbf{Description.} The ASGI framework used to host the GraphQL
+endpoint and health check \cite{fastapidocs}.
+
+\textbf{Why included.} Consistency with Chapter~6, async-native request
+handling, and a testable app object that \texttt{httpx.ASGITransport}
+can execute in-process --- the offline backbone of every demo and test
+in this chapter.
+
+\textbf{Alternatives.} Starlette directly (FastAPI's base; fewer
+conventions), or Strawberry's Django/Flask integrations where those
+frameworks already own the service.
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+pip install "fastapi>=0.110"
+\end{minted}
+
+\subsection{httpx}
+
+\textbf{Description.} A modern sync/async HTTP client with transport
+injection \cite{httpxdocs}.
+
+\textbf{Why included.} \texttt{httpx.ASGITransport} speaks real HTTP to
+the in-process FastAPI app with zero sockets --- offline-first without
+mocking semantics. The async client also carries the APQ handshake
+cleanly.
+
+\textbf{Alternatives.} \texttt{requests} (sync only, no ASGI transport),
+\texttt{aiohttp} (async, different transport model), or a dedicated
+GraphQL client such as \texttt{gql} (adds subscriptions support at the
+price of another abstraction layer).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+pip install "httpx>=0.27"
+\end{minted}
+
+\subsection{pytest}
+
+\textbf{Description.} The test runner used across this book.
+
+\textbf{Why included.} The suite's 21 tests run in-process and offline;
+\texttt{asyncio.run} inside each test avoids any plugin dependency, so
+\texttt{pytest} alone suffices.
+
+\textbf{Alternatives.} \texttt{pytest-asyncio} (idiomatic async tests at
+the price of a plugin), \texttt{unittest} (stdlib, more ceremony).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+pip install "pytest>=8"
+\end{minted}
+
+%% ============================================================================
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch12-summary}
+
+\begin{itemize}
+  \item GraphQL inverts control of response shape: the client composes,
+        the server guarantees against a typed, introspectable schema. The
+        same inversion makes the client choose the work --- cost
+        governance is not optional.
+  \item Nullability is error-containment policy expressed as syntax. An
+        error at a non-null field bubbles to the nearest nullable
+        position; the response is HTTP 200 with partial \texttt{data} and
+        a populated \texttt{errors} array.
+  \item Field-level resolution makes $N{+}1$ the default physics.
+        DataLoader collapses it --- one loader per request, batched keyed
+        reads, results aligned positionally. Our measured collapse: 11
+        store reads to 3 at page size 5.
+  \item Relay connections standardize cursor pagination:
+        \texttt{edges}/\texttt{node}/\texttt{pageInfo}, opaque cursors,
+        fetch-$p{+}1$ for \texttt{hasNextPage}, capped page sizes.
+  \item Two error channels, chosen deliberately: typed union payloads for
+        expected failure, top-level errors with \texttt{extensions.code}
+        for exceptional failure.
+  \item The guardrail stack, in firing order: depth limit, complexity
+        budget, persisted-query allow-list (APQ for ergonomics and
+        cacheable GETs), resolver timeouts, cost-keyed rate limiting,
+        capped array batching, gated introspection, GraphiQL off in
+        production.
+  \item Variables make query-document injection impossible;
+        resolver-side injection is unchanged from every other stack ---
+        parameterized queries, always.
+  \item REST keeps the crown for CDN-cacheable public reads, uploads, and
+        unknown-consumer APIs; GraphQL wins for many-clients-one-backend
+        product graphs; gRPC for internal low-latency RPC. Choose on
+        constraints, not fashion.
+\end{itemize}
+
+%% ============================================================================
+\section{Quick-Reference Card}
+\label{sec:ch12-quickref}
+
+\subsection{Type System at a Glance}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Kind} & \textbf{Remember} \\
+    \midrule
+    Scalar & Leaves: \texttt{Int Float String Boolean ID} (+ custom) \\
+    Object & Named field set; recursion makes the graph \\
+    Interface & Shared field contract; inline fragments for the rest \\
+    Union & No shared contract; \emph{all} selection via fragments \\
+    Enum & Closed value set, validated pre-execution \\
+    Input object & Argument-side only; no unions/interfaces inside \\
+    List / Non-null & \texttt{[T]}, \texttt{T!}: error-containment policy \\
+    Meta fields & \texttt{\_\_schema}, \texttt{\_\_type}, \texttt{\_\_typename} \\
+    \bottomrule
+  \end{tabularx}
+  \caption{GraphQL type system cheat sheet.}
+  \label{tab:ch12-typecard}
+\end{table}
+
+\subsection{Wire Shapes}
+
+\begin{minted}{json}
+// request
+{ "query": "query P($first: Int!) { products(first: $first) { ... } }",
+  "variables": { "first": 10 },
+  "operationName": "P",
+  "extensions": { "persistedQuery": { "version": 1, "sha256Hash": "..." } } }
+
+// response: success, partial success, and pre-execution rejection
+{ "data": { "products": { ... } } }
+{ "data": { "product": null },
+  "errors": [ { "message": "...", "path": ["product", "marginPercent"],
+                "extensions": { "code": "COST_DATA_UNAVAILABLE" } } ] }
+// HTTP 400 + errors array: parse / validation / budget rejection
+\end{minted}
+
+\subsection{Cost-Control Checklist}
+
+\begin{itemize}
+  \item[$\square$] Depth limit enforced on the parsed AST, pre-execution.
+  \item[$\square$] Complexity budget with page-size multipliers; aliases
+        and batch elements counted.
+  \item[$\square$] Page sizes capped at the resolver (\texttt{first}
+        $\le$ 50 here).
+  \item[$\square$] Persisted-query allow-list for first-party clients;
+        APQ for the rest.
+  \item[$\square$] Array batching disabled or length-capped; cost summed
+        across the batch.
+  \item[$\square$] Rate limiting keyed on complexity units, not request
+        count.
+  \item[$\square$] Per-resolver and per-operation timeouts armed.
+  \item[$\square$] Introspection gated (AST check), GraphiQL off in
+        production.
+  \item[$\square$] DataLoaders constructed per request, never shared.
+  \item[$\square$] Field-level authorization deny-by-default, audited in
+        CI.
+\end{itemize}
+
+\input{chapters/_standard_addendum}

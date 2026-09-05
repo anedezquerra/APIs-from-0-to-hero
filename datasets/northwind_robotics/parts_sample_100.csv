@@ -1,0 +1,101 @@
+part_id,sku,name,category,subcategory,unit_price_cents,weight_grams,warehouse_id,active,created_at,updated_at
+P-00001,NR-ACT-00001,Modular Servo Motor BN-137,Actuators,Servo Motor,183295,400,W-03,true,2021-11-08T18:38:01Z,2022-02-05T20:57:42Z
+P-00002,NR-CBL-00002,High-Torque Cable Chain CA-174,Cabling and Connectors,Cable Chain,9582,2240,W-08,true,2022-01-20T00:30:39Z,2022-06-27T16:49:14Z
+P-00003,NR-CTL-00003,Heavy-Duty Motion Controller DN-211,Controllers,Motion Controller,501383,4944,W-01,true,2024-12-09T13:26:21Z,2025-03-14T04:10:06Z
+P-00004,NR-DRV-00004,Rapid-Cycle Harmonic Reducer EA-248,Drivetrain,Harmonic Reducer,147486,11624,W-07,true,2024-07-31T13:37:33Z,2025-02-18T17:26:19Z
+P-00005,NR-EFF-00005,Low-Backlash Parallel Gripper FN-285,End Effectors,Parallel Gripper,335651,2041,W-01,true,2023-09-16T07:08:58Z,2023-10-03T02:52:53Z
+P-00006,NR-FRM-00006,Compact Aluminum Extrusion GA-322,Frames and Structure,Aluminum Extrusion,55348,55459,W-06,true,2024-02-27T03:15:53Z,2024-07-31T18:04:43Z
+P-00007,NR-PWR-00007,Quiet-Drive Battery Pack HN-359,Power Systems,Battery Pack,77371,9649,W-07,false,2023-02-05T19:02:06Z,2023-11-18T02:44:16Z
+P-00008,NR-SEN-00008,Sealed LIDAR Unit IA-396,Sensors,LIDAR Unit,118046,1010,W-02,true,2024-06-17T17:14:23Z,2025-05-13T16:42:00Z
+P-00009,NR-ACT-00009,Industrial Linear Actuator JN-433,Actuators,Linear Actuator,285510,14736,W-05,true,2021-01-18T02:50:31Z,2021-09-10T06:43:36Z
+P-00010,NR-CBL-00010,Precision M12 Connector KA-470,Cabling and Connectors,M12 Connector,12856,2312,W-06,true,2024-11-10T01:35:22Z,2025-08-12T14:10:39Z
+P-00011,NR-CTL-00011,Modular PLC Module LN-507,Controllers,PLC Module,701545,4084,W-01,true,2021-09-03T22:23:36Z,2022-06-08T19:17:35Z
+P-00012,NR-DRV-00012,High-Torque Planetary Gearbox MA-544,Drivetrain,Planetary Gearbox,7147,7520,W-08,true,2024-01-03T01:57:43Z,2024-11-01T11:43:37Z
+P-00013,NR-EFF-00013,Heavy-Duty Vacuum Gripper NN-581,End Effectors,Vacuum Gripper,179391,5924,W-02,true,2024-01-23T06:03:32Z,2024-10-12T18:54:10Z
+P-00014,NR-FRM-00014,Rapid-Cycle Base Plate OA-618,Frames and Structure,Base Plate,3668,37660,W-05,true,2024-03-30T16:04:17Z,2024-11-20T23:05:37Z
+P-00015,NR-PWR-00015,Low-Backlash Power Supply Unit PN-655,Power Systems,Power Supply Unit,147913,8326,W-05,true,2023-01-03T20:12:03Z,2023-05-23T22:37:33Z
+P-00016,NR-SEN-00016,Compact Force-Torque Sensor QA-692,Sensors,Force-Torque Sensor,8000,847,W-05,true,2022-05-19T10:27:06Z,2023-02-13T19:25:00Z
+P-00017,NR-ACT-00017,Quiet-Drive Rotary Actuator RN-729,Actuators,Rotary Actuator,55986,6054,W-05,true,2024-08-16T14:01:29Z,2024-12-18T05:20:56Z
+P-00018,NR-CBL-00018,Sealed Servo Cable SA-766,Cabling and Connectors,Servo Cable,8273,3471,W-06,true,2023-01-11T01:57:51Z,2023-09-19T11:24:44Z
+P-00019,NR-CTL-00019,Industrial Edge Compute Node TN-803,Controllers,Edge Compute Node,500904,300,W-05,true,2024-09-30T04:56:30Z,2025-02-12T08:29:55Z
+P-00020,NR-DRV-00020,Precision Timing Belt UA-840,Drivetrain,Timing Belt,166419,3917,W-03,true,2021-04-07T04:47:33Z,2021-10-18T18:08:59Z
+P-00021,NR-EFF-00021,Modular Welding Torch VN-877,End Effectors,Welding Torch,433507,9855,W-01,true,2022-08-05T11:44:23Z,2022-08-28T08:54:13Z
+P-00022,NR-FRM-00022,High-Torque Gantry Beam WA-914,Frames and Structure,Gantry Beam,56221,24199,W-02,true,2023-09-18T03:50:12Z,2024-02-20T07:09:22Z
+P-00023,NR-PWR-00023,Heavy-Duty Motor Driver XN-951,Power Systems,Motor Driver,151313,13974,W-02,true,2024-02-27T21:30:11Z,2024-07-02T19:04:18Z
+P-00024,NR-SEN-00024,Rapid-Cycle Proximity Sensor YA-988,Sensors,Proximity Sensor,72053,2191,W-04,true,2021-02-07T15:50:47Z,2021-04-23T09:15:30Z
+P-00025,NR-ACT-00025,Low-Backlash Stepper Motor ZN-125,Actuators,Stepper Motor,289539,20625,W-04,true,2022-09-26T20:21:46Z,2022-11-21T17:53:23Z
+P-00026,NR-CBL-00026,Compact EtherCAT Cable AA-162,Cabling and Connectors,EtherCAT Cable,4646,3276,W-06,true,2021-11-19T07:13:13Z,2022-11-22T06:14:27Z
+P-00027,NR-CTL-00027,Quiet-Drive IO Expansion Board BN-199,Controllers,IO Expansion Board,257108,4639,W-04,true,2022-11-13T18:33:36Z,2023-10-11T19:57:23Z
+P-00028,NR-DRV-00028,Sealed Ball Screw CA-236,Drivetrain,Ball Screw,54595,2173,W-06,true,2023-03-15T12:21:39Z,2023-11-02T03:42:53Z
+P-00029,NR-EFF-00029,Industrial Tool Changer DN-273,End Effectors,Tool Changer,370982,8137,W-08,true,2022-05-30T01:35:03Z,2022-06-16T13:48:23Z
+P-00030,NR-FRM-00030,Precision Mounting Bracket EA-310,Frames and Structure,Mounting Bracket,48530,60000,W-07,true,2022-07-10T23:40:22Z,2022-09-01T18:24:18Z
+P-00031,NR-PWR-00031,Modular DC-DC Converter FN-347,Power Systems,DC-DC Converter,152477,7226,W-02,true,2023-06-13T18:49:18Z,2023-12-18T06:48:50Z
+P-00032,NR-SEN-00032,High-Torque Rotary Encoder GA-384,Sensors,Rotary Encoder,256168,157,W-05,true,2021-03-29T23:59:52Z,2021-06-24T02:50:51Z
+P-00033,NR-ACT-00033,Heavy-Duty Servo Motor HN-421,Actuators,Servo Motor,15000,4891,W-08,true,2021-02-20T03:17:20Z,2021-11-09T16:54:32Z
+P-00034,NR-CBL-00034,Rapid-Cycle Cable Chain IA-458,Cabling and Connectors,Cable Chain,5485,2321,W-07,true,2023-04-30T20:53:40Z,2024-01-11T21:15:16Z
+P-00035,NR-CTL-00035,Low-Backlash Motion Controller JN-495,Controllers,Motion Controller,749337,3178,W-02,true,2021-04-24T06:21:09Z,2021-05-21T17:32:57Z
+P-00036,NR-DRV-00036,Compact Harmonic Reducer KA-532,Drivetrain,Harmonic Reducer,159335,8726,W-03,true,2023-08-10T09:08:38Z,2023-10-11T23:30:55Z
+P-00037,NR-EFF-00037,Quiet-Drive Parallel Gripper LN-569,End Effectors,Parallel Gripper,361345,3878,W-02,true,2021-03-06T20:12:59Z,2021-05-26T16:03:29Z
+P-00038,NR-FRM-00038,Sealed Aluminum Extrusion MA-606,Frames and Structure,Aluminum Extrusion,63633,34177,W-08,true,2022-04-17T08:15:21Z,2022-10-11T05:55:09Z
+P-00039,NR-PWR-00039,Industrial Battery Pack NN-643,Power Systems,Battery Pack,147983,9301,W-01,true,2024-08-29T10:06:09Z,2025-06-20T02:24:52Z
+P-00040,NR-SEN-00040,Precision Thermal Camera Module OA-680,Sensors,Thermal Camera Module,104455,468,W-08,true,2024-04-04T10:40:33Z,2025-01-22T10:42:42Z
+P-00041,NR-ACT-00041,Modular Linear Actuator PN-717,Actuators,Linear Actuator,193758,5809,W-02,true,2021-06-29T13:15:14Z,2022-06-04T17:17:12Z
+P-00042,NR-CBL-00042,High-Torque M12 Connector QA-754,Cabling and Connectors,M12 Connector,11398,2936,W-04,true,2022-06-18T00:39:03Z,2023-05-23T02:03:48Z
+P-00043,NR-CTL-00043,Heavy-Duty PLC Module RN-791,Controllers,PLC Module,602939,3860,W-03,true,2021-12-19T19:52:00Z,2022-11-05T15:57:55Z
+P-00044,NR-DRV-00044,Rapid-Cycle Planetary Gearbox SA-828,Drivetrain,Planetary Gearbox,175143,100,W-05,false,2021-01-24T03:27:30Z,2021-08-06T06:20:58Z
+P-00045,NR-EFF-00045,Low-Backlash Vacuum Gripper TN-865,End Effectors,Vacuum Gripper,273751,4982,W-02,true,2022-03-15T23:56:30Z,2022-04-18T22:55:51Z
+P-00046,NR-FRM-00046,Compact Base Plate UA-902,Frames and Structure,Base Plate,30615,48835,W-06,false,2021-07-21T12:10:19Z,2022-05-26T12:02:56Z
+P-00047,NR-PWR-00047,Quiet-Drive Power Supply Unit VN-939,Power Systems,Power Supply Unit,96483,9403,W-07,true,2024-12-28T16:58:28Z,2025-06-06T14:30:03Z
+P-00048,NR-SEN-00048,Sealed LIDAR Unit WA-976,Sensors,LIDAR Unit,35052,1807,W-06,true,2024-08-27T00:53:57Z,2025-02-14T03:21:06Z
+P-00049,NR-ACT-00049,Industrial Rotary Actuator XN-113,Actuators,Rotary Actuator,145899,12792,W-01,true,2022-03-31T16:01:42Z,2022-10-07T08:21:15Z
+P-00050,NR-CBL-00050,Precision Servo Cable YA-150,Cabling and Connectors,Servo Cable,4791,1872,W-08,true,2024-10-30T18:17:28Z,2025-09-14T20:47:21Z
+P-00051,NR-CTL-00051,Modular Edge Compute Node ZN-187,Controllers,Edge Compute Node,378309,1734,W-06,true,2024-11-17T19:39:33Z,2025-03-04T07:58:31Z
+P-00052,NR-DRV-00052,High-Torque Timing Belt AA-224,Drivetrain,Timing Belt,234696,3755,W-01,true,2021-11-24T10:03:41Z,2022-02-27T18:15:03Z
+P-00053,NR-EFF-00053,Heavy-Duty Welding Torch BN-261,End Effectors,Welding Torch,98156,9994,W-02,true,2022-01-01T05:21:31Z,2022-12-09T04:43:27Z
+P-00054,NR-FRM-00054,Rapid-Cycle Gantry Beam CA-298,Frames and Structure,Gantry Beam,28385,17021,W-04,true,2024-07-23T04:27:49Z,2024-08-18T09:43:28Z
+P-00055,NR-PWR-00055,Low-Backlash Motor Driver DN-335,Power Systems,Motor Driver,117121,14979,W-02,true,2021-05-12T06:08:18Z,2021-06-27T15:24:02Z
+P-00056,NR-SEN-00056,Compact Force-Torque Sensor EA-372,Sensors,Force-Torque Sensor,135796,2934,W-08,true,2022-08-18T07:55:16Z,2023-06-13T02:33:49Z
+P-00057,NR-ACT-00057,Quiet-Drive Stepper Motor FN-409,Actuators,Stepper Motor,159708,12526,W-02,true,2022-11-01T16:00:44Z,2022-12-12T06:12:09Z
+P-00058,NR-CBL-00058,Sealed EtherCAT Cable GA-446,Cabling and Connectors,EtherCAT Cable,7155,1792,W-04,true,2024-11-14T17:16:20Z,2025-08-02T20:50:07Z
+P-00059,NR-CTL-00059,Industrial IO Expansion Board HN-483,Controllers,IO Expansion Board,884561,2434,W-05,true,2022-06-14T15:19:40Z,2023-05-17T19:05:27Z
+P-00060,NR-DRV-00060,Precision Ball Screw IA-520,Drivetrain,Ball Screw,277883,2688,W-05,true,2023-05-10T12:18:05Z,2024-03-06T23:12:23Z
+P-00061,NR-EFF-00061,Modular Tool Changer JN-557,End Effectors,Tool Changer,500000,4051,W-04,true,2024-12-28T02:16:57Z,2025-12-23T02:35:45Z
+P-00062,NR-FRM-00062,High-Torque Mounting Bracket KA-594,Frames and Structure,Mounting Bracket,13411,41167,W-07,true,2022-08-16T07:33:36Z,2023-08-14T07:16:07Z
+P-00063,NR-PWR-00063,Heavy-Duty DC-DC Converter LN-631,Power Systems,DC-DC Converter,123679,200,W-08,true,2022-03-13T01:15:33Z,2022-10-12T04:18:43Z
+P-00064,NR-SEN-00064,Rapid-Cycle Proximity Sensor MA-668,Sensors,Proximity Sensor,201558,2099,W-05,true,2022-09-05T23:47:57Z,2022-10-05T23:28:15Z
+P-00065,NR-ACT-00065,Low-Backlash Servo Motor NN-705,Actuators,Servo Motor,155437,7802,W-08,true,2024-06-12T16:39:48Z,2024-06-22T06:40:52Z
+P-00066,NR-CBL-00066,Compact Cable Chain OA-742,Cabling and Connectors,Cable Chain,11033,2915,W-04,true,2024-08-09T16:32:42Z,2024-12-26T13:19:39Z
+P-00067,NR-CTL-00067,Quiet-Drive Motion Controller PN-779,Controllers,Motion Controller,424190,4790,W-02,true,2022-07-12T06:11:13Z,2023-07-20T05:54:40Z
+P-00068,NR-DRV-00068,Sealed Harmonic Reducer QA-816,Drivetrain,Harmonic Reducer,106894,3932,W-03,true,2024-12-29T10:16:41Z,2025-03-01T05:08:22Z
+P-00069,NR-EFF-00069,Industrial Parallel Gripper RN-853,End Effectors,Parallel Gripper,227182,10086,W-05,false,2022-11-16T04:46:31Z,2023-04-04T20:33:47Z
+P-00070,NR-FRM-00070,Precision Aluminum Extrusion SA-890,Frames and Structure,Aluminum Extrusion,39276,56366,W-07,true,2021-07-17T15:11:52Z,2022-01-10T06:35:37Z
+P-00071,NR-PWR-00071,Modular Battery Pack TN-927,Power Systems,Battery Pack,103918,7267,W-06,true,2023-10-14T21:17:16Z,2023-11-13T19:00:46Z
+P-00072,NR-SEN-00072,High-Torque Rotary Encoder UA-964,Sensors,Rotary Encoder,188838,2708,W-08,true,2021-03-07T04:13:03Z,2021-08-31T05:33:31Z
+P-00073,NR-ACT-00073,Heavy-Duty Linear Actuator VN-101,Actuators,Linear Actuator,392283,14388,W-08,false,2021-01-26T00:55:44Z,2021-10-27T11:34:17Z
+P-00074,NR-CBL-00074,Rapid-Cycle M12 Connector WA-138,Cabling and Connectors,M12 Connector,6573,1929,W-02,true,2021-05-01T08:37:54Z,2022-05-30T02:38:23Z
+P-00075,NR-CTL-00075,Low-Backlash PLC Module XN-175,Controllers,PLC Module,216965,5549,W-05,true,2023-06-06T00:46:54Z,2024-03-20T11:25:18Z
+P-00076,NR-DRV-00076,Compact Planetary Gearbox YA-212,Drivetrain,Planetary Gearbox,240012,2600,W-06,true,2024-09-22T14:10:18Z,2025-04-30T11:14:50Z
+P-00077,NR-EFF-00077,Quiet-Drive Vacuum Gripper ZN-249,End Effectors,Vacuum Gripper,322794,8136,W-05,true,2022-09-27T00:28:14Z,2023-07-15T01:40:32Z
+P-00078,NR-FRM-00078,Sealed Base Plate AA-286,Frames and Structure,Base Plate,2000,37591,W-03,true,2021-03-11T07:12:10Z,2021-10-23T05:27:41Z
+P-00079,NR-PWR-00079,Industrial Power Supply Unit BN-323,Power Systems,Power Supply Unit,249762,4941,W-06,true,2021-11-25T12:31:57Z,2022-07-26T17:14:49Z
+P-00080,NR-SEN-00080,Precision Thermal Camera Module CA-360,Sensors,Thermal Camera Module,27091,1659,W-06,true,2022-08-12T12:10:02Z,2022-09-06T19:51:59Z
+P-00081,NR-ACT-00081,Modular Rotary Actuator DN-397,Actuators,Rotary Actuator,198307,8630,W-05,false,2024-12-24T06:38:02Z,2025-06-16T17:07:38Z
+P-00082,NR-CBL-00082,High-Torque Servo Cable EA-434,Cabling and Connectors,Servo Cable,300,610,W-05,true,2021-07-08T08:14:35Z,2021-08-17T06:59:44Z
+P-00083,NR-CTL-00083,Heavy-Duty Edge Compute Node FN-471,Controllers,Edge Compute Node,211506,2660,W-01,true,2021-10-30T23:00:23Z,2022-06-15T14:08:22Z
+P-00084,NR-DRV-00084,Rapid-Cycle Timing Belt GA-508,Drivetrain,Timing Belt,243100,5786,W-02,true,2022-05-05T01:12:18Z,2022-08-02T16:43:56Z
+P-00085,NR-EFF-00085,Low-Backlash Welding Torch HN-545,End Effectors,Welding Torch,208459,3063,W-06,true,2022-07-01T18:56:14Z,2023-07-29T12:48:51Z
+P-00086,NR-FRM-00086,Compact Gantry Beam IA-582,Frames and Structure,Gantry Beam,57404,36769,W-02,true,2022-11-29T10:44:27Z,2023-10-20T18:40:30Z
+P-00087,NR-PWR-00087,Quiet-Drive Motor Driver JN-619,Power Systems,Motor Driver,142069,17379,W-08,true,2022-01-16T12:10:17Z,2022-11-29T02:42:40Z
+P-00088,NR-SEN-00088,Sealed LIDAR Unit KA-656,Sensors,LIDAR Unit,104384,619,W-05,true,2022-06-15T14:43:11Z,2023-02-14T09:12:08Z
+P-00089,NR-ACT-00089,Industrial Stepper Motor LN-693,Actuators,Stepper Motor,314709,14936,W-06,true,2023-09-10T18:08:49Z,2024-02-11T15:04:37Z
+P-00090,NR-CBL-00090,Precision EtherCAT Cable MA-730,Cabling and Connectors,EtherCAT Cable,13726,804,W-07,true,2022-10-13T07:29:37Z,2023-05-05T21:10:49Z
+P-00091,NR-CTL-00091,Modular IO Expansion Board NN-767,Controllers,IO Expansion Board,496052,1237,W-01,true,2021-07-16T08:27:25Z,2021-08-11T19:40:24Z
+P-00092,NR-DRV-00092,High-Torque Ball Screw OA-804,Drivetrain,Ball Screw,187518,6841,W-07,false,2021-07-25T15:24:01Z,2022-08-29T13:46:39Z
+P-00093,NR-EFF-00093,Heavy-Duty Tool Changer PN-841,End Effectors,Tool Changer,438877,1149,W-06,true,2022-09-17T23:29:01Z,2023-03-24T12:09:23Z
+P-00094,NR-FRM-00094,Rapid-Cycle Mounting Bracket QA-878,Frames and Structure,Mounting Bracket,38677,22973,W-08,true,2023-08-16T21:37:03Z,2023-11-08T14:37:45Z
+P-00095,NR-PWR-00095,Low-Backlash DC-DC Converter RN-915,Power Systems,DC-DC Converter,146124,9050,W-03,true,2024-11-15T16:23:45Z,2025-09-29T06:22:23Z
+P-00096,NR-SEN-00096,Compact Force-Torque Sensor SA-952,Sensors,Force-Torque Sensor,72353,716,W-07,true,2023-01-12T03:48:09Z,2023-04-26T17:01:53Z
+P-00097,NR-ACT-00097,Quiet-Drive Servo Motor TN-989,Actuators,Servo Motor,214387,2585,W-05,true,2021-01-13T02:11:56Z,2021-10-27T09:08:53Z
+P-00098,NR-CBL-00098,Sealed Cable Chain UA-126,Cabling and Connectors,Cable Chain,5791,1031,W-04,true,2023-03-02T04:29:14Z,2023-10-05T03:00:31Z
+P-00099,NR-CTL-00099,Industrial Motion Controller VN-163,Controllers,Motion Controller,555375,4316,W-06,true,2021-03-17T00:18:18Z,2022-04-15T18:21:34Z
+P-00100,NR-DRV-00100,Precision Harmonic Reducer WA-200,Drivetrain,Harmonic Reducer,228547,4287,W-02,true,2024-03-22T10:11:54Z,2024-08-08T00:06:36Z

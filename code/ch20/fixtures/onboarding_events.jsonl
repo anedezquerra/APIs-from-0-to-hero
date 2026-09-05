@@ -1,0 +1,222 @@
+{"ts": "2026-03-02T09:07:00Z", "developer_id": "dev-001", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:09:00Z", "developer_id": "dev-001", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:14:00Z", "developer_id": "dev-002", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:16:00Z", "developer_id": "dev-002", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:21:00Z", "developer_id": "dev-003", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T09:23:00Z", "developer_id": "dev-003", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:28:00Z", "developer_id": "dev-004", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:30:00Z", "developer_id": "dev-004", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:35:00Z", "developer_id": "dev-005", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:37:00Z", "developer_id": "dev-005", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:42:00Z", "developer_id": "dev-006", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T09:44:00Z", "developer_id": "dev-006", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:49:00Z", "developer_id": "dev-007", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:51:00Z", "developer_id": "dev-007", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:53:00Z", "developer_id": "dev-001", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T09:56:00Z", "developer_id": "dev-008", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:58:00Z", "developer_id": "dev-008", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:03:00Z", "developer_id": "dev-009", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T10:05:00Z", "developer_id": "dev-006", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T10:05:00Z", "developer_id": "dev-009", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:10:00Z", "developer_id": "dev-010", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T10:12:00Z", "developer_id": "dev-010", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:17:00Z", "developer_id": "dev-011", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T10:19:00Z", "developer_id": "dev-011", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:23:00Z", "developer_id": "dev-002", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T10:24:00Z", "developer_id": "dev-012", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T10:26:00Z", "developer_id": "dev-012", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:31:00Z", "developer_id": "dev-013", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T10:33:00Z", "developer_id": "dev-013", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:35:00Z", "developer_id": "dev-007", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T10:38:00Z", "developer_id": "dev-014", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T10:40:00Z", "developer_id": "dev-014", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:45:00Z", "developer_id": "dev-015", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T10:47:00Z", "developer_id": "dev-012", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T10:47:00Z", "developer_id": "dev-015", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:52:00Z", "developer_id": "dev-016", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T10:53:00Z", "developer_id": "dev-003", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T10:54:00Z", "developer_id": "dev-016", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T10:59:00Z", "developer_id": "dev-017", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T11:01:00Z", "developer_id": "dev-017", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:05:00Z", "developer_id": "dev-008", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:06:00Z", "developer_id": "dev-018", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T11:08:00Z", "developer_id": "dev-018", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:13:00Z", "developer_id": "dev-019", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T11:15:00Z", "developer_id": "dev-019", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:17:00Z", "developer_id": "dev-013", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:20:00Z", "developer_id": "dev-020", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T11:22:00Z", "developer_id": "dev-020", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:23:00Z", "developer_id": "dev-004", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:27:00Z", "developer_id": "dev-021", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T11:29:00Z", "developer_id": "dev-018", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:29:00Z", "developer_id": "dev-021", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:34:00Z", "developer_id": "dev-022", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T11:35:00Z", "developer_id": "dev-009", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:36:00Z", "developer_id": "dev-022", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:41:00Z", "developer_id": "dev-023", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T11:43:00Z", "developer_id": "dev-023", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:47:00Z", "developer_id": "dev-014", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:48:00Z", "developer_id": "dev-024", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T11:50:00Z", "developer_id": "dev-024", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:53:00Z", "developer_id": "dev-005", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T11:55:00Z", "developer_id": "dev-025", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T11:57:00Z", "developer_id": "dev-025", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T11:59:00Z", "developer_id": "dev-019", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:02:00Z", "developer_id": "dev-026", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T12:04:00Z", "developer_id": "dev-026", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:05:00Z", "developer_id": "dev-010", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:09:00Z", "developer_id": "dev-027", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T12:11:00Z", "developer_id": "dev-024", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:11:00Z", "developer_id": "dev-027", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:16:00Z", "developer_id": "dev-028", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T12:17:00Z", "developer_id": "dev-015", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:18:00Z", "developer_id": "dev-028", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:23:00Z", "developer_id": "dev-029", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T12:24:00Z", "developer_id": "dev-012", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T12:25:00Z", "developer_id": "dev-029", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:29:00Z", "developer_id": "dev-020", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:30:00Z", "developer_id": "dev-030", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T12:32:00Z", "developer_id": "dev-030", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:35:00Z", "developer_id": "dev-011", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:37:00Z", "developer_id": "dev-031", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T12:39:00Z", "developer_id": "dev-031", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:41:00Z", "developer_id": "dev-025", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:42:00Z", "developer_id": "dev-008", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T12:44:00Z", "developer_id": "dev-032", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T12:46:00Z", "developer_id": "dev-032", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:47:00Z", "developer_id": "dev-016", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:51:00Z", "developer_id": "dev-033", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T12:53:00Z", "developer_id": "dev-030", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T12:53:00Z", "developer_id": "dev-033", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T12:58:00Z", "developer_id": "dev-034", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T12:59:00Z", "developer_id": "dev-021", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:00:00Z", "developer_id": "dev-004", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T13:00:00Z", "developer_id": "dev-034", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:05:00Z", "developer_id": "dev-035", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T13:07:00Z", "developer_id": "dev-001", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T13:07:00Z", "developer_id": "dev-035", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:11:00Z", "developer_id": "dev-026", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:12:00Z", "developer_id": "dev-036", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T13:14:00Z", "developer_id": "dev-036", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:17:00Z", "developer_id": "dev-017", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:19:00Z", "developer_id": "dev-037", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T13:21:00Z", "developer_id": "dev-037", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:23:00Z", "developer_id": "dev-031", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:26:00Z", "developer_id": "dev-038", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T13:28:00Z", "developer_id": "dev-038", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:29:00Z", "developer_id": "dev-022", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:33:00Z", "developer_id": "dev-039", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T13:35:00Z", "developer_id": "dev-036", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:35:00Z", "developer_id": "dev-039", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:40:00Z", "developer_id": "dev-040", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T13:41:00Z", "developer_id": "dev-027", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:42:00Z", "developer_id": "dev-040", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:47:00Z", "developer_id": "dev-041", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T13:48:00Z", "developer_id": "dev-024", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T13:49:00Z", "developer_id": "dev-041", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:53:00Z", "developer_id": "dev-032", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T13:54:00Z", "developer_id": "dev-042", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T13:56:00Z", "developer_id": "dev-042", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T13:57:00Z", "developer_id": "dev-012", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T13:59:00Z", "developer_id": "dev-023", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:01:00Z", "developer_id": "dev-043", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T14:03:00Z", "developer_id": "dev-043", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:05:00Z", "developer_id": "dev-037", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:06:00Z", "developer_id": "dev-020", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T14:08:00Z", "developer_id": "dev-044", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T14:09:00Z", "developer_id": "dev-001", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T14:10:00Z", "developer_id": "dev-044", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:11:00Z", "developer_id": "dev-028", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:15:00Z", "developer_id": "dev-045", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T14:17:00Z", "developer_id": "dev-042", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:17:00Z", "developer_id": "dev-045", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:22:00Z", "developer_id": "dev-046", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T14:23:00Z", "developer_id": "dev-033", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:24:00Z", "developer_id": "dev-016", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T14:24:00Z", "developer_id": "dev-046", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:29:00Z", "developer_id": "dev-047", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T14:31:00Z", "developer_id": "dev-013", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T14:31:00Z", "developer_id": "dev-047", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:35:00Z", "developer_id": "dev-038", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:36:00Z", "developer_id": "dev-048", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T14:37:00Z", "developer_id": "dev-020", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T14:38:00Z", "developer_id": "dev-048", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:41:00Z", "developer_id": "dev-029", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:43:00Z", "developer_id": "dev-049", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T14:45:00Z", "developer_id": "dev-049", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:46:00Z", "developer_id": "dev-008", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T14:47:00Z", "developer_id": "dev-043", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:49:00Z", "developer_id": "dev-009", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T14:50:00Z", "developer_id": "dev-050", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T14:52:00Z", "developer_id": "dev-050", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T14:53:00Z", "developer_id": "dev-034", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T14:56:00Z", "developer_id": "dev-006", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T14:57:00Z", "developer_id": "dev-051", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T14:59:00Z", "developer_id": "dev-051", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:04:00Z", "developer_id": "dev-052", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T15:05:00Z", "developer_id": "dev-039", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T15:06:00Z", "developer_id": "dev-052", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:07:00Z", "developer_id": "dev-005", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T15:11:00Z", "developer_id": "dev-053", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T15:13:00Z", "developer_id": "dev-053", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:14:00Z", "developer_id": "dev-002", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T15:17:00Z", "developer_id": "dev-044", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T15:18:00Z", "developer_id": "dev-054", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T15:20:00Z", "developer_id": "dev-054", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:23:00Z", "developer_id": "dev-035", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T15:25:00Z", "developer_id": "dev-055", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T15:26:00Z", "developer_id": "dev-016", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T15:27:00Z", "developer_id": "dev-055", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:30:00Z", "developer_id": "dev-032", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T15:32:00Z", "developer_id": "dev-056", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T15:34:00Z", "developer_id": "dev-056", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:35:00Z", "developer_id": "dev-004", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T15:35:00Z", "developer_id": "dev-040", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T15:38:00Z", "developer_id": "dev-005", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T15:39:00Z", "developer_id": "dev-057", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T15:41:00Z", "developer_id": "dev-057", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:46:00Z", "developer_id": "dev-058", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T15:47:00Z", "developer_id": "dev-045", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T15:48:00Z", "developer_id": "dev-028", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T15:48:00Z", "developer_id": "dev-058", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:53:00Z", "developer_id": "dev-059", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T15:55:00Z", "developer_id": "dev-025", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T15:55:00Z", "developer_id": "dev-059", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T15:58:00Z", "developer_id": "dev-006", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T16:00:00Z", "developer_id": "dev-060", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T16:02:00Z", "developer_id": "dev-060", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T16:05:00Z", "developer_id": "dev-041", "event": "key_issued", "tier": "free"}
+{"ts": "2026-03-02T16:13:00Z", "developer_id": "dev-021", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T16:20:00Z", "developer_id": "dev-018", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T16:23:00Z", "developer_id": "dev-024", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T16:31:00Z", "developer_id": "dev-017", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T16:35:00Z", "developer_id": "dev-013", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T16:38:00Z", "developer_id": "dev-014", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T16:47:00Z", "developer_id": "dev-002", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T16:56:00Z", "developer_id": "dev-010", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T17:03:00Z", "developer_id": "dev-007", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T17:15:00Z", "developer_id": "dev-021", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T17:21:00Z", "developer_id": "dev-003", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T17:24:00Z", "developer_id": "dev-009", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T17:27:00Z", "developer_id": "dev-010", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T17:37:00Z", "developer_id": "dev-033", "event": "first_call", "endpoint": "GET /robots", "status": 401}
+{"ts": "2026-03-02T17:44:00Z", "developer_id": "dev-030", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T17:55:00Z", "developer_id": "dev-029", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T18:02:00Z", "developer_id": "dev-026", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T18:04:00Z", "developer_id": "dev-017", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T18:20:00Z", "developer_id": "dev-022", "event": "first_call", "endpoint": "GET /robots", "status": 401}
+{"ts": "2026-03-02T18:24:00Z", "developer_id": "dev-018", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T18:27:00Z", "developer_id": "dev-019", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T18:36:00Z", "developer_id": "dev-007", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T18:45:00Z", "developer_id": "dev-015", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T19:03:00Z", "developer_id": "dev-011", "event": "first_call", "endpoint": "GET /robots", "status": 401}
+{"ts": "2026-03-02T19:13:00Z", "developer_id": "dev-014", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T19:16:00Z", "developer_id": "dev-015", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T19:25:00Z", "developer_id": "dev-003", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T19:51:00Z", "developer_id": "dev-031", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T19:53:00Z", "developer_id": "dev-022", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T20:05:00Z", "developer_id": "dev-011", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T20:09:00Z", "developer_id": "dev-027", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T20:27:00Z", "developer_id": "dev-023", "event": "first_call", "endpoint": "GET /robots", "status": 200}
+{"ts": "2026-03-02T21:02:00Z", "developer_id": "dev-019", "event": "first_200", "endpoint": "GET /robots"}
+{"ts": "2026-03-02T22:31:00Z", "developer_id": "dev-023", "event": "first_200", "endpoint": "GET /robots"}

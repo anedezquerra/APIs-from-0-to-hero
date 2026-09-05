@@ -1,0 +1,44 @@
+# Northwind Robotics API style ruleset (rules as data).
+# Each rule: id, severity (error|warn), kind, and kind-specific params.
+rules:
+  - id: info-contact-required
+    severity: error
+    kind: require-field
+    pointer: /info/contact
+    message: info.contact must name an owning team or alias.
+
+  - id: semver-info-version
+    severity: error
+    kind: match
+    pointer: /info/version
+    pattern: '^\d+\.\d+\.\d+$'
+    message: info.version must be strict semver (MAJOR.MINOR.PATCH).
+
+  - id: path-segment-kebab-case
+    severity: error
+    kind: casing
+    target: path_segment
+    style: kebab
+    message: Path segments must be kebab-case.
+
+  - id: operation-id-camel-case
+    severity: error
+    kind: casing
+    target: operation_id
+    style: camel
+    message: operationId must be camelCase.
+
+  - id: problem-json-errors
+    severity: error
+    kind: problem-json-errors
+    message: >-
+      Every operation must declare a 4xx/5xx or default response carrying
+      application/problem+json (RFC 9457).
+
+  - id: pagination-required-on-lists
+    severity: warn
+    kind: pagination-required
+    params: [limit, cursor]
+    message: >-
+      Collection GET endpoints must accept limit and cursor query
+      parameters.

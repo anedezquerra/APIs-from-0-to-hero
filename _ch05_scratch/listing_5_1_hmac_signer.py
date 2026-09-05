@@ -1,0 +1,239 @@
+"""Listing 5.1 -- SigV4-style HMAC request signer with a verifying stub server.
+
+Educational re-implementation of the AWS Signature Version 4 construction
+(canonical request -> string-to-sign -> key derivation chain -> signature)
+using only the Python 3.11+ standard library. Runs fully offline: the
+verifying server is a stdlib ``http.server`` bound to the loopback
+interface.
+
+All keys in this file are SYNTHETIC TEST FIXTURES for the fictional
+Northwind Robotics universe. Never use them anywhere else.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# --- Synthetic test fixtures (NOT real credentials) -------------------------
+ACCESS_KEY_ID = "NWRTESTACCESSKEY0001"
+SECRET_ACCESS_KEY = "nwr-test-secret-key-0123456789abcdef0123456789abcdef"
+REGION = "test-region-1"
+SERVICE = "parts"
+ALGORITHM = "NWR4-HMAC-SHA256"
+FIXED_AMZ_DATE = "20260301T120000Z"  # fixed for deterministic output
+FIXED_DATE_STAMP = "20260301"
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hmac_sha256(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _uri_encode(value: str, safe: str = "~") -> str:
+    """RFC 3986 URI encoding; unreserved characters are left as-is."""
+    unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._"
+    keep = unreserved + safe
+    out: list[str] = []
+    for ch in value:
+        if ch in keep:
+            out.append(ch)
+        else:
+            out.extend(f"%{b:02X}" for b in ch.encode("utf-8"))
+    return "".join(out)
+
+
+def canonical_uri(path: str) -> str:
+    """Normalize the path: each segment is URI-encoded, slashes preserved."""
+    if not path.startswith("/"):
+        raise ValueError("path must be absolute")
+    return "/".join(_uri_encode(seg) for seg in path.split("/"))
+
+
+def canonical_query(query: dict[str, str]) -> str:
+    """Sort parameters by (name, value); both are URI-encoded."""
+    pairs = sorted((_uri_encode(k), _uri_encode(v)) for k, v in query.items())
+    return "&".join(f"{k}={v}" for k, v in pairs)
+
+
+def canonical_headers(headers: dict[str, str]) -> tuple[str, str]:
+    """Lowercase names, trim/collapse whitespace, sort; return (block, list)."""
+    normalized = {
+        name.strip().lower(): " ".join(value.strip().split())
+        for name, value in headers.items()
+    }
+    ordered = sorted(normalized.items())
+    block = "".join(f"{name}:{value}\n" for name, value in ordered)
+    signed = ";".join(name for name, _ in ordered)
+    return block, signed
+
+
+def build_canonical_request(
+    method: str,
+    path: str,
+    query: dict[str, str],
+    headers: dict[str, str],
+    payload: bytes,
+) -> tuple[str, str]:
+    """Return (canonical_request, signed_headers)."""
+    header_block, signed_headers = canonical_headers(headers)
+    canonical = "\n".join(
+        [
+            method.upper(),
+            canonical_uri(path),
+            canonical_query(query),
+            header_block,
+            signed_headers,
+            _sha256_hex(payload),
+        ]
+    )
+    return canonical, signed_headers
+
+
+def derive_signing_key(secret: str, date_stamp: str, region: str, service: str) -> bytes:
+    """SigV4-style derivation chain: date -> region -> service -> request."""
+    k_date = _hmac_sha256(("NWR4" + secret).encode("utf-8"), date_stamp)
+    k_region = _hmac_sha256(k_date, region)
+    k_service = _hmac_sha256(k_region, service)
+    return _hmac_sha256(k_service, "nwr4_request")
+
+
+def sign_request(
+    method: str,
+    path: str,
+    query: dict[str, str],
+    payload: bytes,
+    host: str,
+    access_key: str,
+    secret_key: str,
+    amz_date: str = FIXED_AMZ_DATE,
+    date_stamp: str = FIXED_DATE_STAMP,
+) -> dict[str, str]:
+    """Produce the signed header set for an outgoing request."""
+    scope = f"{date_stamp}/{REGION}/{SERVICE}/nwr4_request"
+    headers = {
+        "host": host,
+        "x-nwr-date": amz_date,
+        "x-nwr-content-sha256": _sha256_hex(payload),
+    }
+    canonical, signed_headers = build_canonical_request(method, path, query, headers, payload)
+    string_to_sign = "\n".join([ALGORITHM, amz_date, scope, _sha256_hex(canonical.encode("utf-8"))])
+    signature = _hmac_sha256(
+        derive_signing_key(secret_key, date_stamp, REGION, SERVICE), string_to_sign
+    ).hex()
+    headers["Authorization"] = (
+        f"{ALGORITHM} Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    return headers
+
+
+class VerifyingHandler(BaseHTTPRequestHandler):
+    """Stub parts API that recomputes the signature and rejects tampering."""
+
+    def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = self.rfile.read(length)
+        path, _, raw_query = self.path.partition("?")
+        query = dict(
+            pair.split("=", 1) for pair in raw_query.split("&") if pair
+        ) if raw_query else {}
+
+        try:
+            auth = self.headers["Authorization"]
+            credential = auth.split("Credential=")[1].split(",")[0]
+            access_key, date_stamp, region, service, _ = credential.split("/")
+            amz_date = self.headers["x-nwr-date"]
+            headers = {
+                "host": self.headers["host"],
+                "x-nwr-date": amz_date,
+                "x-nwr-content-sha256": self.headers["x-nwr-content-sha256"],
+            }
+            canonical, _ = build_canonical_request("POST", path, query, headers, payload)
+            scope = f"{date_stamp}/{region}/{service}/nwr4_request"
+            string_to_sign = "\n".join(
+                [ALGORITHM, amz_date, scope, _sha256_hex(canonical.encode("utf-8"))]
+            )
+            expected = _hmac_sha256(
+                derive_signing_key(SECRET_ACCESS_KEY, date_stamp, region, service),
+                string_to_sign,
+            ).hex()
+            presented = auth.split("Signature=")[1]
+            if not hmac.compare_digest(expected, presented):
+                raise PermissionError("signature mismatch")
+            self._respond(200, {"status": "accepted", "access_key": access_key})
+        except (KeyError, IndexError, ValueError, PermissionError) as exc:
+            self._respond(403, {"error": type(exc).__name__})
+
+    def _respond(self, status: int, body: dict[str, str]) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass  # keep demo output deterministic
+
+
+def _post(path: str, query: dict[str, str], payload: bytes, headers: dict[str, str], port: int) -> tuple[int, str]:
+    qs = "&".join(f"{k}={v}" for k, v in query.items())
+    url = f"http://127.0.0.1:{port}{path}" + (f"?{qs}" if qs else "")
+    req = urllib.request.Request(url, data=payload, method="POST")
+    for name, value in headers.items():
+        if name.lower() != "host":
+            req.add_header(name, value)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+def main() -> None:
+    server = HTTPServer(("127.0.0.1", 0), VerifyingHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        host = f"127.0.0.1:{port}"
+        path, query = "/api/v1/parts", {"warehouse": "east", "priority": "high"}
+        payload = json.dumps({"sku": "NWR-ARM-9000", "quantity": 3}).encode("utf-8")
+
+        # 1. Happy path: properly signed request is accepted.
+        headers = sign_request("POST", path, query, payload, host, ACCESS_KEY_ID, SECRET_ACCESS_KEY)
+        status, body = _post(path, query, payload, headers, port)
+        print(f"[1] signed request           -> {status} {body}")
+
+        # 2. Tampered body: signature no longer matches the payload hash.
+        evil_payload = json.dumps({"sku": "NWR-ARM-9000", "quantity": 99999}).encode("utf-8")
+        status, body = _post(path, query, evil_payload, headers, port)
+        print(f"[2] tampered body            -> {status} {body}")
+
+        # 3. Wrong secret: derived signing key differs, verification fails.
+        bad = sign_request("POST", path, query, payload, host, ACCESS_KEY_ID, "wrong-secret")
+        status, body = _post(path, query, payload, bad, port)
+        print(f"[3] wrong secret key         -> {status} {body}")
+
+        # 4. Show the deterministic signing internals for inspection.
+        canonical, signed_headers = build_canonical_request(
+            "POST", path, query,
+            {"host": host, "x-nwr-date": FIXED_AMZ_DATE,
+             "x-nwr-content-sha256": _sha256_hex(payload)},
+            payload,
+        )
+        print("[4] canonical request (lines):", len(canonical.splitlines()),
+              "| signed headers:", signed_headers)
+    finally:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

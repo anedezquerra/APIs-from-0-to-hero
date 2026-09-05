@@ -1,0 +1,3054 @@
+%% ============================================================================
+%% Chapter 19: Testing & Quality Engineering for APIs
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Testing \& Quality Engineering for APIs}
+\label{ch:testing}
+
+%% ----------------------------------------------------------------------------
+%% 1. Executive Summary
+%% ----------------------------------------------------------------------------
+An API you have not tested is a rumor. Worse, an API tested only by its own
+developers is a rumor the provider tells itself: every chapter of this book
+so far has built artifacts --- HTTP semantics (Chapter~\ref{ch:http_wire}),
+serializers (Chapter~\ref{ch:serialization}), FastAPI services
+(Chapter~\ref{ch:fastapi}), RFC~9457 error shapes
+(Chapter~\ref{ch:problem_details}), versioned evolvable contracts
+(Chapter~\ref{ch:versioning}), resilience policies
+(Chapter~\ref{ch:microservices}) --- and each artifact makes promises that
+\emph{someone else} will depend on. This chapter is about turning those
+promises into executable evidence, and about building the quality gates that
+refuse to ship when the evidence goes missing.
+
+We begin with the \textbf{API test pyramid}: unit tests for validators and
+serializers, component tests that run an endpoint against real in-process
+dependencies, contract tests that pin the consumer--provider agreement,
+integration tests that cross process boundaries, and a thin crust of
+end-to-end journeys. For each layer we state precisely which defect classes
+it can and cannot catch, its cost and speed profile, and where the
+``testing trophy'' critique of the classic pyramid is right and wrong.
+We then go deep on \textbf{consumer-driven contract testing} with the Pact
+model~\cite{pactdocs}: the consumer records interactions into a pact file,
+a broker distributes it, the provider replays it against real code using
+named provider states, and a \texttt{can-i-deploy} gate blocks incompatible
+releases. We contrast this with OpenAPI-diff schema checking
+\cite{openapi31} and give a decision rule for when each applies.
+
+Next come the two most under-used techniques in API engineering.
+\textbf{Property-based testing} replaces hand-picked examples with
+generated universes of inputs and machine-checked invariants --- never
+5xx, schema-conformant 2xx, problem-shaped 4xx --- with automatic
+\emph{shrinking} of counterexamples and rule-based \emph{stateful} testing
+of API sequences. \textbf{Offline-first mocking} gives us a precise
+fake/stub/mock taxonomy, \texttt{httpx.MockTransport}-style interception,
+record--replay cassettes, and --- critically --- \emph{virtual clocks} that
+let us test retries, timeouts, and circuit breakers deterministically
+without ever calling \texttt{sleep}. Then we build \textbf{load and
+performance testing} from first principles: open versus closed workload
+models, coordinated omission, a derivation and application of Little's Law
+$L = \lambda W$, saturation sweeps and knee-point analysis, and the
+load/stress/soak/spike taxonomy \cite{nygard2018releaseit,beyer2016sre}.
+\textbf{Chaos engineering} follows: a fault taxonomy (latency, errors,
+aborts, partitions, resource exhaustion), blast-radius control, and
+steady-state hypotheses, implemented as deterministic fault-injection
+middleware. Finally we assemble everything into \textbf{CI quality gates as
+code}: coverage floors, contract gates, performance regression budgets,
+fuzz smoke tests, and disciplined flake management.
+
+Every technique is backed by runnable, offline, deterministic Python~3.11
+code against the synthetic Northwind Robotics robot registry: a mini
+contract-testing framework that \emph{proves} it catches a breaking field
+rename, a Hypothesis suite plus a stdlib OpenAPI fuzzer that finds and
+shrinks a planted bug, an \texttt{asyncio} load harness that prints a
+knee-point table, fault-injection middleware exercised entirely on virtual
+time, and a single \texttt{ci\_gate.py} that runs the whole battery and
+exits 0 or 1.
+
+\begin{keyconceptbox}
+A test suite is not a pile of checks; it is a \emph{supply chain of
+evidence}. Each layer manufactures a different kind of confidence at a
+different unit cost: units catch logic bugs in milliseconds, contracts
+catch cross-team breakage without a shared environment, fuzzers explore
+input spaces humans cannot enumerate, load harnesses locate the saturation
+knee before your customers do, and chaos experiments prove your resilience
+claims instead of assuming them. The craft of quality engineering is
+allocating budget across these layers so that the \emph{cheapest} layer
+that can catch each defect class is the one that does.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch19-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Place any given test on the API test pyramid (unit, component,
+        contract, integration, end-to-end), state which defect classes that
+        layer catches, and defend the cost/speed trade-off of the placement,
+        including the testing-trophy critique of the classic pyramid.
+  \item Implement the consumer-driven contract loop end to end: record
+        consumer interactions into a pact file, distribute it, replay it on
+        the provider against real code using named provider states, and
+        gate deployment on verification --- and articulate when Pact-style
+        contracts beat OpenAPI-diff schema checking and vice
+        versa~\cite{pactdocs,openapi31}.
+  \item Write property-based API tests with explicit strategies and
+        invariants (never 5xx; 2xx validates against the response schema;
+        4xx is RFC~9457 shaped), explain how shrinking minimizes
+        counterexamples, and design rule-based stateful tests that catch
+        sequence-dependent bugs.
+  \item Distinguish fakes, stubs, mocks, and record--replay cassettes with
+        precise definitions, and test retries, timeouts, and circuit
+        breakers deterministically using virtual clocks and scripted fault
+        injection instead of wall-clock sleeps~\cite{httpxdocs}.
+  \item Build an offline load harness implementing open and closed workload
+        models, derive and apply Little's Law $L = \lambda W$ to capacity
+        questions, run a saturation sweep, and read a knee-point table to
+        set performance budgets.
+  \item Define a fault taxonomy (latency, error, abort, partition, resource
+        exhaustion), state a steady-state hypothesis, bound a blast radius,
+        and implement deterministic fault-injection middleware for tests.
+  \item Assemble CI quality gates as code --- coverage floors, contract
+        verification, fuzz smoke, performance smoke with structural (not
+        wall-clock) assertions --- and operate a flake-management policy
+        that keeps gates trustworthy.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed:
+
+\begin{itemize}
+  \item \textbf{Chapters 0--5} --- Python~3.11+ environment, HTTP wire
+        semantics, consuming APIs with \texttt{httpx}, serialization
+        contracts, and client-side security hygiene (no credentials in
+        tests, ever).
+  \item \textbf{Chapter 6} (Building APIs with FastAPI) --- application
+        factories, dependency injection, Pydantic models, and running an
+        app in-process through an ASGI transport~\cite{fastapidocs}.
+  \item \textbf{Chapter 7} (Errors, Validation \& Problem Details) ---
+        RFC~9457 \texttt{application/problem+json} shape; our fuzz gate
+        asserts it for every 4xx.
+  \item \textbf{Chapter 9} (Versioning \& Evolution) --- additive versus
+        breaking change; the contract-diff gate connects directly to the
+        compatibility rules defined there.
+  \item \textbf{Chapter 15} (Microservices \& Resilience) --- retries,
+        timeouts, and circuit breakers, which we now learn to test
+        deterministically.
+  \item \textbf{Chapter 18} (Observability \& SRE) --- latency percentiles
+        and SLIs; the load harness histogram reuses that chapter's
+        percentile machinery.
+\end{itemize}
+
+All code runs offline on Windows with PowerShell: services are exercised
+in-process via ASGI transports, pact files live on local disk, and every
+random process is seeded or derandomized. Reported performance numbers are
+illustrative, never asserted.
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch19-mechanics}
+
+\subsection{The API Test Pyramid}
+\label{sec:ch19-pyramid}
+
+The test pyramid is a portfolio theory, not a geometry lesson. Each layer
+answers a different question, at a different speed, at a different cost per
+defect found:
+
+\begin{definition}[Test layers for APIs]
+\label{def:test-layers}
+A \textbf{unit test} exercises a pure unit of logic --- a validator, a
+serializer, a pagination-token codec --- with no I/O. A \textbf{component
+test} exercises one whole service in-process: real routing, real
+validation, real serialization, with external dependencies replaced or
+embedded. A \textbf{contract test} checks that a provider still satisfies
+the recorded expectations of its consumers (or that a spec change is
+backward compatible). An \textbf{integration test} crosses a real process
+or infrastructure boundary: service to database, service to queue, service
+to service. An \textbf{end-to-end (E2E) test} drives a user journey through
+the deployed system, front door to database and back.
+\end{definition}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm, y=1cm,
+  layer/.style={draw=packtgray, thick},
+  lbl/.style={align=center, font=\small},
+  side/.style={align=left, font=\footnotesize, text=packtgray, text width=6.6cm},
+  axis/.style={->, thick, packtgray}]
+  % --- pyramid body (trapezoids, bottom widest) ---
+  \draw[layer, fill=blue!7]   (-5.2,0.0) -- (5.2,0.0) -- (4.0,1.4) -- (-4.0,1.4) -- cycle;
+  \draw[layer, fill=green!9]  (-4.0,1.4) -- (4.0,1.4) -- (2.8,2.8) -- (-2.8,2.8) -- cycle;
+  \draw[layer, fill=orange!12] (-2.8,2.8) -- (2.8,2.8) -- (1.6,4.2) -- (-1.6,4.2) -- cycle;
+  \draw[layer, fill=purple!10] (-1.6,4.2) -- (1.6,4.2) -- (0.6,5.4) -- (-0.6,5.4) -- cycle;
+  \draw[layer, fill=red!10]   (-0.6,5.4) -- (0.6,5.4) -- (0.0,6.3) -- cycle;
+  \node[lbl] at (0,0.68) {\textbf{Unit} --- validators, serializers, codecs, pure rules};
+  \node[lbl] at (0,2.08) {\textbf{Component} --- endpoint + real deps, in-process ASGI};
+  \node[lbl] at (0,3.48) {\textbf{Contract} --- pact verify, schema diff};
+  \node[lbl] at (0,4.78) {\textbf{Integration}};
+  \node[lbl] at (0,5.72) {\textbf{E2E}};
+  % --- side annotations ---
+  \node[side, anchor=west] at (6.0,0.68) {thousands of cases; microseconds each; pinpoints the broken line};
+  \node[side, anchor=west] at (6.0,2.08) {hundreds of cases; milliseconds each; catches wiring + validation + error-shape bugs};
+  \node[side, anchor=west] at (6.0,3.48) {one suite per consumer--provider pair; catches cross-team breakage without a shared environment};
+  \node[side, anchor=west] at (6.0,4.78) {tens of cases; seconds each; catches config, auth, schema-migration drift};
+  \node[side, anchor=west] at (6.0,5.72) {a handful of golden journeys; minutes each; proves the system, not the parts};
+  % --- axes ---
+  \draw[axis] (-6.3,0.1) -- (-6.3,6.1) node[above, note, align=center] {cost, time,\\brittleness};
+  \draw[axis] (-6.9,6.1) -- (-6.9,0.1) node[below, note, align=center] {execution\\speed};
+\end{tikzpicture}
+\caption{The API test pyramid. Width encodes recommended \emph{volume};
+height encodes cost and environmental fidelity. Contract tests sit above
+component tests because they assume a working provider component, yet far
+below integration tests in environmental cost.}
+\label{fig:ch19-pyramid}
+\end{figure}
+
+The economics are unforgiving. A defect caught by a unit test costs a
+millisecond rerun; the same defect caught by an E2E test costs a
+distributed-systems debugging session across three teams' dashboards. The
+inverted pyramid (``ice-cream cone'') --- a thin unit layer and a fat E2E
+layer --- is the single most common structural failure of API test suites:
+it is slow, flaky, and worst of all \emph{ambiguous}, because a red E2E
+test tells you that \emph{something} is wrong somewhere in five services.
+
+\begin{remark}[The testing trophy debate]
+Kent C.~Dodds' ``testing trophy'' argues the pyramid under-weights
+\emph{integration} (in our terms, component) tests: modern in-process
+transports and embedded fakes make whole-service tests cheap enough to
+carry most of the suite. Both shapes agree on the actual invariant: push
+verification \emph{down} to the cheapest layer that can catch the defect,
+and keep the top thin. For HTTP APIs specifically, the component layer is
+extraordinarily powerful because ASGI transports let us exercise the entire
+service --- routing, validation, serialization, error shaping --- with zero
+network, which is why most listings in this chapter live there.
+\end{remark}
+
+A useful discipline is to declare, per defect class, the \emph{designated
+catcher}: validation bugs belong to unit and property tests; wiring and
+serialization bugs to component tests; cross-team contract drift to
+contract tests; infrastructure misconfiguration to integration tests; and
+only genuine emergent, whole-system behavior to E2E. When a bug escapes to
+production, the postmortem question is never ``why did no test catch it''
+but ``which designated catcher failed, and why''.
+
+\subsection{Consumer-Driven Contract Testing}
+\label{sec:ch19-contracts}
+
+Schema tells you what a provider \emph{can} serve; a consumer-driven
+contract tells you what consumers \emph{actually rely on}. The gap between
+those two sets is where deploys go to die: a provider renames a field it
+believes unused, every one of its own tests stays green, and three consumer
+services fail in production.
+
+\begin{definition}[Consumer-driven contract]
+\label{def:cdc}
+A \textbf{consumer-driven contract} is a machine-readable artifact,
+authored from the consumer's perspective, recording the interactions the
+consumer depends on --- request shape, expected status, and the subset of
+the response the consumer reads --- together with the \emph{provider
+states} under which those expectations hold. The provider's build
+\emph{verifies} the contract by replaying every interaction against real
+provider code.
+\end{definition}
+
+\begin{definition}[Provider state]
+\label{def:provider-state}
+A \textbf{provider state} is a named precondition (``a robot with id 7
+exists'') that the provider must arrange before replaying an interaction.
+Good states are \emph{minimal} (they arrange exactly what the interaction
+needs), \emph{independent} (any order, any subset), and \emph{semantic}
+(named by domain meaning, not by fixture mechanics). A state that seeds the
+entire universe is a smell: it hides which interactions need which data and
+makes failures undebuggable.
+\end{definition}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm, y=1cm, node distance=0.9cm,
+  box/.style={flowstep, fill=blue!5},
+  artifact/.style={flowstep, fill=orange!15},
+  gate/.style={flowstep, fill=red!8},
+  wire/.style={->, thick},
+  back/.style={->, thick, dashed, packtgray}]
+  \node[box] (consumer) {\textbf{Consumer test}\\records interactions};
+  \node[artifact, right=of consumer] (pact) {\textbf{pact file}\\consumer + provider\\+ interactions};
+  \node[artifact, right=of pact] (broker) {\textbf{Broker}\\versioned contract\\store};
+  \node[box, right=of broker] (provider) {\textbf{Provider CI}\\replay + provider\\states};
+  \node[gate, below=0.9cm of provider] (candeploy) {\textbf{can-i-deploy}\\all pacts verified\\for this version?};
+  \node[box, left=of candeploy] (deploy) {\textbf{Deploy / block}};
+  \draw[wire] (consumer) -- node[above, note]{1. publish} (pact);
+  \draw[wire] (pact) -- node[above, note]{2. store} (broker);
+  \draw[wire] (broker) -- node[above, note]{3. fetch} (provider);
+  \draw[wire] (provider) -- node[right, note]{4. results} (candeploy);
+  \draw[wire] (candeploy) -- node[above, note]{5. gate} (deploy);
+  \draw[back] (provider.north) .. controls +(0,1.1) and +(0,1.1) .. node[above, note]{6. verification results flow back to consumers} (consumer.north);
+\end{tikzpicture}
+\caption{The consumer-driven contract loop (Pact model~\cite{pactdocs}).
+The pact file is written by the \emph{consumer}, owned by \emph{both}
+teams, and executed by the \emph{provider's} build.}
+\label{fig:ch19-contract-loop}
+\end{figure}
+
+Three properties make the loop work in organizations, not just in
+diagrams. First, \textbf{the artifact crosses team boundaries}: the pact
+file is a message from the consumer team to the provider team, and the
+broker makes that message durable, versioned, and queryable. Second,
+\textbf{verification runs on the provider's real code}, typically
+in-process against the real application with real serialization --- a
+contract verified against a mock of the provider verifies nothing. Third,
+\textbf{deployment is gated}: \texttt{can-i-deploy} answers ``does version
+$v$ of the provider satisfy every pact published against it?'' before $v$
+ships, per environment.
+
+\paragraph{Pact versus OpenAPI-diff.}
+An OpenAPI-diff gate (connecting to Chapter~\ref{ch:versioning}) compares
+two spec revisions and flags structural incompatibilities: removed
+operations, removed response fields, tightened constraints. It needs no
+consumer participation and works for public APIs with thousands of unknown
+consumers --- but it can only flag what is \emph{structurally} breaking,
+and it must conservatively treat every published field as load-bearing.
+Pact-style contracts are usage-based: a field nobody reads can be renamed
+without tripping any pact, and a \emph{semantically} breaking change inside
+a structurally identical shape (same field, new meaning) can still be
+caught by an explicit consumer expectation. The decision rule:
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+ & \textbf{Contract tests (Pact)} & \textbf{OpenAPI diff} \\
+\midrule
+Consumers & few, known, internal & many / unknown / public \\
+Detects & usage-level breakage, semantic drift & structural breakage only \\
+Setup cost & broker, provider states, both teams & spec in repo, diff tool \\
+False safety & uncovered consumers & ``compatible'' spec, changed meaning \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Mature platforms run both: schema diff as the coarse public-safety net,
+consumer contracts as the precise internal gate.
+
+\subsection{Property-Based Testing and API Fuzzing}
+\label{sec:ch19-pbt}
+
+Example-based tests enumerate inputs the author imagined; property-based
+tests enumerate inputs the author \emph{did not}. A property-based test
+consists of three parts: a \textbf{strategy} that generates a universe of
+inputs (valid \emph{and} invalid), an \textbf{invariant} that must hold for
+every generated input, and a \textbf{shrinker} that, on failure,
+automatically minimizes the counterexample to the smallest reproducing
+case. For HTTP APIs, the killer invariants are remarkably uniform:
+
+\begin{enumerate}
+  \item \textbf{Never 5xx.} Whatever the payload --- wrong types, missing
+        fields, boundary values, pathological lengths --- the server must
+        answer 2xx or a well-formed 4xx. A 5xx is an unhandled exception,
+        full stop.
+  \item \textbf{2xx validates against the published schema.} If the
+        response does not conform to the contract you advertised, your
+        successful responses are bugs.
+  \item \textbf{4xx is RFC~9457 shaped.} Every client-side error carries
+        \texttt{type}, \texttt{title}, \texttt{status}, \texttt{detail},
+        \texttt{instance} (Chapter~\ref{ch:problem_details}), so consumers
+        can handle errors programmatically.
+\end{enumerate}
+
+\textbf{Shrinking} is what makes failures actionable. A naive fuzzer
+reports ``500 on payload of 4{,}000 random keys''; a shrinker
+systematically deletes keys and minimizes values while the failure
+reproduces, converging to something like
+\texttt{\{"price\_cents": 666\}} --- which is a bug report a human can act
+on. Hypothesis performs this automatically; our mini fuzzer implements a
+greedy version by hand so the mechanics are visible.
+
+\textbf{Stateful (rule-based) testing} extends properties across
+\emph{sequences}: generate random interleavings of create/read/update
+operations, maintain a local model of expected state, and assert the API
+agrees with the model after every step. This catches the bugs single-call
+tests structurally cannot: lost updates, read-your-writes violations,
+idempotency-key reuse bugs (Chapter~\ref{ch:idempotency}), and leakage
+between resources.
+
+\textbf{Schemathesis-style fuzzing} derives the strategy automatically
+from the OpenAPI document: every operation, every parameter, boundary and
+malformed values per schema constraint, executed against the live service
+with the same three invariants above~\cite{openapi31}. In
+Section~\ref{sec:ch19-code} we build a stdlib miniature of this pipeline so
+that the generation logic --- candidate values at \texttt{minLength}$-1$,
+\texttt{maxLength}$+1$, \texttt{minimum}$-1$, wrong types, \texttt{null},
+missing required keys, extra keys, non-object bodies --- is explicit rather
+than magical.
+
+\subsection{Test Doubles, Record--Replay, and Virtual Clocks}
+\label{sec:ch19-doubles}
+
+The word ``mock'' is used for five different things; imprecision here
+causes real design damage, so we fix the taxonomy (after Meszaros'
+xUnit patterns):
+
+\begin{definition}[Test doubles]
+\label{def:doubles}
+A \textbf{dummy} is passed to satisfy a signature and never used. A
+\textbf{stub} returns canned answers to calls the test triggers. A
+\textbf{fake} is a working implementation with shortcuts (an in-memory
+repository, an ASGI in-process transport). A \textbf{spy} records calls so
+the test can assert on them afterward. A \textbf{mock} is programmed with
+\emph{expectations} up front and fails on unexpected calls.
+\end{definition}
+
+For HTTP clients, the practical hierarchy is: prefer the \emph{fake}
+(in-process ASGI transport to the real app) for anything you own; use
+\emph{stubs} (\texttt{httpx.MockTransport} handlers, or \texttt{respx}
+routes) for third-party edges with fixed canned responses; use
+\textbf{record--replay cassettes} (VCR-style: record real interactions
+once, replay byte-identical responses forever after) when the third party
+is too complex to hand-stub --- with two disciplines: cassettes must be
+\emph{sanitized} (no secrets, no real PII --- synthetic Northwind Robotics
+data only) and \emph{re-recorded on a schedule}, because a cassette is a
+contract claim that silently rots. WireMock-style standalone HTTP servers
+are the same stub idea hoisted into a separate process for polyglot test
+suites. The classic anti-pattern is mocking \emph{what you do not own} and
+then asserting on the mock's call list: you have then tested that your code
+calls your imagination of the vendor's API, and the test stays green while
+the real integration rots.
+
+\textbf{Virtual clocks} solve the hardest determinism problem in client
+testing: time. Any test that calls \texttt{time.sleep(2)} to exercise a
+retry backoff is slow, flaky, and unscalable. The fix is to inject the
+sleeper: production wires \texttt{asyncio.sleep}; tests wire a
+\texttt{VirtualClock} that records the requested delay and advances a
+counter instantly. The test then asserts on the \emph{recorded schedule}
+(\texttt{[0.1, 0.2, 0.4]} for exponential backoff) --- which is the actual
+behavioral contract --- in microseconds of real time. The same injection
+point serves timeouts and circuit breakers: fault injection decides
+\emph{what} fails, the virtual clock decides \emph{how long} anything
+takes, and no assertion ever touches the wall clock.
+
+\subsection{Load and Performance Testing}
+\label{sec:ch19-load}
+
+Performance testing has one question: \emph{where is the knee, and how much
+headroom separates us from it?} Everything else --- tools, models, charts
+--- serves that question.
+
+\paragraph{Open versus closed workload models.}
+In a \textbf{closed model}, a fixed population of $N$ workers each issues a
+request, waits for the response, then issues the next; offered load adapts
+to the system's speed, so an overloaded system sees \emph{less} load ---
+which hides overload. In an \textbf{open model}, requests arrive at a fixed
+rate $\lambda$ regardless of completions; overload manifests as queueing
+and latency growth, which is what real traffic does to real APIs. k6
+(via arrival-rate executors) and Locust (via fixed user counts versus
+custom arrival control) embody the same distinction. The classic
+methodological sin is \textbf{coordinated omission}: a closed-model
+load generator that schedules by \emph{completion} time silently skips the
+load that should have been offered during a latency spike, and reports a
+healthier system than reality.
+
+\paragraph{Little's Law.}
+\begin{theorem}[Little's Law]
+\label{thm:little}
+For a stable system, the mean number of requests in residence $L$, the
+arrival rate $\lambda$, and the mean residence time $W$ satisfy
+$L = \lambda W$.
+\end{theorem}
+
+\begin{proof}[Derivation]
+Observe the system over a long interval $[0, T]$ in which $N$ requests
+complete and the number in residence $L(t)$ returns to its initial value.
+Each request $i$ contributes exactly its residence time $W_i$ to the area
+under the curve $L(t)$:
+\begin{align}
+\int_{0}^{T} L(t)\,dt &= \sum_{i=1}^{N} W_i.
+\end{align}
+Divide both sides by $T$:
+\begin{align}
+L \;=\; \frac{1}{T}\int_{0}^{T} L(t)\,dt \;=\; \frac{N}{T}\cdot\frac{1}{N}\sum_{i=1}^{N} W_i \;=\; \lambda \cdot W,
+\end{align}
+since $\lambda = N/T$ is the throughput (equal to the arrival rate in a
+stable system) and $W = \frac{1}{N}\sum_i W_i$ is the mean residence time.
+\end{proof}
+
+Little's Law is the Swiss army knife of capacity reasoning. If your API
+serves $\lambda = 500$ req/s at a mean latency of $W = 40$ ms, then on
+average $L = 500 \times 0.04 = 20$ requests are in flight --- your worker
+pool, connection pool, and async concurrency limits must all exceed 20 with
+headroom, or queueing begins. Conversely, in a closed-model test with $N$
+workers you can \emph{predict} throughput: $\lambda = N / W$. Our harness
+performs exactly this cross-check numerically.
+
+\paragraph{Saturation and the knee.}
+Let $S$ be mean service time and $c$ the effective concurrency (workers,
+event-loop capacity, pool size). Utilization is $\rho = \lambda S / c$, and
+queueing theory gives the qualitative shape $W \approx S / (1 - \rho)$:
+latency is flat while $\rho \ll 1$, then explodes hyperbolically as
+$\rho \to 1$. The \textbf{knee} is the offered rate at which the curve
+turns --- operationally, the first load level where tail latency degrades
+superlinearly (we flag p99 $>$ 10$\times$ baseline) or errors appear.
+Sustainable capacity is provisioned \emph{below} the knee, typically at
+60--70\% of it, because arrival bursts and deploys eat the remainder
+\cite{beyer2016sre,nygard2018releaseit}.
+
+\paragraph{The four load test shapes.}
+\begin{center}
+\begin{tabularx}{\textwidth}{l X l}
+\toprule
+\textbf{Shape} & \textbf{Question answered} & \textbf{Duration} \\
+\midrule
+Load   & Does the system meet SLOs at \emph{expected} peak? & 15--60 min \\
+Stress & Where is the knee? What fails first past it? & ramp to failure \\
+Soak   & Do leaks, fragmentation, or log growth degrade us over time? & hours--days \\
+Spike  & Does the system survive a 10$\times$ burst (cache cold, autoscaler lag)? & seconds--minutes \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Soak tests catch what ramps cannot: memory leaks, file-descriptor
+exhaustion, token-cache stampede alignment, and disk growth
+(Chapter~\ref{ch:observability} covers the telemetry). Spike tests expose
+\emph{elasticity} defects --- the load balancer scales in minutes, the
+traffic arrives in seconds.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm, y=1cm, node distance=0.55cm,
+  box/.style={flowstep, fill=green!7},
+  analysis/.style={flowstep, fill=orange!12},
+  gate/.style={flowstep, fill=red!8},
+  wire/.style={->, thick}]
+  \node[box] (model) {\textbf{1. Model workload}\\open or closed?\\request mix, payload sizes};
+  \node[box, right=of model] (baseline) {\textbf{2. Baseline}\\low-rate run\\establishes p50 reference};
+  \node[box, right=of baseline] (sweep) {\textbf{3. Saturation sweep}\\ramp offered RPS\\fixed short windows};
+  \node[analysis, right=of sweep] (knee) {\textbf{4. Knee analysis}\\p99 vs baseline,\\error rate, Little check};
+  \node[analysis, below=0.55cm of knee] (budget) {\textbf{5. Budgets}\\capacity headroom\\perf regression limits};
+  \node[gate, left=of budget] (ci) {\textbf{6. CI perf gate}\\structural assertions\\smoke sweep offline};
+  \draw[wire] (model) -- (baseline);
+  \draw[wire] (baseline) -- (sweep);
+  \draw[wire] (sweep) -- (knee);
+  \draw[wire] (knee) -- (budget);
+  \draw[wire] (budget) -- (ci);
+  \draw[wire, dashed, packtgray] (ci.west) -- ++(-1.1,0) |- node[left, note, align=center]{re-calibrate on\\arch change} (model.west);
+\end{tikzpicture}
+\caption{Load-test methodology. The CI gate runs a short structural smoke;
+deep sweeps are scheduled offline and re-baselined on architectural
+change.}
+\label{fig:ch19-load-flow}
+\end{figure}
+
+\subsection{Chaos Engineering Basics}
+\label{sec:ch19-chaos}
+
+Chaos engineering is the experimental validation of resilience claims.
+Chapter~\ref{ch:microservices} taught you to \emph{build} retries,
+timeouts, and breakers; chaos asks: do they actually work, in combination,
+under realistic failure?
+
+\begin{definition}[Steady-state hypothesis and blast radius]
+\label{def:chaos}
+The \textbf{steady state} is a measurable, behavioral definition of
+``the system is fine'' --- e.g., p99 $<$ 250 ms and error rate $<$ 0.1\%
+over five minutes --- never an internal one (``CPU looks low''). A
+\textbf{steady-state hypothesis} asserts the system remains in steady state
+under a specified fault. The \textbf{blast radius} is the maximal scope the
+experiment can affect; experiments start at the smallest blast radius (one
+in-process middleware in a test) and widen only as confidence grows.
+\end{definition}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{Fault class} & \textbf{Mechanism} & \textbf{Reveals} \\
+\midrule
+Latency & inject delay before/around the dependency & missing timeouts, thread/connection starvation \\
+Error (5xx) & synthesize error responses & retry storms, missing backoff/jitter, error-mapping bugs \\
+Abort & drop/reset the connection with no response & retry-on-exception paths, hung-read behavior \\
+Partition & make a dependency unreachable entirely & failover, cache fallback, graceful degradation \\
+Resource exhaustion & cap CPU/memory/threads/FDs & queue growth, priority inversion, GC death spirals \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Distributed systems fail in partial, correlated, and Byzantine ways
+\cite{kleppmann2017ddia}; the taxonomy above is ordered roughly by
+increasing subtlety. The critical engineering move for \emph{testing} is
+determinism: our fault-injection middleware is scripted by request index,
+not by random dice, so a failing resilience test reproduces byte-for-byte.
+Randomized chaos is for staging environments and game days; scripted chaos
+is for CI.
+
+\subsection{CI Quality Gates as Code}
+\label{sec:ch19-gates}
+
+A quality gate is a function from change to evidence, executed on every
+pull request, whose failure blocks merge. The design rules that keep gates
+healthy:
+
+\begin{enumerate}
+  \item \textbf{Hermetic.} No network, no cloud, no shared environment.
+        Everything in this chapter runs in-process; a gate that needs
+        staging is a gate that will be disabled.
+  \item \textbf{Fast.} Minutes, not hours. Deep load sweeps and long soaks
+        are scheduled jobs that update budgets; the PR gate runs structural
+        smoke.
+  \item \textbf{Self-checking.} A gate that cannot fail proves nothing.
+        Our gate runs each check against a deliberately broken variant and
+        requires the check to catch it --- mutation testing applied to the
+        pipeline itself.
+  \item \textbf{Deterministic.} Derandomized property seeds, scripted
+        faults, structural perf assertions. A flaky gate trains the team to
+        click ``re-run'' without reading, which is worse than no gate.
+  \item \textbf{Legible.} The report names the layer, the interaction, and
+        the mismatch: \texttt{\$.sku: missing}. ``1 test failed'' is not a
+        diagnosis.
+\end{enumerate}
+
+Typical API gate battery: unit + property suites with a coverage floor
+(floors guard against suite deletion, not for their own sake --- an
+80\% floor with the invariants of Section~\ref{sec:ch19-pbt} beats a 95\%
+floor of example tests); contract verification against every published
+pact plus an OpenAPI diff against the previous released spec; a fuzz smoke
+(a bounded case budget, not an open-ended campaign); a perf smoke that
+asserts completion and zero 5xx rather than latency (CI machines are noisy
+neighbors; latency budgets belong to scheduled runs on quiet hardware);
+and flake management: quarantine list with SLA, automatic bisection of
+derandomized failures, and a hard rule that a test flaky twice in a week is
+either fixed or deleted. Delivery-performance research consistently finds
+that fast, trusted automated gates correlate with both throughput and
+stability --- the gate is a delivery feature, not a tax
+\cite{beyer2016sre}.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch19-code}
+
+All listings live under \texttt{code\textbackslash{}ch19\textbackslash{}}
+and share one app under test: the Northwind Robotics robot registry. They
+are fully offline (in-process ASGI), deterministic (derandomized
+generators, scripted faults, virtual clocks), and use synthetic data only.
+Install dependencies once:
+
+\begin{minted}{powershell}
+cd code\ch19
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{Listing 19.1 --- The App Under Test with Deliberate-Defect Knobs}
+\label{sec:ch19-listing-app}
+
+The registry (Listing 19.1) is a plain Chapter~6 FastAPI service
+with two teaching additions. First, every error is RFC~9457 problem-shaped
+(Chapter~\ref{ch:problem_details}), because later listings \emph{assert} on
+that shape. Second, \texttt{create\_app} accepts two keyword-only defect
+knobs: \texttt{breaking=True} renames \texttt{sku} to
+\texttt{part\_number} in responses (a contract break), and
+\texttt{bug\_at\_price=N} returns an unstructured 500 when
+\texttt{price\_cents == N} (a planted bug for the fuzzer). The module also
+provides \texttt{SyncASGITransport}: since \texttt{httpx} 0.28 the bundled
+\texttt{ASGITransport} is async-only~\cite{httpxdocs}, so we wrap it in a
+five-line shim that runs the app on one dedicated event loop and re-wraps
+the body as a sync byte stream.
+
+\begin{minted}{python}
+"""Northwind Robotics robot registry: the single API under test in Chapter 19.
+
+``create_app`` ships with two deliberate-defect knobs so the lab can *break*
+the API on demand:
+
+* ``breaking=True`` renames the ``sku`` field to ``part_number`` in every
+  response body -- the classic contract-breaking change a provider team
+  ships believing it is "internal".
+* ``bug_at_price=N`` makes ``POST /robots`` return an unhandled 500 (not
+  RFC 9457 shaped) whenever ``price_cents == N`` -- a planted bug for the
+  fuzzer to find and shrink.
+
+Offline-first: every consumer of this module talks to the app in-process
+through ``httpx.ASGITransport``; no socket is ever opened.
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+PROBLEM_BASE = "https://northwind-robotics.example/problems"
+
+
+class SyncASGITransport(httpx.BaseTransport):
+    """Sync shim over ``httpx.ASGITransport`` (async-only since httpx 0.28).
+
+    Runs the ASGI app on one dedicated event loop, in-process: no sockets,
+    no network, fully offline.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self._inner = httpx.ASGITransport(app=app)
+        self._loop = asyncio.new_event_loop()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        async_resp = self._loop.run_until_complete(
+            self._inner.handle_async_request(request)
+        )
+        content = self._loop.run_until_complete(async_resp.aread())
+        # Rebuild with a byte body so the sync client gets a SyncByteStream.
+        return httpx.Response(
+            status_code=async_resp.status_code,
+            headers=async_resp.headers,
+            content=content,
+        )
+
+
+def make_sync_client(app: Any, base_url: str = "http://testserver") -> httpx.Client:
+    """Build a synchronous httpx client wired straight into the ASGI app."""
+    return httpx.Client(transport=SyncASGITransport(app), base_url=base_url)
+
+
+class RobotCreate(BaseModel):
+    """Payload accepted by ``POST /robots``."""
+
+    sku: str = Field(min_length=3, max_length=32)
+    name: str = Field(min_length=1, max_length=80)
+    price_cents: int = Field(ge=0, le=10_000_000)
+
+
+class Robot(RobotCreate):
+    """Stored representation: everything in ``RobotCreate`` plus a server id."""
+
+    id: int
+
+
+def _problem(status: int, title: str, detail: str, instance: str) -> JSONResponse:
+    """Build an RFC 9457 problem-details response."""
+    slug = title.lower().replace(" ", "-")
+    return JSONResponse(
+        status_code=status,
+        media_type="application/problem+json",
+        content={
+            "type": f"{PROBLEM_BASE}/{slug}",
+            "title": title,
+            "status": status,
+            "detail": detail,
+            "instance": instance,
+        },
+    )
+
+
+def create_app(*, breaking: bool = False, bug_at_price: int | None = None) -> FastAPI:
+    """Application factory; defect knobs are keyword-only and default to off."""
+    app = FastAPI(title="Northwind Robotics -- Robot Registry")
+    app.state.db = {}  # type: dict[int, dict[str, Any]]
+    app.state.next_id = 1
+
+    @app.exception_handler(RequestValidationError)
+    async def on_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        errors = exc.errors()
+        first = errors[0] if errors else {}
+        loc = ".".join(str(part) for part in first.get("loc", []))
+        detail = f"{loc}: {first.get('msg', 'invalid request')}"
+        return _problem(422, "Validation Error", detail, request.url.path)
+
+    @app.exception_handler(HTTPException)
+    async def on_http_error(request: Request, exc: HTTPException) -> JSONResponse:
+        title = "Not Found" if exc.status_code == 404 else "HTTP Error"
+        return _problem(exc.status_code, title, str(exc.detail), request.url.path)
+
+    def present(record: dict[str, Any]) -> dict[str, Any]:
+        """Serialize a stored record, applying the deliberate break if asked."""
+        body = dict(record)
+        if breaking:
+            body["part_number"] = body.pop("sku")
+        return body
+
+    @app.post("/robots", status_code=201)
+    async def create_robot(payload: RobotCreate) -> Any:
+        if bug_at_price is not None and payload.price_cents == bug_at_price:
+            # Planted bug: an unstructured, non-RFC-9457 server error.
+            return JSONResponse(status_code=500, content={"oops": "price demon"})
+        robot_id = app.state.next_id
+        app.state.next_id += 1
+        record = {"id": robot_id, **payload.model_dump()}
+        app.state.db[robot_id] = record
+        return present(record)
+
+    @app.get("/robots/{robot_id}")
+    async def get_robot(robot_id: int) -> dict[str, Any]:
+        if robot_id not in app.state.db:
+            raise HTTPException(status_code=404, detail=f"robot {robot_id} not found")
+        return present(app.state.db[robot_id])
+
+    return app
+\end{minted}
+
+\subsection{Listing 19.2 --- A Mini Pact: Recorder, Pact File, Provider Verifier}
+\label{sec:ch19-listing-pact}
+
+Listing 19.2 implements the full consumer-driven loop of
+Figure~\ref{fig:ch19-contract-loop} in about 200 lines. The consumer side
+(\texttt{PactRecorder}) executes each interaction, fails the consumer test
+immediately if the API already violates the expectation, and freezes the
+interaction --- method, path, request body, expected status, and a
+\emph{body subset} (what the consumer actually reads) --- into JSON. The
+provider side (\texttt{ProviderVerifier}) builds a \emph{fresh} application
+per interaction, applies the named provider state, replays the request
+against real code in-process, and reports recursive subset mismatches with
+JSONPath-style locations. \texttt{PROVIDER\_STATES} is the provider team's
+half of the bargain: the implementation of the consumer's named
+preconditions.
+
+\begin{minted}{python}
+"""A mini consumer-driven contract-testing framework, Pact-inspired.
+
+The moving parts mirror the real Pact loop:
+
+1. Consumer side: :class:`PactRecorder` wraps an ``httpx.Client``; every
+   interaction the consumer relies on is executed, validated on the spot,
+   and frozen into a JSON *pact file*.
+2. The pact file is the contract artifact. In production it travels through
+   a broker; here it is a plain JSON file under ``pacts\\``.
+3. Provider side: :class:`ProviderVerifier` replays each interaction against
+   a *fresh* provider application, applying the named *provider state*
+   first, and checks status + a recursive body subset match.
+
+Everything is offline: provider replay runs through ``httpx.ASGITransport``.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+import httpx
+
+from robot_registry import create_app, make_sync_client
+
+StateHandler = Callable[[Any], None]  # receives the provider FastAPI app
+AppFactory = Callable[[], Any]
+
+
+@dataclass
+class Interaction:
+    """One request/response pair the consumer depends on."""
+
+    description: str
+    provider_state: str | None
+    method: str
+    path: str
+    request_body: dict[str, Any] | None
+    expected_status: int
+    expected_body_subset: dict[str, Any]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "description": self.description,
+            "providerState": self.provider_state,
+            "request": {"method": self.method, "path": self.path, "body": self.request_body},
+            "response": {
+                "status": self.expected_status,
+                "bodySubset": self.expected_body_subset,
+            },
+        }
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "Interaction":
+        return cls(
+            description=raw["description"],
+            provider_state=raw.get("providerState"),
+            method=raw["request"]["method"],
+            path=raw["request"]["path"],
+            request_body=raw["request"].get("body"),
+            expected_status=raw["response"]["status"],
+            expected_body_subset=raw["response"]["bodySubset"],
+        )
+
+
+def subset_mismatches(expected: Any, actual: Any, path: str = "$") -> list[str]:
+    """Recursive subset match: every expected leaf must exist and be equal."""
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return [f"{path}: expected object, got {type(actual).__name__}"]
+        problems: list[str] = []
+        for key, sub in expected.items():
+            if key not in actual:
+                problems.append(f"{path}.{key}: missing (expected {sub!r})")
+            else:
+                problems.extend(subset_mismatches(sub, actual[key], f"{path}.{key}"))
+        return problems
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            return [f"{path}: expected list of length {len(expected)}"]
+        problems = []
+        for i, sub in enumerate(expected):
+            problems.extend(subset_mismatches(sub, actual[i], f"{path}[{i}]"))
+        return problems
+    if expected != actual:
+        return [f"{path}: expected {expected!r}, got {actual!r}"]
+    return []
+
+
+class PactRecorder:
+    """Consumer side: exercise the API and freeze the interactions relied on."""
+
+    def __init__(self, client: httpx.Client, *, consumer: str, provider: str) -> None:
+        self._client = client
+        self.consumer = consumer
+        self.provider = provider
+        self.interactions: list[Interaction] = []
+
+    def record(
+        self,
+        description: str,
+        method: str,
+        path: str,
+        *,
+        provider_state: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        expected_status: int,
+        expect_subset: dict[str, Any],
+    ) -> httpx.Response:
+        """Execute one interaction; fail the consumer test immediately if the
+        API already violates the expectation, then freeze it."""
+        resp = self._client.request(method, path, json=json_body)
+        if resp.status_code != expected_status:
+            raise AssertionError(
+                f"[{description}] expected {expected_status}, got "
+                f"{resp.status_code}: {resp.text}"
+            )
+        problems = subset_mismatches(expect_subset, resp.json())
+        if problems:
+            raise AssertionError(f"[{description}] response mismatches: {problems}")
+        self.interactions.append(
+            Interaction(
+                description=description,
+                provider_state=provider_state,
+                method=method,
+                path=path,
+                request_body=json_body,
+                expected_status=expected_status,
+                expected_body_subset=expect_subset,
+            )
+        )
+        return resp
+
+    def write_pact(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        document = {
+            "consumer": {"name": self.consumer},
+            "provider": {"name": self.provider},
+            "interactions": [i.to_json() for i in self.interactions],
+        }
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        return path
+
+
+@dataclass
+class VerificationReport:
+    """Outcome of replaying every pact interaction against the provider."""
+
+    results: list[tuple[str, bool, list[str]]] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return all(passed for _, passed, _ in self.results)
+
+    def failures(self) -> list[str]:
+        return [f"{desc}: {problems}" for desc, passed, problems in self.results if not passed]
+
+    def render(self) -> str:
+        lines = []
+        for desc, passed, problems in self.results:
+            mark = "PASS" if passed else "FAIL"
+            lines.append(f"  [{mark}] {desc}")
+            for problem in problems:
+                lines.append(f"         {problem}")
+        return "\n".join(lines)
+
+
+class ProviderVerifier:
+    """Provider side: replay a pact file against a fresh application instance."""
+
+    def __init__(
+        self,
+        app_factory: AppFactory,
+        pact_path: Path,
+        states: dict[str, StateHandler],
+    ) -> None:
+        self._app_factory = app_factory
+        self._pact_path = pact_path
+        self._states = states
+
+    def verify(self) -> VerificationReport:
+        document = json.loads(self._pact_path.read_text(encoding="utf-8"))
+        report = VerificationReport()
+        for raw in document["interactions"]:
+            interaction = Interaction.from_json(raw)
+            problems: list[str] = []
+            app = self._app_factory()
+            if interaction.provider_state is not None:
+                handler = self._states.get(interaction.provider_state)
+                if handler is None:
+                    problems.append(f"unknown provider state: {interaction.provider_state!r}")
+                else:
+                    handler(app)
+            if not problems:
+                client = make_sync_client(app, base_url="http://provider.test")
+                resp = client.request(
+                    interaction.method,
+                    interaction.path,
+                    json=interaction.request_body,
+                )
+                if resp.status_code != interaction.expected_status:
+                    problems.append(
+                        f"status: expected {interaction.expected_status}, "
+                        f"got {resp.status_code}"
+                    )
+                if interaction.expected_body_subset:
+                    try:
+                        body = resp.json()
+                    except json.JSONDecodeError:
+                        problems.append("response body is not JSON")
+                    else:
+                        problems.extend(subset_mismatches(
+                            interaction.expected_body_subset, body
+                        ))
+            report.results.append((interaction.description, not problems, problems))
+        return report
+
+
+# --------------------------------------------------------------------------
+# Demo consumer: the Northwind Robotics fulfillment service.
+# --------------------------------------------------------------------------
+
+def _seed_robot_7(app: Any) -> None:
+    """Provider state: 'a robot with id 7 exists'."""
+    app.state.db[7] = {
+        "id": 7,
+        "sku": "NWR-ARM-6",
+        "name": "A6 Manipulator Arm",
+        "price_cents": 129900,
+    }
+
+
+PROVIDER_STATES: dict[str, StateHandler] = {
+    "a robot with id 7 exists": _seed_robot_7,
+}
+
+
+def record_demo_pact(pact_dir: Path) -> Path:
+    """Run the fulfillment service's expectations and freeze them as a pact."""
+    app = create_app()
+    _seed_robot_7(app)  # consumer designs the 'GET' interaction against known data
+    client = make_sync_client(app, base_url="http://consumer.test")
+    recorder = PactRecorder(
+        client, consumer="fulfillment-service", provider="robot-registry"
+    )
+    recorder.record(
+        "create a robot",
+        "POST",
+        "/robots",
+        json_body={"sku": "NWR-PLT-2", "name": "Pallet Mover 2", "price_cents": 540000},
+        expected_status=201,
+        expect_subset={"sku": "NWR-PLT-2", "name": "Pallet Mover 2", "price_cents": 540000},
+    )
+    recorder.record(
+        "fetch robot 7",
+        "GET",
+        "/robots/7",
+        provider_state="a robot with id 7 exists",
+        expected_status=200,
+        expect_subset={"id": 7, "sku": "NWR-ARM-6", "name": "A6 Manipulator Arm"},
+    )
+    return recorder.write_pact(pact_dir / "fulfillment-service-robot-registry.json")
+\end{minted}
+
+The pact file itself (excerpt) is intentionally boring --- boring is what
+crosses team boundaries well:
+
+\begin{minted}{json}
+{
+  "consumer": {"name": "fulfillment-service"},
+  "provider": {"name": "robot-registry"},
+  "interactions": [
+    {"description": "fetch robot 7",
+     "providerState": "a robot with id 7 exists",
+     "request": {"method": "GET", "path": "/robots/7", "body": null},
+     "response": {"status": 200,
+                  "bodySubset": {"id": 7, "sku": "NWR-ARM-6"}}}
+  ]
+}
+\end{minted}
+
+\subsection{Listing 19.3 --- Contract Tests, Including the Breaking Change}
+\label{sec:ch19-listing-pact-tests}
+
+Four tests prove the framework works \emph{and has teeth}: the pact file is
+well-formed; the healthy provider satisfies it; renaming \texttt{sku} to
+\texttt{part\_number} makes verification fail with a message naming the
+missing field; and an unknown provider state fails loudly rather than
+silently passing.
+
+\begin{minted}{python}
+"""Contract tests for the mini pact framework.
+
+Run:  pytest test_pact_mini.py -q
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from pact_mini import PROVIDER_STATES, ProviderVerifier, record_demo_pact
+from robot_registry import create_app
+
+
+def test_recorded_pact_file_is_wellformed(tmp_path: Path) -> None:
+    pact = record_demo_pact(tmp_path)
+    document = json.loads(pact.read_text(encoding="utf-8"))
+    assert document["consumer"]["name"] == "fulfillment-service"
+    assert document["provider"]["name"] == "robot-registry"
+    assert [i["description"] for i in document["interactions"]] == [
+        "create a robot",
+        "fetch robot 7",
+    ]
+    assert document["interactions"][1]["providerState"] == "a robot with id 7 exists"
+
+
+def test_provider_satisfies_the_pact(tmp_path: Path) -> None:
+    pact = record_demo_pact(tmp_path)
+    report = ProviderVerifier(create_app, pact, PROVIDER_STATES).verify()
+    print("\n" + report.render())
+    assert report.ok, report.failures()
+
+
+def test_breaking_field_rename_is_caught(tmp_path: Path) -> None:
+    """The provider renames ``sku`` -> ``part_number``: verification must fail."""
+    pact = record_demo_pact(tmp_path)
+    report = ProviderVerifier(
+        lambda: create_app(breaking=True), pact, PROVIDER_STATES
+    ).verify()
+    print("\n" + report.render())
+    assert not report.ok
+    rendered = report.render()
+    assert "sku" in rendered  # the missing field is named in the report
+
+
+def test_unknown_provider_state_fails_loudly(tmp_path: Path) -> None:
+    pact = record_demo_pact(tmp_path)
+    document = json.loads(pact.read_text(encoding="utf-8"))
+    document["interactions"][1]["providerState"] = "a robot with id 99 exists"
+    pact.write_text(json.dumps(document), encoding="utf-8")
+    report = ProviderVerifier(create_app, pact, PROVIDER_STATES).verify()
+    assert not report.ok
+    assert any("unknown provider state" in f for f in report.failures())
+\end{minted}
+
+\subsection{Listing 19.4 --- Property-Based Suite with Hypothesis}
+\label{sec:ch19-listing-pbt}
+
+Listing 19.4 encodes the three universal API invariants from
+Section~\ref{sec:ch19-pbt}. The payload strategy is deliberately hostile:
+wrong types, \texttt{None}, out-of-range integers, over- and under-length
+strings. Whatever Hypothesis generates, the service must never 5xx, must
+return schema-valid JSON on 201, and must return an RFC~9457 body on 422.
+\texttt{derandomize=True} replays the identical examples on every run ---
+determinism is a feature, not a limitation, in CI. The rule-based
+\texttt{RobotRegistryMachine} then generates random create/read
+\emph{sequences} and checks the API against a local model after every
+step, catching sequence-dependent bugs single-call properties cannot see.
+
+\begin{minted}{python}
+"""Property-based tests for the robot registry, plus a stateful rule suite.
+
+Invariants under test:
+
+* ``POST /robots`` never returns 5xx, whatever the payload.
+* A 201 response always validates against the published response schema.
+* A 4xx response is always RFC 9457 problem-shaped.
+* ``GET /robots/{id}`` never returns 5xx for arbitrary integer ids.
+* Rule-based sequences (create -> read) stay consistent with a local model.
+
+Deterministic: ``derandomize=True`` replays the same examples every run and
+no Hypothesis example database is consulted.
+
+Run:  pytest test_pbt_robots.py -q
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import jsonschema
+from hypothesis import given, settings, strategies as st
+from hypothesis.stateful import (
+    Bundle,
+    RuleBasedStateMachine,
+    invariant,
+    rule,
+)
+
+from robot_registry import create_app, make_sync_client
+
+CLIENT = make_sync_client(create_app(), base_url="http://pbt.test")
+
+ROBOT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["id", "sku", "name", "price_cents"],
+    "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "sku": {"type": "string", "minLength": 3, "maxLength": 32},
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "price_cents": {"type": "integer", "minimum": 0, "maximum": 10_000_000},
+    },
+    "additionalProperties": False,
+}
+
+PROBLEM_MEMBERS = {"type", "title", "status", "detail", "instance"}
+
+# Deliberately hostile: wrong types, None, out-of-range ints, over/under strings.
+HOSTILE_PAYLOADS = st.fixed_dictionaries(
+    {
+        "sku": st.one_of(st.text(min_size=0, max_size=40), st.integers(), st.none()),
+        "name": st.one_of(st.text(max_size=100), st.booleans(), st.none()),
+        "price_cents": st.one_of(
+            st.integers(min_value=-1_000_000, max_value=20_000_000),
+            st.text(max_size=10),
+            st.none(),
+        ),
+    }
+)
+
+VALID_PAYLOADS = st.fixed_dictionaries(
+    {
+        "sku": st.text(
+            alphabet=st.characters(categories=("Lu", "Ll", "Nd"), include_characters="-"),
+            min_size=3,
+            max_size=32,
+        ),
+        "name": st.text(
+            alphabet=st.characters(categories=("Lu", "Ll", "Nd", "Zs"), include_characters="-"),
+            min_size=1,
+            max_size=80,
+        ),
+        "price_cents": st.integers(min_value=0, max_value=10_000_000),
+    }
+)
+
+DETERMINISTIC = dict(derandomize=True, database=None, deadline=None)
+
+
+def assert_problem_shape(body: Any, status: int) -> None:
+    assert isinstance(body, dict), f"4xx body must be a JSON object, got {body!r}"
+    missing = PROBLEM_MEMBERS - body.keys()
+    assert not missing, f"problem details missing members: {missing}"
+    assert body["status"] == status
+
+
+@given(payload=HOSTILE_PAYLOADS)
+@settings(max_examples=60, **DETERMINISTIC)
+def test_create_robot_never_5xx_and_always_schema_conformant(payload: dict) -> None:
+    resp = CLIENT.post("/robots", json=payload)
+    assert resp.status_code < 500, f"5xx for payload {payload!r}: {resp.text}"
+    if resp.status_code == 201:
+        jsonschema.validate(resp.json(), ROBOT_SCHEMA)
+    else:
+        assert resp.status_code == 422, f"unexpected status {resp.status_code}"
+        assert resp.headers["content-type"].startswith("application/problem+json")
+        assert_problem_shape(resp.json(), 422)
+
+
+@given(robot_id=st.integers(min_value=-1_000, max_value=1_000))
+@settings(max_examples=50, **DETERMINISTIC)
+def test_get_robot_never_5xx(robot_id: int) -> None:
+    resp = CLIENT.get(f"/robots/{robot_id}")
+    assert resp.status_code in (200, 404), f"unexpected status {resp.status_code}"
+    if resp.status_code == 200:
+        jsonschema.validate(resp.json(), ROBOT_SCHEMA)
+    else:
+        assert_problem_shape(resp.json(), 404)
+
+
+class RobotRegistryMachine(RuleBasedStateMachine):
+    """Rule-based stateful test: random create/read sequences checked against
+    a local model of the registry."""
+
+    created_ids: Bundle[int] = Bundle("created_ids")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.client = make_sync_client(create_app(), base_url="http://pbt-stateful.test")
+        self.model: dict[int, dict[str, Any]] = {}
+
+    @rule(target=created_ids, payload=VALID_PAYLOADS)
+    def create_robot(self, payload: dict[str, Any]) -> int:
+        resp = self.client.post("/robots", json=payload)
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        jsonschema.validate(body, ROBOT_SCHEMA)
+        self.model[body["id"]] = body
+        return body["id"]
+
+    @rule(robot_id=created_ids)
+    def read_back_matches_model(self, robot_id: int) -> None:
+        resp = self.client.get(f"/robots/{robot_id}")
+        assert resp.status_code == 200
+        assert resp.json() == self.model[robot_id]
+
+    @invariant()
+    def every_created_robot_is_readable(self) -> None:
+        for robot_id in self.model:
+            resp = self.client.get(f"/robots/{robot_id}")
+            assert resp.status_code == 200, f"robot {robot_id} vanished"
+
+
+RobotRegistryMachine.TestCase.settings = settings(
+    max_examples=15, stateful_step_count=20, **DETERMINISTIC
+)
+TestRobotRegistry = RobotRegistryMachine.TestCase
+\end{minted}
+
+\subsection{Listing 19.5 --- A Stdlib OpenAPI Fuzzer with Shrinking}
+\label{sec:ch19-listing-fuzz}
+
+Where Hypothesis owns the strategy machinery, Listing 19.5
+exposes it: from a request-body schema (a stand-in for an excerpt of the
+published OpenAPI document~\cite{openapi31}) it derives boundary and
+malformed candidates per property --- \texttt{minLength}$-1$,
+\texttt{maxLength}$+1$, \texttt{minimum}$-1$, wrong types, \texttt{None},
+pathological lengths --- plus missing-required, extra-property, and
+non-object-body cases. Every response is classified: 5xx is always a
+failure, 4xx must be problem-shaped, 2xx must validate. The greedy
+\texttt{shrink} first tries dropping keys, then minimizes values to the
+smallest schema-valid stand-ins --- the second move matters, because
+dropping a \emph{required} key flips a 500 into a 422 and stalls a
+naive shrinker.
+
+\begin{minted}{python}
+"""Stdlib-only OpenAPI-driven fuzzer: Schemathesis in miniature.
+
+Given the request-body schema of ``POST /robots`` (a stand-in for an excerpt
+of the published OpenAPI document), generate boundary and malformed
+payloads, fire them at the app in-process, and classify every response:
+
+* 2xx  -> must validate against the response schema;
+* 4xx  -> must be RFC 9457 problem-shaped;
+* 5xx  -> always a failure.
+
+Includes a greedy shrinker: when a failing payload is found, strip it down
+to a minimal reproducer so the report is actionable.
+
+Run the demo:  python fuzz_openapi_mini.py
+"""
+from __future__ import annotations
+
+import copy
+import json
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import httpx
+import jsonschema
+
+from robot_registry import create_app, make_sync_client
+
+# Excerpt of the published OpenAPI 3.1 document: POST /robots request body.
+REQUEST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["sku", "name", "price_cents"],
+    "properties": {
+        "sku": {"type": "string", "minLength": 3, "maxLength": 32},
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "price_cents": {"type": "integer", "minimum": 0, "maximum": 10_000_000},
+    },
+    "additionalProperties": False,
+}
+
+RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["id", "sku", "name", "price_cents"],
+    "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "sku": {"type": "string", "minLength": 3, "maxLength": 32},
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "price_cents": {"type": "integer", "minimum": 0, "maximum": 10_000_000},
+    },
+    "additionalProperties": False,
+}
+
+PROBLEM_MEMBERS = {"type", "title", "status", "detail", "instance"}
+VALID_BASE: dict[str, Any] = {"sku": "NWR-ARM-6", "name": "A6 Manipulator Arm", "price_cents": 129900}
+
+
+def boundary_candidates(prop_schema: dict[str, Any]) -> list[Any]:
+    """Boundary and malformed candidates for one property schema."""
+    ptype = prop_schema.get("type")
+    if ptype == "string":
+        lo = prop_schema.get("minLength", 0)
+        hi = prop_schema.get("maxLength", 16)
+        candidates = ["A" * lo, "A" * hi, "", None, 123, True]
+        if lo > 0:
+            candidates.append("A" * (lo - 1))
+        candidates.append("A" * (hi + 1))
+        candidates.append("Z" * 512)  # pathological length
+        return candidates
+    if ptype == "integer":
+        lo = prop_schema.get("minimum", 0)
+        hi = prop_schema.get("maximum", 100)
+        return [lo, hi, lo - 1, hi + 1, 0, -1, 666, 2**31, "10", None, True, 1.5]
+    return [None]
+
+
+def fuzz_cases(schema: dict[str, Any]) -> list[tuple[str, Any]]:
+    """All (label, payload) cases derived from the request schema."""
+    cases: list[tuple[str, Any]] = []
+    properties = schema["properties"]
+    for name, prop_schema in properties.items():
+        for value in boundary_candidates(prop_schema):
+            payload = dict(VALID_BASE, **{name: value})
+            cases.append((f"{name}={value!r}"[:60], payload))
+    for name in schema.get("required", []):
+        payload = {k: v for k, v in VALID_BASE.items() if k != name}
+        cases.append((f"missing required {name!r}", payload))
+    cases.append(("extra property", dict(VALID_BASE, legacy_field="x")))
+    cases.append(("empty object", {}))
+    cases.append(("body is a list", [1, 2, 3]))
+    cases.append(("body is a string", "not-an-object"))
+    cases.append(("body is null", None))
+    return cases
+
+
+@dataclass
+class FuzzFailure:
+    label: str
+    payload: Any
+    status: int
+    reason: str
+
+
+def classify(label: str, payload: Any, resp: httpx.Response) -> FuzzFailure | None:
+    if resp.status_code >= 500:
+        return FuzzFailure(label, payload, resp.status_code, "server error (5xx)")
+    if resp.status_code >= 400:
+        body = resp.json()
+        missing = PROBLEM_MEMBERS - set(body)
+        if missing or body.get("status") != resp.status_code:
+            return FuzzFailure(
+                label, payload, resp.status_code, f"4xx not RFC 9457 shaped: {body!r}"
+            )
+        return None
+    try:
+        jsonschema.validate(resp.json(), RESPONSE_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        return FuzzFailure(label, payload, resp.status_code, f"2xx violates schema: {exc.message}")
+    return None
+
+
+def run_fuzz(
+    client: httpx.Client, cases: list[tuple[str, Any]]
+) -> tuple[int, list[FuzzFailure]]:
+    failures: list[FuzzFailure] = []
+    for label, payload in cases:
+        resp = client.post("/robots", json=payload)
+        failure = classify(label, payload, resp)
+        if failure is not None:
+            failures.append(failure)
+    return len(cases), failures
+
+
+def minimal_values(prop_schema: dict[str, Any]) -> list[Any]:
+    """Smallest schema-valid stand-ins for a property (value minimization)."""
+    ptype = prop_schema.get("type")
+    if ptype == "string":
+        return ["A" * prop_schema.get("minLength", 0)]
+    if ptype == "integer":
+        return [prop_schema.get("minimum", 0)]
+    return [None]
+
+
+def shrink(
+    client: httpx.Client,
+    payload: dict[str, Any],
+    is_failure: Callable[[httpx.Response], bool],
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Greedy minimization: drop keys, then minimize values, while the
+    failure still reproduces. Dropping a *required* key usually turns a 500
+    into a 422, so value minimization is what isolates the trigger field."""
+    minimal = copy.deepcopy(payload)
+    for key in sorted(minimal):
+        candidate = {k: v for k, v in minimal.items() if k != key}
+        if is_failure(client.post("/robots", json=candidate)):
+            minimal = candidate
+    if schema is not None:
+        for key, prop_schema in schema.get("properties", {}).items():
+            if key not in minimal:
+                continue
+            for candidate_value in minimal_values(prop_schema):
+                trial = dict(minimal, **{key: candidate_value})
+                if is_failure(client.post("/robots", json=trial)):
+                    minimal = trial
+                    break
+    return minimal
+
+
+def demo() -> None:
+    cases = fuzz_cases(REQUEST_SCHEMA)
+    healthy = make_sync_client(create_app(), base_url="http://fuzz.test")
+    total, failures = run_fuzz(healthy, cases)
+    print(f"healthy app:    {total} cases, {len(failures)} failures")
+
+    buggy = make_sync_client(create_app(bug_at_price=666), base_url="http://fuzz.test")
+    total, failures = run_fuzz(buggy, cases)
+    print(f"buggy app:      {total} cases, {len(failures)} failures")
+    if failures:
+        first = failures[0]
+        minimal = shrink(
+            buggy, first.payload, lambda r: r.status_code >= 500, REQUEST_SCHEMA
+        )
+        print(f"first failure:  {first.label} -> {first.status} ({first.reason})")
+        print(f"shrunk to:      {json.dumps(minimal, sort_keys=True)}")
+
+
+if __name__ == "__main__":
+    demo()
+\end{minted}
+
+Its tests (the companion test file) pin the report-hygiene rules of
+Section~\ref{sec:ch19-pitfalls}: prove the fuzzer actually exercised the
+validation boundary (count the 4xxs), prove it finds a planted bug, and
+prove the shrinker converges to the minimal reproducer.
+
+\begin{minted}{python}
+"""Tests for the mini OpenAPI fuzzer.
+
+Run:  pytest test_fuzz_openapi_mini.py -q
+"""
+from __future__ import annotations
+
+import httpx
+
+from fuzz_openapi_mini import REQUEST_SCHEMA, fuzz_cases, run_fuzz, shrink
+from robot_registry import create_app, make_sync_client
+
+
+def _client(**app_kwargs: object) -> httpx.Client:
+    return make_sync_client(
+        create_app(**app_kwargs),  # type: ignore[arg-type]
+        base_url="http://fuzz.test",
+    )
+
+
+def test_fuzzer_finds_no_failures_on_healthy_app() -> None:
+    cases = fuzz_cases(REQUEST_SCHEMA)
+    total, failures = run_fuzz(_client(), cases)
+    assert total == len(cases) and total > 30  # report hygiene: prove coverage
+    assert failures == [], [f"{f.label}: {f.reason}" for f in failures]
+
+
+def test_fuzzer_finds_and_shrinks_the_planted_bug() -> None:
+    cases = fuzz_cases(REQUEST_SCHEMA)
+    client = _client(bug_at_price=666)
+    _, failures = run_fuzz(client, cases)
+    assert failures, "fuzzer must find the planted 500"
+    assert all(f.status == 500 for f in failures)
+    first = failures[0]
+    minimal = shrink(client, first.payload, lambda r: r.status_code >= 500, REQUEST_SCHEMA)
+    # Required keys cannot be dropped (that flips 500 -> 422), so the minimal
+    # reproducer isolates the trigger field with minimal valid stand-ins:
+    assert minimal == {"sku": "AAA", "name": "A", "price_cents": 666}
+
+
+def test_every_4xx_is_problem_shaped() -> None:
+    """A focused regression of the RFC 9457 invariant on the healthy app."""
+    cases = fuzz_cases(REQUEST_SCHEMA)
+    client = _client()
+    saw_4xx = 0
+    for label, payload in cases:
+        resp = client.post("/robots", json=payload)
+        if 400 <= resp.status_code < 500:
+            saw_4xx += 1
+            body = resp.json()
+            assert body["status"] == resp.status_code, label
+            assert resp.headers["content-type"].startswith("application/problem+json")
+    assert saw_4xx > 10  # the fuzzer really exercised the validation boundary
+\end{minted}
+
+\subsection{Listing 19.6 --- An asyncio Load Harness with Knee-Point Sweep}
+\label{sec:ch19-listing-load}
+
+Listing 19.6 implements both workload models against the
+in-process app: \texttt{open\_loop} schedules sends at fixed virtual
+offsets (offered load is independent of completions --- no coordinated
+omission), while \texttt{closed\_loop} runs a fixed worker pool. A
+fixed-bucket histogram estimates percentiles without storing every sample
+(the same machinery as Chapter~\ref{ch:observability}). The demo workload
+hides simulated 20~ms of async work behind a semaphore of four slots, so
+its saturation point is real and findable: capacity $\approx c/S =
+4/0.02 = 200$ req/s, exactly where the printed knee appears.
+\texttt{littles\_law\_check} closes the loop with
+Theorem~\ref{thm:little}: with eight closed-model workers it measures
+$L_{\text{est}} = \lambda \bar{W} \approx 8$. The sweep prints a table;
+nothing is asserted about wall-clock numbers.
+
+\begin{minted}{python}
+"""Stdlib + asyncio load harness for offline API load testing.
+
+Implements both classic workload models against an in-process ASGI app:
+
+* open model   -- requests are scheduled at a fixed rate (requests/sec),
+                  independent of how fast responses come back;
+* closed model -- a fixed number of workers each run request-response
+                  loops (think: a fixed pool of users).
+
+Includes a bucketed latency histogram with percentile estimation, a
+saturation sweep that prints a knee-point table, and a Little's Law
+cross-check (L = lambda * W) for the closed model.
+
+Latency numbers are *illustrative* (they depend on your machine); the
+harness never asserts on wall-clock values.
+
+Run the demo:  python load_harness.py
+"""
+from __future__ import annotations
+
+import asyncio
+import bisect
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+from fastapi import FastAPI
+
+BOUNDS_MS: tuple[int, ...] = (1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000)
+
+
+@dataclass
+class Histogram:
+    """Fixed-bucket latency histogram; percentiles read the bucket ceiling."""
+
+    bounds: tuple[int, ...] = BOUNDS_MS
+    counts: list[int] = field(init=False)
+    errors: int = 0
+    total_ms: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.counts = [0] * (len(self.bounds) + 1)
+
+    def record_ms(self, ms: float) -> None:
+        self.counts[bisect.bisect_right(self.bounds, ms)] += 1
+        self.total_ms += ms
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts)
+
+    def percentile_ms(self, p: float) -> float:
+        if self.total == 0:
+            return 0.0
+        rank = max(1, int(p / 100.0 * self.total + 0.999999))
+        seen = 0
+        for i, count in enumerate(self.counts):
+            seen += count
+            if seen >= rank:
+                return float(self.bounds[i]) if i < len(self.bounds) else float("inf")
+        return float("inf")
+
+    def mean_ms(self) -> float:
+        return self.total_ms / self.total if self.total else 0.0
+
+
+async def _send(client: httpx.AsyncClient, hist: Histogram, path: str) -> None:
+    started = time.perf_counter()
+    try:
+        resp = await client.get(path)
+        await resp.aread()
+        if resp.status_code >= 500:
+            hist.errors += 1
+    except (httpx.HTTPError, OSError):
+        hist.errors += 1
+    finally:
+        hist.record_ms((time.perf_counter() - started) * 1_000.0)
+
+
+async def open_loop(
+    client: httpx.AsyncClient, *, rps: float, duration_s: float, path: str = "/work"
+) -> Histogram:
+    """Open model: schedule sends at fixed virtual offsets from the start."""
+    hist = Histogram()
+    period = 1.0 / rps
+    start = time.perf_counter()
+    tasks: list[asyncio.Task[None]] = []
+    k = 0
+    while k * period < duration_s:  # deterministic scheduled count
+        scheduled = start + k * period
+        delay = scheduled - time.perf_counter()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        tasks.append(asyncio.create_task(_send(client, hist, path)))
+        k += 1
+    if tasks:
+        await asyncio.gather(*tasks)
+    return hist
+
+
+async def closed_loop(
+    client: httpx.AsyncClient, *, workers: int, duration_s: float, path: str = "/work"
+) -> Histogram:
+    """Closed model: each worker issues the next request only after the
+    previous response arrives."""
+    hist = Histogram()
+    deadline = time.perf_counter() + duration_s
+
+    async def worker() -> None:
+        while time.perf_counter() < deadline:
+            await _send(client, hist, path)
+
+    await asyncio.gather(*(worker() for _ in range(workers)))
+    return hist
+
+
+def create_workload_app(*, work_ms: int = 20, max_concurrent: int = 4) -> FastAPI:
+    """Demo workload: simulated async work behind a concurrency semaphore,
+    so the service has a real, findable saturation point."""
+    app = FastAPI(title="Load harness demo workload")
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    @app.get("/work")
+    async def work() -> dict[str, str]:
+        async with semaphore:
+            await asyncio.sleep(work_ms / 1_000.0)
+        return {"status": "ok"}
+
+    return app
+
+
+@dataclass
+class SweepRow:
+    rps: int
+    completed: int
+    p50_ms: float
+    p99_ms: float
+    error_rate: float
+    is_knee: bool
+
+
+async def saturation_sweep(
+    app: Any,
+    levels: tuple[int, ...] = (25, 50, 100, 150, 200, 300, 400),
+    duration_s: float = 0.3,
+) -> list[SweepRow]:
+    """Ramp offered RPS; flag the knee: first level where p99 explodes
+    (10x baseline) or errors appear."""
+    rows: list[SweepRow] = []
+    baseline_p50: float | None = None
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://load.test"
+    ) as client:
+        for rps in levels:
+            hist = await open_loop(client, rps=rps, duration_s=duration_s)
+            p50 = hist.percentile_ms(50)
+            p99 = hist.percentile_ms(99)
+            error_rate = hist.errors / hist.total if hist.total else 1.0
+            if baseline_p50 is None:
+                baseline_p50 = p50 if p50 > 0 else 1.0
+            is_knee = (p99 > 10.0 * baseline_p50) or error_rate > 0.0
+            rows.append(SweepRow(rps, hist.total, p50, p99, error_rate, is_knee))
+    return rows
+
+
+def render_sweep(rows: list[SweepRow]) -> str:
+    lines = ["  rps | completed |  p50 ms |   p99 ms | err % | knee",
+             "------+-----------+---------+----------+-------+-----"]
+    for row in rows:
+        lines.append(
+            f"{row.rps:5} | {row.completed:9} | {row.p50_ms:7.0f} | "
+            f"{row.p99_ms:8.0f} | {100 * row.error_rate:5.1f} | "
+            f"{'<< KNEE' if row.is_knee else ''}"
+        )
+    return "\n".join(lines)
+
+
+async def littles_law_check(workers: int = 8, duration_s: float = 0.5) -> str:
+    """Closed model: verify L = lambda * W against the configured concurrency."""
+    app = create_workload_app(work_ms=20, max_concurrent=10_000)  # unthrottled
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://load.test"
+    ) as client:
+        hist = await closed_loop(client, workers=workers, duration_s=duration_s)
+    lam = hist.total / duration_s            # throughput lambda (requests/s)
+    w = hist.mean_ms() / 1_000.0             # mean residence time W (s)
+    l_est = lam * w
+    return (
+        f"closed model: workers={workers} throughput={lam:.0f} req/s "
+        f"mean={hist.mean_ms():.1f} ms -> L = lambda*W = {l_est:.1f} "
+        f"(configured concurrency: {workers})"
+    )
+
+
+async def _demo() -> None:
+    print("saturation sweep (illustrative numbers, machine-dependent):")
+    rows = await saturation_sweep(create_workload_app())
+    print(render_sweep(rows))
+    print(await littles_law_check())
+
+
+if __name__ == "__main__":
+    asyncio.run(_demo())
+\end{minted}
+
+Illustrative output (your numbers will differ; the shape will not):
+
+\begin{minted}{text}
+  rps | completed |  p50 ms |   p99 ms | err % | knee
+------+-----------+---------+----------+-------+-----
+   25 |         8 |      50 |       50 |   0.0 |
+  100 |        30 |      50 |       50 |   0.0 |
+  200 |        60 |     250 |      250 |   0.0 |
+  400 |       120 |     500 |     1000 |   0.0 | << KNEE
+closed model: workers=8 throughput=270 req/s mean=30.5 ms
+              -> L = lambda*W = 8.2 (configured concurrency: 8)
+\end{minted}
+
+\subsection{Listing 19.7 --- Fault-Injection Middleware and Resilient Client}
+\label{sec:ch19-listing-faults}
+
+Listing 19.7 is the chaos toolkit. \texttt{FaultScript} maps
+request index to fault --- deterministic by construction, no dice. The pure
+ASGI \texttt{FaultInjectionMiddleware} implements three fault classes from
+the taxonomy: \texttt{LATENCY} (sleep on the \emph{virtual} clock, then
+serve), \texttt{ERROR} (answer directly with an RFC~9457-shaped 503),
+\texttt{ABORT} (raise before any response, simulating a reset connection).
+The client under test, \texttt{ResilientTransport}, is a real
+\texttt{httpx} transport: bounded retries with exponential backoff on the
+injected sleeper, and a circuit breaker that fails fast after
+\texttt{breaker\_threshold} consecutive exhausted calls.
+
+\begin{minted}{python}
+"""Deterministic fault-injection middleware and a resilient client transport.
+
+Fault classes (see the chapter's fault taxonomy):
+
+* ``LATENCY`` -- sleep (on a *virtual* clock) before calling the app;
+* ``ERROR``   -- answer directly with an RFC 9457-shaped 5xx;
+* ``ABORT``   -- drop the connection (raise before any response).
+
+The :class:`VirtualClock` sleeper never waits in real time: tests exercise
+multi-second retry backoffs in microseconds and assert on *recorded*
+virtual delays, never on the wall clock.
+
+The :class:`ResilientTransport` is the client under test: bounded retries
+with exponential backoff plus a circuit breaker that fails fast after
+``breaker_threshold`` consecutive exhausted calls.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any, Awaitable, Callable, Sequence
+
+import httpx
+
+Sleeper = Callable[[float], Awaitable[None]]
+
+
+class FaultKind(StrEnum):
+    LATENCY = "latency"
+    ERROR = "error"
+    ABORT = "abort"
+
+
+@dataclass(frozen=True)
+class Fault:
+    kind: FaultKind
+    delay_ms: int = 0
+    status: int = 503
+
+
+class FaultScript:
+    """Deterministic fault schedule: ``fault_for(i)`` depends only on the
+    request index ``i``; beyond the script the service is healthy."""
+
+    def __init__(self, entries: Sequence[Fault | None]) -> None:
+        self._entries = list(entries)
+
+    def fault_for(self, index: int) -> Fault | None:
+        return self._entries[index] if index < len(self._entries) else None
+
+
+class FaultInjectionMiddleware:
+    """Pure ASGI middleware applying the scripted fault per request."""
+
+    def __init__(self, app: Any, script: FaultScript, sleeper: Sleeper) -> None:
+        self._app = app
+        self._script = script
+        self._sleeper = sleeper
+        self.requests_seen = 0
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        fault = self._script.fault_for(self.requests_seen)
+        self.requests_seen += 1
+        if fault is None or fault.kind is FaultKind.LATENCY:
+            if fault is not None:
+                await self._sleeper(fault.delay_ms / 1_000.0)
+            await self._app(scope, receive, send)
+            return
+        if fault.kind is FaultKind.ERROR:
+            body = (
+                b'{"type":"https://northwind-robotics.example/problems/injected",'
+                b'"title":"Injected failure","status":%d,'
+                b'"detail":"chaos middleware","instance":"%s"}'
+                % (fault.status, scope.get("path", "/").encode())
+            )
+            await send({
+                "type": "http.response.start",
+                "status": fault.status,
+                "headers": [(b"content-type", b"application/problem+json")],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        raise ConnectionResetError("injected abort")  # FaultKind.ABORT
+
+
+class VirtualClock:
+    """Sleeper that never waits: records delays, advances virtual time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class BreakerOpenError(httpx.TransportError):
+    """Raised when the circuit breaker short-circuits a call."""
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    retries: int = 3
+    base_backoff_s: float = 0.1
+    breaker_threshold: int = 3
+
+
+class ResilientTransport(httpx.AsyncBaseTransport):
+    """Bounded retries with virtual-clock backoff + circuit breaker."""
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        policy: RetryPolicy | None = None,
+        sleeper: Sleeper | None = None,
+    ) -> None:
+        self._inner = inner
+        self._policy = policy or RetryPolicy()
+        self._sleeper = sleeper or _real_sleep
+        self._consecutive_failures = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._consecutive_failures >= self._policy.breaker_threshold:
+            raise BreakerOpenError("circuit breaker open: failing fast")
+        policy = self._policy
+        last_resp: httpx.Response | None = None
+        last_exc: Exception | None = None
+        for attempt in range(policy.retries + 1):
+            try:
+                resp = await self._inner.handle_async_request(request)
+            except (httpx.TransportError, OSError) as exc:
+                last_exc, resp = exc, None  # ABORT class: no response at all
+            if resp is not None and resp.status_code < 500:
+                self._consecutive_failures = 0
+                return resp
+            if resp is not None:
+                await resp.aread()
+                last_resp = resp
+            if attempt < policy.retries:
+                await self._sleeper(policy.base_backoff_s * (2**attempt))
+        self._consecutive_failures += 1
+        if last_resp is not None:
+            return last_resp
+        assert last_exc is not None
+        raise last_exc
+
+
+async def _real_sleep(seconds: float) -> None:
+    import asyncio
+
+    await asyncio.sleep(seconds)
+\end{minted}
+
+The tests (the companion test file) run multi-second backoff schedules
+in microseconds and assert only on recorded virtual time and call counts:
+recovery from two injected 5xxs with backoff \texttt{[0.1, 0.2]}, a 250~ms
+latency fault that never touches the wall clock, abort storms surfacing as
+transport errors, a breaker that opens after two exhausted calls and
+short-circuits the third (proven by the middleware's request counter), and
+a healthy passthrough that burns zero retries.
+
+\begin{minted}{python}
+"""Deterministic resilience tests: every fault class, zero wall-clock waits.
+
+Run:  pytest test_fault_injection.py -q
+"""
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+
+from fault_injection import (
+    BreakerOpenError,
+    Fault,
+    FaultInjectionMiddleware,
+    FaultKind,
+    FaultScript,
+    ResilientTransport,
+    RetryPolicy,
+    VirtualClock,
+)
+from robot_registry import create_app
+
+SEEDED_ROBOT = {"id": 1, "sku": "NWR-ARM-6", "name": "A6 Manipulator Arm", "price_cents": 129900}
+
+
+def make_rig(
+    script: FaultScript, policy: RetryPolicy | None = None
+) -> tuple[httpx.AsyncClient, VirtualClock, FaultInjectionMiddleware]:
+    clock = VirtualClock()
+    app = create_app()
+    app.state.db[1] = dict(SEEDED_ROBOT)
+    middleware = FaultInjectionMiddleware(app, script, clock.sleep)
+    inner = httpx.ASGITransport(app=middleware)
+    transport = ResilientTransport(inner, policy or RetryPolicy(), clock.sleep)
+    client = httpx.AsyncClient(transport=transport, base_url="http://faults.test")
+    return client, clock, middleware
+
+
+def run(coro):  # keep pytest asyncio-plugin free
+    return asyncio.run(coro)
+
+
+def test_recovers_from_transient_errors() -> None:
+    async def scenario() -> tuple[int, list[float]]:
+        client, clock, _ = make_rig(FaultScript([Fault(FaultKind.ERROR), Fault(FaultKind.ERROR), None]))
+        async with client:
+            resp = await client.get("/robots/1")
+        return resp.status_code, clock.sleeps
+
+    status, sleeps = run(scenario())
+    assert status == 200
+    assert sleeps == [0.1, 0.2]  # exponential backoff on the virtual clock
+
+
+def test_latency_fault_is_injected_on_virtual_time_only() -> None:
+    async def scenario() -> tuple[int, float]:
+        client, clock, _ = make_rig(
+            FaultScript([Fault(FaultKind.LATENCY, delay_ms=250)]),
+            RetryPolicy(retries=0),
+        )
+        async with client:
+            resp = await client.get("/robots/1")
+        return resp.status_code, clock.now
+
+    status, virtual_now = run(scenario())
+    assert status == 200
+    assert virtual_now == 0.25  # recorded, not slept
+
+
+def test_abort_retries_then_surfaces_transport_error() -> None:
+    async def scenario() -> list[float]:
+        client, clock, _ = make_rig(
+            FaultScript([Fault(FaultKind.ABORT), Fault(FaultKind.ABORT)]),
+            RetryPolicy(retries=1),
+        )
+        async with client:
+            with pytest.raises(ConnectionResetError):
+                await client.get("/robots/1")
+        return clock.sleeps
+
+    assert run(scenario()) == [0.1]
+
+
+def test_circuit_breaker_fails_fast_after_threshold() -> None:
+    async def scenario() -> tuple[int, int]:
+        client, _, middleware = make_rig(
+            FaultScript([Fault(FaultKind.ERROR)] * 5),
+            RetryPolicy(retries=0, breaker_threshold=2),
+        )
+        async with client:
+            first = await client.get("/robots/1")   # 503 -> failures = 1
+            second = await client.get("/robots/1")  # 503 -> failures = 2 (threshold)
+            assert (first.status_code, second.status_code) == (503, 503)
+            with pytest.raises(BreakerOpenError):
+                await client.get("/robots/1")       # short-circuited
+        return middleware.requests_seen, client is not None and 1
+
+    requests_seen, _ = run(scenario())
+    assert requests_seen == 2  # third call never reached the middleware
+
+
+def test_healthy_passthrough_needs_no_retries() -> None:
+    async def scenario() -> tuple[int, list[float], int]:
+        client, clock, middleware = make_rig(FaultScript([]))
+        async with client:
+            resp = await client.get("/robots/1")
+        return resp.status_code, clock.sleeps, middleware.requests_seen
+
+    status, sleeps, seen = run(scenario())
+    assert (status, sleeps, seen) == (200, [], 1)
+\end{minted}
+
+\subsection{Listing 19.8 --- The Quality Gate}
+\label{sec:ch19-listing-gate}
+
+\texttt{ci\_gate.py} composes the chapter into one blocking check. Each
+sub-gate is \emph{self-checking}: the contract gate additionally verifies
+that the deliberately broken provider variant is rejected, and the fuzz
+gate requires that the planted-bug variant produces failures --- a gate
+that cannot fail is not a gate. The perf smoke asserts structure (all
+scheduled requests completed, zero 5xx), never wall-clock latency. Exit
+code 0 means merge; 1 means read the report.
+
+\begin{minted}{python}
+"""CI quality gate: contract verify + fuzz smoke + perf smoke -> exit code.
+
+Each sub-gate returns (passed, detail). The contract and fuzz gates include
+a *self-check*: they also run against a deliberately broken variant and
+require that the gate catches it -- a gate that cannot fail is not a gate.
+
+Run:  python ci_gate.py        (exit code 0 = PASS, 1 = FAIL)
+"""
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+
+import httpx
+
+from fuzz_openapi_mini import REQUEST_SCHEMA, fuzz_cases, run_fuzz
+from load_harness import create_workload_app, open_loop
+from pact_mini import PROVIDER_STATES, ProviderVerifier, record_demo_pact
+from robot_registry import create_app, make_sync_client
+
+PACT_DIR = Path(__file__).resolve().parent / "pacts"
+
+
+def contract_gate() -> tuple[bool, str]:
+    pact = record_demo_pact(PACT_DIR)
+    healthy = ProviderVerifier(create_app, pact, PROVIDER_STATES).verify()
+    broken = ProviderVerifier(lambda: create_app(breaking=True), pact, PROVIDER_STATES).verify()
+    detail = (
+        f"{len(healthy.results)} interactions, {len(healthy.failures())} mismatches; "
+        f"self-check: breaking variant rejected with "
+        f"{len(broken.failures())} mismatch(es)"
+    )
+    return healthy.ok and not broken.ok, detail
+
+
+def fuzz_gate() -> tuple[bool, str]:
+    cases = fuzz_cases(REQUEST_SCHEMA)
+    healthy_client = make_sync_client(create_app(), base_url="http://gate.test")
+    total, failures = run_fuzz(healthy_client, cases)
+    buggy_client = make_sync_client(create_app(bug_at_price=666), base_url="http://gate.test")
+    _, self_check_failures = run_fuzz(buggy_client, cases)
+    detail = (
+        f"{total} cases, {len(failures)} failures; "
+        f"self-check: planted bug found ({len(self_check_failures)} failing case(s))"
+    )
+    return not failures and bool(self_check_failures), detail
+
+
+def perf_gate() -> tuple[bool, str]:
+    """Perf smoke: short open-model burst. Asserts *structure* (all scheduled
+    requests completed, zero 5xx), never wall-clock latency thresholds."""
+
+    async def burst() -> tuple[int, int]:
+        app = create_workload_app()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://gate.test"
+        ) as client:
+            hist = await open_loop(client, rps=50, duration_s=0.4)
+        return hist.total, hist.errors
+
+    total, errors = asyncio.run(burst())
+    expected = int(50 * 0.4)  # deterministic scheduled count modulo float edge
+    ok = errors == 0 and abs(total - expected) <= 1
+    return ok, f"{total} requests (~{expected} scheduled), {errors} server errors"
+
+
+GATES = (
+    ("contract verify", contract_gate),
+    ("fuzz smoke", fuzz_gate),
+    ("perf smoke", perf_gate),
+)
+
+
+def main() -> int:
+    print("== API quality gate ==")
+    all_ok = True
+    for name, gate in GATES:
+        try:
+            passed, detail = gate()
+        except Exception as exc:  # a crashing gate is a failing gate
+            passed, detail = False, f"gate crashed: {exc!r}"
+        all_ok &= passed
+        print(f"[{'PASS' if passed else 'FAIL'}] {name:<16} {detail}")
+    print(f"GATE RESULT: {'PASS' if all_ok else 'FAIL'}")
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+\end{minted}
+
+\begin{minted}{text}
+== API quality gate ==
+[PASS] contract verify  2 interactions, 0 mismatches; self-check: breaking
+                        variant rejected with 2 mismatch(es)
+[PASS] fuzz smoke       38 cases, 0 failures; self-check: planted bug
+                        found (1 failing case(s))
+[PASS] perf smoke       20 requests (~20 scheduled), 0 server errors
+GATE RESULT: PASS
+\end{minted}
+
+\subsection{Listing 19.9 --- The Pipeline as Code}
+\label{sec:ch19-listing-yaml}
+
+The GitHub Actions workflow is PowerShell-native (Windows runner,
+\texttt{pwsh} shells, backslash paths --- no POSIX assumptions):
+
+\begin{minted}{yaml}
+name: api-quality-gates
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\Activate.ps1
+          pip install -r code\ch19\requirements.txt
+      - name: Unit, property, contract, fuzz, resilience tests
+        shell: pwsh
+        run: pytest code\ch19 -q
+      - name: Blocking quality gate
+        shell: pwsh
+        run: python code\ch19\ci_gate.py
+\end{minted}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch19-pitfalls}
+
+Each of these is a production scar, not a stylistic preference.
+
+\begin{enumerate}[label=\textbf{P-\arabic*.}, leftmargin=1.9cm]
+  \item \textbf{Testing implementation instead of behavior.} A test that
+        asserts \texttt{validator() was called with X} breaks on every
+        refactor and catches nothing. Assert on the wire contract: status,
+        body shape, headers. The refactor-safety of a suite is its
+        behavioral surface area.
+  \item \textbf{The inverted pyramid.} An E2E-heavy suite is slow, flaky,
+        and diagnostically mute --- a red test says ``something, somewhere''.
+        Every E2E failure should be convertible into a missing lower-layer
+        test; if it cannot, your layers have a hole.
+  \item \textbf{Mocking what you do not own, naively.} A hand-built stub of
+        a third-party API encodes your \emph{guess} about that API. The
+        stub stays green while the vendor changes. Mitigations, in order:
+        contract tests with the vendor's participation, record--replay
+        cassettes re-recorded on a schedule, and at minimum a nightly
+        smoke against the real sandbox.
+  \item \textbf{Asserting on wall-clock.} \texttt{assert elapsed < 2.0}
+        fails on a loaded CI runner and passes on an idle one --- the
+        assertion measures the machine, not the code. Inject clocks and
+        sleepers; assert on recorded virtual schedules. Reserve real
+        latency assertions for scheduled runs on quiet hardware, and even
+        then compare ratios (candidate vs.\ baseline), not absolutes.
+  \item \textbf{Load-testing production without isolation.} A stress test
+        against shared production is an outage you scheduled. Isolate:
+        dedicated environment, synthetic tenants, synthetic data, and a
+        blast-radius budget agreed with whoever gets paged.
+  \item \textbf{Flaky retries masking real bugs.} ``Re-run and it passes''
+        applied blindly converts race conditions into invisible inventory.
+        Policy: two flakes in a week means fix or delete; automatic retry
+        in CI is allowed only with failure-cause logging and a flake
+        dashboard.
+  \item \textbf{Fuzzing without shrinking or report hygiene.} A 4{,}000-key
+        failing payload is not a bug report; shrink it. And always emit
+        coverage of the campaign --- cases run, classes hit --- otherwise
+        a crash-on-startup fuzzer reports ``0 failures'' forever.
+  \item \textbf{Verifying contracts against a mock provider.} If the
+        ``provider side'' of contract verification stubs the provider, the
+        only thing verified is the pact file's internal consistency.
+        Replay against the real application, in-process at minimum.
+  \item \textbf{Provider states that seed the universe.} A state named
+        ``standard test data'' that loads 400 fixtures hides which
+        interaction needs what. Minimal, semantic, independent states ---
+        or debugging a failure becomes archaeology.
+  \item \textbf{Coverage floors as quality theater.} A 95\% line-coverage
+        gate can be satisfied by tests that assert nothing. Floors guard
+        against suite deletion; they do not manufacture confidence. Pair
+        every floor with invariant-based tests that must fail when behavior
+        breaks.
+\end{enumerate}
+
+\begin{warningbox}
+The two most expensive words in API quality are ``it passed''. Passed
+\emph{what}, running \emph{where}, against \emph{which} version of the
+dependency, with \emph{which} seed? A gate whose inputs are not pinned
+--- versions, seeds, pacts, specs --- manufactures confidence, not
+evidence.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch19-lab}
+
+\subsection{Lab: Run the Gate, Then Break the API}
+\label{sec:ch19-labsteps}
+
+Work from the book repository root in PowerShell. Estimated time: 60--90
+minutes.
+
+\begin{minted}{powershell}
+cd code\ch19
+pip install -r requirements.txt        # once
+pytest -q                              # 15 tests: pact, pbt, fuzz, faults
+\end{minted}
+
+\begin{enumerate}
+  \item \textbf{Baseline.} Run \texttt{pytest -q} (all green), then
+        \texttt{python fuzz\_openapi\_mini.py} and note: 38 cases, zero
+        failures on the healthy app; the buggy variant yields one failure
+        shrunk to \texttt{price\_cents = 666}. Run
+        \texttt{python load\_harness.py} and read the sweep: locate the
+        knee level and compare the Little's Law estimate to the configured
+        worker count.
+  \item \textbf{Run the gate.} \texttt{python ci\_gate.py}; confirm all
+        three sub-gates pass and \texttt{\$LASTEXITCODE} is 0. Read
+        \texttt{pacts\textbackslash{}fulfillment-service-robot-registry.json}
+        --- this is the contract the next step will break.
+  \item \textbf{Break the contract.} In \texttt{ci\_gate.py}, change the
+        healthy verifier factory from \texttt{create\_app} to
+        \texttt{lambda: create\_app(breaking=True)} and re-run. The
+        contract gate fails and names the missing field:
+        \texttt{\$.sku: missing}. Restore the file.
+  \item \textbf{Break the error contract.} Change the fuzz gate's healthy
+        client to \texttt{create\_app(bug\_at\_price=666)} and re-run: the
+        fuzz smoke fails with a 5xx report. Restore.
+  \item \textbf{Break capacity.} In \texttt{ci\_gate.py}, drop the perf
+        smoke to \texttt{rps=50, duration\_s=0.4} against
+        \texttt{create\_workload\_app(work\_ms=400)} and observe queueing
+        in a manual sweep; reason with Little's Law about which pool
+        exhausts first.
+  \item \textbf{Reflect.} For each break: which gate caught it, at which
+        pyramid layer, and what would the same break have cost as a
+        production incident?
+\end{enumerate}
+
+\subsection{War Story: The Deploy That Passed Everything Except the Contract}
+\label{sec:ch19-warstory}
+
+A fulfillment platform team (names changed; the failure is painfully
+common) ran a genuinely good pipeline: 90\% coverage, integration
+environments, canary deploys. The robot-registry team shipped what their
+OpenAPI review called a ``cosmetic normalization'': the response field
+\texttt{sku} became \texttt{part\_number}, matching the new ERP system's
+vocabulary. Every provider-side test passed --- they had all been updated
+in the same commit, which is exactly the problem. The staging integration
+suite passed too, because the only consumer exercised there was the
+provider team's own demo client.
+
+The fulfillment service --- which read \texttt{sku} on every order line ---
+did not fail at deploy time. It failed eleven minutes later, at the peak of
+the hourly batch, as a tide of \texttt{KeyError: 'sku'} that the canary
+analysis could not see because the canary received no fulfillment traffic.
+Rollback took forty minutes; order backlog recovery took the weekend.
+
+The postmortem's uncomfortable finding was that the consumer team
+\emph{had} written a pact --- months earlier, in a spike --- and it sat in
+a gist nobody owned. It was never published to the broker, the provider
+team never knew it existed, and no \texttt{can-i-deploy} gate consumed it.
+The failure was not technical; the loop of
+Figure~\ref{fig:ch19-contract-loop} was never closed organizationally. The
+fix was equally organizational: pact publication became a required artifact
+of consumer CI, provider verification became a required step of provider
+CI, and the deploy gate learned to answer ``which consumers have verified
+this exact provider version?'' The technology in this chapter is the easy
+half; wiring the artifact across the team boundary is the half that fails.
+
+\begin{examplebox}
+Mini-case, fully reproducible on your machine: the lab's step~3 is this
+war story in miniature. The provider's own tests (Listing 19.1's app is
+self-consistent in both modes) stay green under the rename; only the
+consumer-recorded pact detects it. If you want the full emotional
+experience, delete the pact file first and watch the gate turn green ---
+then decide who on your team would have caught that in review.
+\end{examplebox}
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch19-exercises}
+
+\begin{enumerate}[label=\textbf{E-\arabic*.}, leftmargin=1.9cm]
+  \item \textbf{Layer audit.} Take the fifteen tests in
+        \texttt{code\textbackslash{}ch19} and classify each into exactly
+        one pyramid layer of Definition~\ref{def:test-layers}. Which layer
+        is over-weighted relative to its defect-catching power, and why is
+        that acceptable here?
+  \item \textbf{Designated catcher.} For each defect --- (a) SKU validation
+        regex wrong, (b) response field renamed, (c) database connection
+        string mispointed, (d) retry backoff missing jitter, (e) p99
+        regression after a serializer change --- name the cheapest pyramid
+        layer that can catch it and sketch the test.
+  \item \textbf{Contract authoring.} Add a third consumer,
+        \texttt{billing-service}, that reads only \texttt{id} and
+        \texttt{price\_cents}. Record its pact. Prove that renaming
+        \texttt{name} breaks no consumer while renaming
+        \texttt{price\_cents} breaks exactly one --- the usage-sensitivity
+        schema diffing cannot express.
+  \item \textbf{Provider-state discipline.} Refactor the seeded state into
+        two independent states (``an empty registry'', ``a robot with id 7
+        exists'') and replay. What breaks if two interactions share one
+        app instance instead of one fresh app per interaction?
+  \item \textbf{Metamorphic properties.} Extend Listing 19.4 with a
+        metamorphic relation: creating the same payload twice (minus
+        id) must yield equal records up to the \texttt{id} field. Why is
+        this stronger than any single example assertion?
+  \item \textbf{Coordinated omission.} Modify \texttt{open\_loop} to
+        schedule by completion time (send next 1/rps after the previous
+        finishes). Re-run the sweep at 400 rps and explain why the table
+        now lies about the knee.
+  \item \textbf{Blast radius.} Write the steady-state hypothesis and
+        abort-criteria paragraph for running Listing 19.7's latency fault
+        against a shared staging environment. What telemetry proves the
+        experiment stayed in bounds?
+  \item \textbf{Gate economics.} Your CI budget is four minutes. Allocate
+        it across the gates of Listing 19.8 plus coverage, and defend the
+        cuts. What moves to a nightly job, and what evidence do you lose?
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch19-interviews}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm]
+  \item \emph{[junior]} \textbf{What are the layers of the API test
+        pyramid, and what does each catch?} Unit: pure logic (validators,
+        serializers) --- logic bugs, in microseconds. Component: whole
+        service in-process --- wiring, validation, error-shape bugs.
+        Contract: consumer--provider agreement --- cross-team breakage.
+        Integration: real infrastructure boundaries --- configuration and
+        migration drift. E2E: golden journeys --- emergent whole-system
+        failures only.
+  \item \emph{[junior]} \textbf{Unit versus component test for an HTTP
+        endpoint?} A unit test calls the validation function directly; a
+        component test sends a real HTTP request through the real router
+        and serializer, in-process. The component test catches URL
+        mapping, content-negotiation, and error-shaping bugs the unit
+        test cannot see.
+  \item \emph{[junior]} \textbf{What is a consumer-driven contract?} An
+        artifact authored by the \emph{consumer} recording the exact
+        interactions it depends on, replayed by the \emph{provider's}
+        build against real code. The direction of authorship is the whole
+        point: it inverts who defines ``correct''.
+  \item \emph{[junior]} \textbf{What is inside a pact file?} Consumer and
+        provider names, and a list of interactions: request (method, path,
+        body), expected response (status, the body subset actually read),
+        and the named provider state required for replay.
+  \item \emph{[junior]} \textbf{Soak versus stress versus spike?} Stress:
+        ramp until failure to find the knee. Soak: expected load for
+        hours to catch leaks and slow degradation. Spike: sudden 10x
+        burst to test elasticity and cold caches.
+  \item \emph{[junior]} \textbf{Why p99 and not average latency?} Averages
+        hide tails; users experience tails. At 1\% bad requests and a
+        million requests a day, ten thousand users had a bad day while the
+        average looked fine.
+  \item \emph{[mid]} \textbf{What makes a good provider state?} Minimal
+        (arranges exactly what the interaction needs), independent (any
+        order or subset), and semantic (named by domain meaning:
+        ``a robot with id 7 exists'', not ``fixture set B''). States that
+        seed the universe hide coupling and make failures undebuggable.
+  \item \emph{[mid]} \textbf{Consumer-driven contracts versus OpenAPI
+        schema diffing --- when each?} Contracts are usage-based: they
+        catch breakage in fields consumers actually read, including
+        semantic drift inside unchanged shapes, but cover only enrolled
+        consumers. Schema diff is structural: it guards public APIs with
+        unknown consumers but flags only syntactic incompatibility.
+        Internal microservices with few consumers: Pact. Public API:
+        diff plus both if possible.
+  \item \emph{[mid]} \textbf{Fake versus stub versus mock?} Fake: working
+        implementation with a shortcut (in-memory store, ASGI transport).
+        Stub: canned answers. Mock: pre-programmed expectations that fail
+        on unexpected calls. Prefer fakes for what you own; stubs at
+        third-party edges; mocks sparingly, since they couple tests to
+        interaction detail.
+  \item \emph{[mid]} \textbf{When is mocking what you don't own
+        acceptable?} At a hard third-party boundary, with canned responses
+        derived from the vendor's documented contract --- and always paired
+        with either a vendor-verified contract, a re-recorded cassette, or
+        a scheduled sandbox smoke. The unforgivable version asserts on the
+        mock's call list and calls it integration testing.
+  \item \emph{[mid]} \textbf{What is property-based testing?} Instead of
+        hand-picked examples, you define a generator (strategy) over the
+        input space and an invariant that must hold for every generated
+        input; the framework explores, and on failure shrinks to a minimal
+        counterexample.
+  \item \emph{[mid]} \textbf{Name three invariants every API should
+        satisfy under generated inputs.} Never 5xx; every 2xx validates
+        against the published response schema; every 4xx is RFC~9457
+        problem-shaped.
+  \item \emph{[mid]} \textbf{What is shrinking and why does it matter?}
+        Automatic minimization of a failing input while the failure still
+        reproduces. It converts ``500 on this 4{,}000-key blob'' into
+        ``500 when \texttt{price\_cents} is 666'' --- the difference
+        between noise and a bug report.
+  \item \emph{[mid]} \textbf{How do you test timeouts and retries without
+        sleeping?} Inject the sleeper. Production wires the real
+        \texttt{sleep}; tests wire a virtual clock that records requested
+        delays and advances instantly. Assert on the recorded backoff
+        schedule (\texttt{[0.1, 0.2, 0.4]}), which is the real behavioral
+        contract, in microseconds of wall time.
+  \item \emph{[mid]} \textbf{How do you test a circuit breaker
+        deterministically?} Scripted fault injection indexed by request
+        number (not randomness): $N$ consecutive exhausted calls, then
+        assert the $(N{+}1)$-th call fails fast by counting requests that
+        reached the dependency. Then inject one success and assert the
+        breaker resets.
+  \item \emph{[mid]} \textbf{Risks of record--replay cassettes?} Secrets
+        and PII baked into fixtures (sanitize); silent rot as the real
+        service evolves (re-record on schedule, or at least smoke against
+        reality); and false confidence because replay cannot diverge ---
+        it can only be stale.
+  \item \emph{[mid]} \textbf{What belongs in a CI quality gate for an
+        API?} Fast hermetic layers: unit + property suites with a coverage
+        floor, contract verification per published pact, OpenAPI diff
+        versus the released spec, a bounded fuzz smoke, and a structural
+        perf smoke. Deep load and soak move to scheduled jobs.
+  \item \emph{[mid]} \textbf{What is the value --- and the failure mode ---
+        of coverage floors?} Value: they make suite deletion visible and
+        force new code to arrive with \emph{some} test. Failure mode: they
+        reward assertion-free tests that touch lines. Pair floors with
+        invariant-based tests and review test \emph{assertions}, not just
+        diffs.
+  \item \emph{[mid]} \textbf{How do you handle flaky tests?} Track flake
+        rate per test; two flakes in a week means fix or delete;
+        quarantine with an SLA, never as a graveyard; make CI retries log
+        failure causes; prefer determinism (derandomized seeds, virtual
+        clocks) over retry budgets.
+  \item \emph{[senior]} \textbf{Open versus closed workload models, and
+        what is coordinated omission?} Closed: $N$ workers each wait for
+        the response before sending again --- offered load shrinks when the
+        system slows. Open: fixed arrival rate regardless of completions.
+        Coordinated omission is the closed-model pathology where load
+        scheduled \emph{during} a latency spike is silently skipped,
+        producing healthy-looking results for an unhealthy system. Latency
+        and saturation work demands open models.
+  \item \emph{[senior]} \textbf{Derive Little's Law and apply it to
+        sizing.} Over a long window, the area under $L(t)$ equals the sum
+        of residence times; dividing by $T$ gives $L = \lambda W$.
+        Sizing: at 800 req/s and 30 ms mean latency, $L = 24$ requests are
+        resident --- every pool and concurrency limit must exceed 24 with
+        burst headroom, or queueing begins.
+  \item \emph{[senior]} \textbf{What is the knee point and how do you find
+        it operationally?} The offered load where latency stops growing
+        linearly and turns hyperbolic ($W \approx S/(1-\rho)$). Find it
+        with an open-model sweep: fixed windows at increasing RPS, plotting
+        p99 and error rate; the knee is the first level where p99 exceeds
+        roughly 10x baseline or errors appear. Provision at 60--70\% of
+        the knee.
+  \item \emph{[senior]} \textbf{How does Schemathesis-style fuzzing differ
+        from naive random fuzzing?} It is schema-guided: candidates are
+        drawn from the OpenAPI constraints (\texttt{minLength}$-1$,
+        \texttt{maxLength}$+1$, \texttt{minimum}$-1$, type confusions,
+        missing/extra keys), so it concentrates on validation boundaries
+        where bugs live, and it checks contract invariants (never 5xx,
+        schema-valid 2xx, problem-shaped 4xx) instead of merely watching
+        for crashes.
+  \item \emph{[senior]} \textbf{What does stateful rule-based testing
+        catch that single-call properties cannot?} Sequence-dependent
+        bugs: lost updates, read-your-writes violations, idempotency-key
+        reuse corruption, cross-resource leakage. You generate random
+        operation interleavings, maintain a local model, and assert
+        agreement after every step.
+  \item \emph{[senior]} \textbf{Define steady-state hypothesis and blast
+        radius.} Steady state: a measurable behavioral definition of
+        ``fine'' (p99 and error rate over a window), never an internal
+        proxy. Hypothesis: the system stays in steady state under a
+        specified fault. Blast radius: the maximal scope the experiment can
+        harm --- start at one in-process middleware, widen only as
+        confidence and abort automation mature.
+  \item \emph{[senior]} \textbf{Give the fault taxonomy for HTTP APIs and
+        one resilience defect each class reveals.} Latency (missing
+        timeouts), synthesized 5xx (retry storms without jitter), abort
+        (unhandled exception paths), partition (failed failover), resource
+        exhaustion (queue growth, priority inversion).
+  \item \emph{[senior]} \textbf{Performance regression budgets in CI when
+        runners are noisy?} Do not assert wall-clock latency on shared
+        runners: assert structure (completion, zero 5xx) in the PR gate,
+        and run ratio-based comparisons (candidate versus same-run
+        baseline) on dedicated quiet hardware as a scheduled job with
+        archived histograms.
+  \item \emph{[senior]} \textbf{A provider's tests all pass, the deploy
+        ships, consumers break. What process failed?} The provider tested
+        against itself. No consumer contract was verified for the deployed
+        version: pact publication, provider-side replay, and the
+        \texttt{can-i-deploy} gate were missing or not blocking. Schema
+        diff may also have missed it if the change was semantic.
+  \item \emph{[staff]} \textbf{Design a load test that finds the knee of a
+        new checkout API.} Model the workload (open model; realistic
+        request mix and payload sizes); isolate an environment; baseline
+        at trivial load; sweep offered RPS in fixed short windows past
+        predicted capacity ($c/S$); record p50/p99/error rate per level;
+        flag the knee at 10x-baseline p99 or first error; cross-check with
+        Little's Law ($L = \lambda W$ versus pool sizes); set the budget
+        at 60--70\% of the knee; convert the sweep into a scheduled
+        regression job and a structural PR smoke.
+  \item \emph{[staff]} \textbf{How would you roll out consumer-driven
+        contracts across forty microservices?} Start with the three
+        highest-change-frequency provider/consumer pairs; stand up a
+        broker; make publication a CI artifact and verification a provider
+        CI step; run gates advisory-first for a month, publish the
+        catch statistics, then make them blocking; invest in
+        provider-state libraries per domain; measure pact coverage of
+        production traffic, not of repositories.
+  \item \emph{[staff]} \textbf{What does the delivery-performance evidence
+        (Accelerate, SRE practice) say about test automation?} Fast,
+        trusted, automated gates correlate with \emph{both} deployment
+        throughput and stability --- quality gates are a delivery feature.
+        The organizational failure mode is slow, flaky suites that train
+        engineers to bypass them; the fix is engineering discipline in the
+        gates themselves, not more process around them.
+  \item \emph{[staff]} \textbf{Your pbt suite passes for months, then
+        fails on a seed nobody can reproduce. Diagnose.} Check for hidden
+        nondeterminism: unseeded randomness, wall-clock reads, dict/set
+        ordering, environment dependence, leaked state between examples,
+        or a live dependency sneaking into the ``offline'' suite. Then
+        pin everything (derandomize, inject clocks, fresh app per test)
+        and add the failing example as a regression test.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch19-bibliography}
+
+\begin{itemize}
+  \item \textbf{Pact documentation} --- \emph{Pact: Consumer-Driven
+        Contracts}, \texttt{https://docs.pact.io}~\cite{pactdocs}. The
+        reference for the consumer/pact-file/broker/verification loop,
+        provider states, and \texttt{can-i-deploy}.
+  \item \textbf{OpenAPI 3.1 Specification} --- the schema source our
+        fuzzer consumes; pair with any OpenAPI-diff tooling for structural
+        compatibility gates~\cite{openapi31}.
+  \item \textbf{Steve Freeman \& Nat Pryce}, \emph{Growing
+        Object-Oriented Software, Guided by Tests} (Addison-Wesley, 2009).
+        The canonical treatment of mock-based design, the doubles
+        taxonomy in practice, and why tests should express behavior.
+  \item \textbf{Gerard Meszaros}, \emph{xUnit Test Patterns: Refactoring
+        Test Code} (Addison-Wesley, 2007). The precise dummy/stub/fake/
+        spy/mock vocabulary used in Section~\ref{sec:ch19-doubles}.
+  \item \textbf{Hypothesis documentation} ---
+        \texttt{https://hypothesis.readthedocs.io}. Strategies, shrinking,
+        \texttt{derandomize}, and \texttt{RuleBasedStateMachine} for
+        stateful API testing.
+  \item \textbf{Schemathesis documentation} ---
+        \texttt{https://schemathesis.readthedocs.io}. Production-grade
+        OpenAPI-driven fuzzing whose miniature we built in Listing 19.5.
+  \item \textbf{k6 documentation} --- \texttt{https://grafana.com/docs/k6}.
+        Arrival-rate (open-model) executors, thresholds, and checks;
+        Locust (\texttt{https://docs.locust.io}) is the Python-native
+        alternative.
+  \item \textbf{Betsy Beyer et al.} (eds.), \emph{Site Reliability
+        Engineering} (O'Reilly, 2016)~\cite{beyer2016sre} --- the testing
+        and release-engineering chapters, plus SLO thinking for load-test
+        budgets.
+  \item \textbf{Michael T. Nygard}, \emph{Release It!, 2nd ed.} (Pragmatic
+        Bookshelf, 2018)~\cite{nygard2018releaseit} --- stability patterns
+        and anti-patterns; the conceptual home of circuit breakers and
+        capacity disasters.
+  \item \textbf{Martin Kleppmann}, \emph{Designing Data-Intensive
+        Applications} (O'Reilly, 2017)~\cite{kleppmann2017ddia} ---
+        partial failure, partitions, and why distributed systems need
+        fault injection.
+  \item \textbf{Nicole Forsgren, Jez Humble, Gene Kim},
+        \emph{Accelerate} (IT Revolution, 2018) --- the empirical link
+        between fast, trusted test automation and delivery performance.
+  \item \textbf{FastAPI and httpx documentation}~\cite{fastapidocs,httpxdocs}
+        --- application factories, ASGI transports, and
+        \texttt{MockTransport} interception patterns.
+  \item \textbf{RFC 9457}, \emph{Problem Details for HTTP APIs} --- the
+        error shape our invariants assert on every 4xx.
+  \item \textbf{Gil Tene}, ``How NOT to Measure Latency'' (talk, 2011) ---
+        the definitive coordinated-omission rant behind our open-model
+        insistence.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch19-capstones}
+
+\subsection*{Capstone 19.1 [junior] --- A Second Consumer}
+\textbf{Objective:} Extend the chapter's contract suite with a new consumer
+to see usage-based verification in action.
+
+\textbf{Inputs/Datasets:} \texttt{code\textbackslash{}ch19\textbackslash{}}
+(robot registry, \texttt{pact\_mini.py}); synthetic Northwind Robotics data
+only.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Invent \texttt{billing-service}, which reads only \texttt{id} and
+        \texttt{price\_cents} from \texttt{GET /robots/\{id\}}.
+  \item Record its pact with its own provider state
+        (``a robot with id 11 exists'').
+  \item Verify both pacts against the healthy app, then against
+        \texttt{create\_app(breaking=True)}.
+  \item Introduce a third variant that renames \texttt{name} only, and show
+        no consumer pact fails.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Two pact files exist and verify green against the
+        healthy app.
+  \item[$\square$] The \texttt{sku} rename fails exactly one pact; the
+        \texttt{name} rename fails none.
+  \item[$\square$] Reports name the failing field with a JSONPath-style
+        location.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a \texttt{can-i-deploy(provider\_version)}
+function consulting a local JSON ``broker'' mapping versions to verified
+pacts.
+
+\subsection*{Capstone 19.2 [mid] --- Property Suite for a New Resource}
+\textbf{Objective:} Bring a second resource under property-based and fuzz
+coverage.
+
+\textbf{Inputs/Datasets:} \texttt{code\textbackslash{}ch19\textbackslash{}};
+a new \texttt{/warehouses} resource you add to the registry (fields:
+\texttt{code}, \texttt{city}, \texttt{capacity\_m2}).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Implement the resource with RFC~9457 error handling.
+  \item Write hostile-payload Hypothesis tests encoding the three universal
+        invariants.
+  \item Extend the fuzzer's schema excerpt and candidate generation for the
+        new fields.
+  \item Plant two distinct bugs (a 500 trigger; a schema-violating 201) and
+        confirm both are found and shrunk.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] \texttt{derandomize=True} suites pass repeatably.
+  \item[$\square$] Both planted bugs produce minimal shrunk reproducers.
+  \item[$\square$] Zero 5xx and zero non-problem 4xx across the campaign.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a rule-based stateful machine over
+create/read/update sequences for warehouses, with a local model oracle.
+
+\subsection*{Capstone 19.3 [mid] --- Record--Replay Cassette Library}
+\textbf{Objective:} Build a minimal VCR for \texttt{httpx} and learn where
+cassettes rot.
+
+\textbf{Inputs/Datasets:} \texttt{code\textbackslash{}ch19\textbackslash{}};
+a JSON cassette format you design (request key $\rightarrow$ recorded
+status/headers/body).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Implement a recording transport that writes cassettes and a
+        replaying transport that serves them.
+  \item Add sanitization hooks (strip \texttt{Authorization}, redact
+        fields).
+  \item Record the robot-registry interactions; replay with the app
+        offline.
+  \item Mutate the app (change a field) and demonstrate that replay cannot
+        detect it --- then add a cassette ``freshness date'' check.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Replay works with zero application code.
+  \item[$\square$] No credential-like header ever reaches disk.
+  \item[$\square$] A stale cassette is detected and reported by date or
+        hash.
+\end{itemize}
+
+\textbf{Stretch Goals:} Request matching on method+path+canonical body;
+strict versus lax matching modes.
+
+\subsection*{Capstone 19.4 [senior] --- Capacity Report from a Knee Sweep}
+\textbf{Objective:} Produce a capacity analysis for a service using the
+harness, defended with Little's Law.
+
+\textbf{Inputs/Datasets:} \texttt{code\textbackslash{}ch19\textbackslash{}}
+load harness; a workload app with tunable \texttt{work\_ms} and
+\texttt{max\_concurrent}.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Predict capacity analytically: $c/S$, with $\rho \to 1$ latency
+        shape.
+  \item Run open-model sweeps at three \texttt{work\_ms} settings; tabulate
+        knee points; compare with prediction.
+  \item Cross-check with a closed-model run and $L = \lambda W$.
+  \item Write the one-page report: knee, recommended provisioning headroom,
+        and the perf budget to encode in CI.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Predicted and measured knees agree within a factor of
+        two, with the discrepancy explained.
+  \item[$\square$] The report includes a knee table, a Little's Law
+        cross-check, and an explicit headroom recommendation.
+  \item[$\square$] No wall-clock assertion anywhere; numbers labeled
+        illustrative.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a coordinated-omission buggy scheduler variant
+and quantify how much it overstates capacity.
+
+\subsection*{Capstone 19.5 [staff] --- Quality-Gate Architecture for a Fleet}
+\textbf{Objective:} Design the gate architecture for a (fictional)
+ten-service Northwind Robotics fleet.
+
+\textbf{Inputs/Datasets:} The chapter's gate; a written fleet topology you
+invent (services, consumers, deploy cadences).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Allocate pyramid layers per service with designated catchers per
+        defect class.
+  \item Specify the broker topology: pact storage, version tagging,
+        \texttt{can-i-deploy} semantics per environment.
+  \item Budget CI minutes per gate; move deep sweeps and soaks to
+        scheduled jobs with archived evidence.
+  \item Write the flake policy (quarantine SLA, deletion rule, dashboards)
+        and the advisory-to-blocking rollout plan for contract gates.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Every defect class in your taxonomy has exactly one
+        designated cheapest catcher.
+  \item[$\square$] The gate budget fits four minutes per PR with a written
+        justification for each cut.
+  \item[$\square$] The rollout plan includes measurable adoption metrics
+        (pact coverage of production traffic) and a self-check requirement
+        for every gate.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add mutation testing of the gates themselves
+(deliberately broken variants) as a scheduled meta-gate.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch19-deps}
+
+\begin{minted}{text}
+# code\ch19\requirements.txt -- Chapter 19, Python 3.11+, offline-first
+pytest>=8.0
+hypothesis>=6.100
+fastapi>=0.110
+httpx>=0.27
+pydantic>=2.7
+jsonschema>=4.21
+\end{minted}
+
+Installation (PowerShell, from the track folder):
+
+\begin{minted}{powershell}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r code\ch19\requirements.txt
+pytest code\ch19 -q
+\end{minted}
+
+\subsection{pytest}
+\textbf{Description:} The test runner and fixture framework used by every
+suite in the chapter.
+\textbf{Why included:} Discovery, \texttt{tmp\_path} fixtures, rich
+assertion introspection, and exit codes compose into CI gates without
+glue code.
+\textbf{Alternatives:} \texttt{unittest} (stdlib, heavier boilerplate);
+\texttt{nose2} (largely dormant).
+\textbf{Installation:} \texttt{pip install "pytest>=8.0"}.
+
+\subsection{hypothesis}
+\textbf{Description:} Property-based testing library: strategies,
+shrinking, and rule-based state machines.
+\textbf{Why included:} Powers Listing 19.4's invariant suites;
+\texttt{derandomize=True} gives deterministic CI replays.
+\textbf{Alternatives:} \texttt{schemathesis} (OpenAPI-driven API fuzzing
+built on Hypothesis --- use it when you may add a dependency per spec);
+hand-rolled generators (Listing 19.5 shows the floor of that path).
+\textbf{Installation:} \texttt{pip install "hypothesis>=6.100"}.
+
+\subsection{fastapi}
+\textbf{Description:} The ASGI framework implementing the robot registry
+under test~\cite{fastapidocs}.
+\textbf{Why included:} Real routing, validation, and serialization give
+component and contract tests something true to verify.
+\textbf{Alternatives:} Starlette (lower level, same ASGI base); Flask
+(WSGI --- needs a different in-process testing story).
+\textbf{Installation:} \texttt{pip install "fastapi>=0.110"}.
+
+\subsection{httpx}
+\textbf{Description:} HTTP client with both sync and async APIs and,
+crucially, transport injection~\cite{httpxdocs}.
+\textbf{Why included:} \texttt{ASGITransport} runs everything in-process;
+\texttt{MockTransport} underpins stub-based client tests; custom
+\texttt{AsyncBaseTransport} hosts the resilient transport of Listing 19.7.
+\textbf{Alternatives:} \texttt{respx} (declarative route mocking on top of
+httpx); \texttt{requests} + \texttt{responses} (sync-only, older idiom).
+\textbf{Installation:} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pydantic}
+\textbf{Description:} Validation and serialization models behind FastAPI.
+\textbf{Why included:} Field constraints generate the 422 boundary our
+fuzzer explores; \texttt{model\_json\_schema()} is the bridge between code
+and contract.
+\textbf{Alternatives:} \texttt{dataclasses} + manual validation (stdlib,
+no schema generation); \texttt{attrs} + \texttt{cattrs}.
+\textbf{Installation:} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{jsonschema}
+\textbf{Description:} JSON Schema validation for Python.
+\textbf{Why included:} Asserts the ``2xx validates against the published
+schema'' invariant independently of the server's own serializer --- the
+checker must not share the checker's bugs.
+\textbf{Alternatives:} \texttt{pydantic.TypeAdapter} (faster, but shares
+implementation lineage with the app --- weaker independence);
+\texttt{fastjsonschema}.
+\textbf{Installation:} \texttt{pip install "jsonschema>=4.21"}.
+
+\paragraph{Notable tools intentionally not required.}
+\texttt{schemathesis} (we build its core idea by hand for instruction),
+\texttt{pact-python} (we implement the loop explicitly), \texttt{locust}
+and \texttt{k6} (we implement open/closed models in 100 lines),
+\texttt{respx} (MockTransport suffices), and \texttt{pytest-asyncio}
+(we call \texttt{asyncio.run} directly to keep the dependency surface at
+six packages).
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch19-summary}
+
+\begin{itemize}
+  \item The test pyramid is portfolio allocation: every defect class gets a
+        \emph{designated cheapest catcher}; E2E stays thin because it is
+        slow, flaky, and diagnostically mute.
+  \item Consumer-driven contracts invert correctness: consumers record what
+        they rely on, providers replay it against real code with minimal
+        named states, and \texttt{can-i-deploy} turns verification into a
+        release gate~\cite{pactdocs}. Schema diffing guards public
+        surfaces; contracts guard known consumers; use both.
+  \item Property-based testing and schema-driven fuzzing buy coverage of
+        input spaces you cannot enumerate; the universal invariants are
+        never-5xx, schema-valid 2xx, RFC~9457 4xx; shrinking turns crashes
+        into bug reports; stateful rules catch sequence bugs.
+  \item Test doubles have precise meanings; prefer fakes for what you own,
+        stubs at third-party edges, sanitized cassettes with freshness
+        dates; never let a mock of someone else's API be your integration
+        evidence~\cite{httpxdocs}.
+  \item Determinism is engineered: injected sleepers and virtual clocks
+        test retries, timeouts, and breakers in microseconds; scripted
+        fault injection makes chaos reproducible in CI.
+  \item Load testing is the search for the knee: open models avoid
+        coordinated omission; Little's Law $L = \lambda W$ connects
+        throughput, latency, and concurrency; provision at 60--70\% of the
+        knee; load/stress/soak/spike answer different questions
+        \cite{nygard2018releaseit,beyer2016sre}.
+  \item Quality gates are code: hermetic, fast, deterministic, legible,
+        and \emph{self-checking} --- every gate in this chapter proves it
+        can fail by running against a deliberately broken variant.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch19-quickref}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{Layer} & \textbf{Catches} & \textbf{Tooling (this chapter)} \\
+\midrule
+Unit        & validation/serialization logic & pytest on pure functions \\
+Component   & routing, wiring, error shapes & httpx + ASGI transport (in-process) \\
+Contract    & cross-team breakage & pact recorder + verifier, OpenAPI diff \\
+Integration & config, auth, migration drift & real infra in ephemeral env \\
+E2E         & emergent whole-system failures & a handful of golden journeys \\
+Property/fuzz & input-space and sequence bugs & Hypothesis, mini OpenAPI fuzzer \\
+Load        & capacity, knee, regression & asyncio harness, budgets \\
+Chaos       & resilience claims & scripted fault middleware \\
+\bottomrule
+\end{tabularx}
+\caption{Test-layer responsibility matrix.}
+\label{tab:ch19-layers}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Fault} & \textbf{Assertion pattern in tests} \\
+\midrule
+Latency   & virtual clock recorded the delay; no wall-clock assertion \\
+Error 5xx & retried with recorded backoff schedule; breaker trips at threshold \\
+Abort     & surfaced as transport error after bounded retries \\
+Partition & failover/fallback engaged; steady state held \\
+Exhaustion & queue bounds respected; load-shedding, not collapse \\
+\bottomrule
+\end{tabularx}
+\caption{Fault taxonomy and how to assert on it deterministically.}
+\label{tab:ch19-faults}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Quantity} & \textbf{Rule} \\
+\midrule
+Little's Law & $L = \lambda W$; size every pool above $\lambda W$ with burst headroom \\
+Utilization & $\rho = \lambda S / c$; latency $\sim S/(1-\rho)$ as $\rho \to 1$ \\
+Knee & first sweep level with p99 $>$ 10$\times$ baseline p50, or any errors \\
+Provisioning & run production at 60--70\% of the knee \\
+Perf in CI & structural assertions on PRs; ratio budgets on quiet scheduled runs \\
+\bottomrule
+\end{tabularx}
+\caption{Little's Law and saturation cheat sheet.}
+\label{tab:ch19-little}
+\end{table}
+
+\input{chapters/_standard_addendum}

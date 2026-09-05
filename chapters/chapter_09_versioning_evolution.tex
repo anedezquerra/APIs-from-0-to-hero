@@ -1,0 +1,2242 @@
+%% ============================================================================
+%% Chapter 9: API Versioning & Evolution Strategies
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{API Versioning \& Evolution Strategies}
+\label{ch:versioning}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+An API is a promise. The moment a single external consumer integrates against
+your endpoints, every field name, every enum value, every error code, and every
+default becomes a load-bearing part of someone else's production system --- and
+you can no longer change any of it unilaterally without a plan. Yet APIs
+\emph{must} change: businesses launch new products, regulations demand new
+fields, performance work restructures aggregates, and yesterday's design
+decisions become today's constraints. The central question of this chapter is
+therefore not \emph{whether} to change an API, but \emph{how to change it
+without breaking the consumers who trusted you}. Versioning is the discipline
+that answers that question; evolution strategy is the engineering program that
+makes the discipline affordable.
+
+We begin by formalizing the vocabulary. A \emph{breaking change} is defined
+precisely --- not by intuition but by the existence of a formerly valid client
+interaction that the new contract rejects, mishandles, or renders
+uninterpretable --- and we classify the everyday catalog of changes (removing
+or renaming fields, tightening validation, changing types or semantics, adding
+required fields, adding enum values, changing URLs) against that definition.
+We examine the robustness principle (Postel's law) as a design posture for
+APIs, and just as carefully examine its limits, because blind tolerance
+fossilizes bugs into the contract. We then compare the four dominant
+versioning mechanisms --- URI path, query parameter, custom header, and
+\texttt{Accept} media-type negotiation --- with a rigorous trade-off matrix
+covering caches, gateways, documentation, client pinning, and hypermedia, and
+we study what Stripe, GitHub, and Google actually do in production and the
+reasoning behind each choice~\cite{gehl2021apidesign}.
+
+Mechanics follow policy. We study the expand-and-contract (parallel change)
+pattern as the canonical zero-downtime migration shape, adapter and
+anti-corruption layers that translate between version surfaces, dual-serving
+architectures that run $n$ public versions over one service core, consumer
+migration campaigns, and the usage telemetry that tells you when a version is
+finally safe to retire. Deprecation is treated as an engineering discipline
+with wire-level artifacts: the \texttt{Deprecation} and \texttt{Sunset}
+response headers of RFC~8594, updated by RFC~9745~\cite{rfc8594},
+\texttt{Link} relations that point at successor versions, sunset timelines,
+contractual stability SLAs, SemVer discipline for API contracts, and
+changelogs that consumers can actually plan against. Schema evolution gets its
+own rulebook --- additive-only changes, never reusing names, enum
+extensibility strategies, and the sharply different unknown-field tolerance
+rules of JSON versus Protocol Buffers (Chapter~4)~\cite{protobufdocs} --- and
+we close the loop with compatibility testing in CI: OpenAPI diffing in the
+style of \texttt{oasdiff} as a breaking-change gate that fails the build
+before a bad contract ever ships~\cite{openapi31}.
+
+The code is deliberately production-shaped. You will build a dual-serving
+FastAPI catalog API in which v1 is a pure adapter over the v2 domain model and
+carries live \texttt{Deprecation}/\texttt{Sunset} headers; a stdlib-plus-YAML
+OpenAPI diff gate that classifies changes as breaking or non-breaking and
+exits non-zero on breakage; a media-type version negotiator with correct 406
+behavior; a consumer-tolerance test suite that \emph{proves} old clients
+survive additive change; and a retirement-readiness report generator that
+turns access logs into a decommission decision. Everything is offline,
+deterministic, typed Python~3.11, set in the fictional Northwind Robotics
+parts-catalog universe.
+
+\begin{keyconceptbox}
+A \textbf{version} is not a number on a URL; it is a \emph{supported contract}
+with a lifecycle: introduced, current, deprecated, sunset, retired. Breaking
+changes demand a new version; non-breaking changes ride the existing one. The
+cheapest version is the one you never had to mint --- prefer additive,
+tolerant-reader evolution and reserve explicit versions for changes that are
+genuinely incompatible. Retirement, not introduction, is the expensive part of
+the lifecycle, so instrument usage from day one.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch9-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Classify any concrete API change --- field removal, rename, type
+        change, semantic change, validation tightening, required-field
+        addition, enum-value addition, error-code change, URL change --- as
+        breaking or non-breaking, and defend the classification with the
+        formal definition of a breaking change, including the subtle
+        enum-addition caveat.
+  \item State the robustness principle (Postel's law) as it applies to API
+        design, apply tolerant-reader and additive-only disciplines, and
+        articulate the principle's failure modes: bug fossilization, ambiguity
+        amplification, and security surface growth.
+  \item Compare URI path, query-parameter, custom-header, and
+        \texttt{Accept} media-type versioning across caching, gateway routing,
+        documentation, client pinning, hypermedia, and debuggability; explain
+        why Stripe uses date-based versions, why GitHub versions via a header,
+        and why Google versions in the URI~\cite{gehl2021apidesign}.
+  \item Execute an expand-and-contract migration end to end: deploy the new
+        contract alongside the old, dual-serve through an adapter layer,
+        migrate consumers with telemetry-driven campaigns, and contract by
+        retiring the old version only when the data permits it.
+  \item Engineer a deprecation policy: emit RFC~8594/RFC~9745
+        \texttt{Deprecation} and \texttt{Sunset} headers, publish sunset
+        timelines and stability SLAs, maintain a SemVer-disciplined changelog,
+        and select communication channels proportionate to blast radius
+        \cite{rfc8594}.
+  \item Apply schema-evolution rules --- additive-only changes, never reusing
+        names, enum extensibility with fallback values, unknown-field
+        tolerance --- and contrast JSON's name-based tolerance with Protocol
+        Buffers' tag-based rules~\cite{protobufdocs}.
+  \item Build, in typed Python~3.11, a dual-serving FastAPI application with a
+        v1-to-v2 adapter layer, an OpenAPI breaking-change CI gate, a
+        media-type version negotiator, a consumer-tolerance test suite, and a
+        retirement-readiness report generator~\cite{fastapidocs,openapi31}.
+  \item Design a version-support policy at scale: decide how many versions to
+        run concurrently, quantify the per-version carrying cost, and
+        differentiate policy for internal versus external APIs.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed:
+
+\begin{itemize}
+  \item \textbf{Chapter 0} --- environment setup: Python 3.11+, a virtual
+        environment, and the ability to run \texttt{pip} and \texttt{pytest}
+        from PowerShell.
+  \item \textbf{Chapter 1} --- the HTTP wire protocol: methods, status codes,
+        and header fields, especially \texttt{Accept}, \texttt{Content-Type},
+        \texttt{Link}, and cache-related headers~\cite{rfc9110}.
+  \item \textbf{Chapter 2} --- consuming APIs from Python: parsing JSON
+        responses and handling HTTP errors.
+  \item \textbf{Chapter 3} --- the REST architectural style: resources,
+        representations, and hypermedia, which inform the
+        URI-versus-media-type debate.
+  \item \textbf{Chapter 4} --- serialization formats and data contracts:
+        JSON Schema, Protocol Buffers tag rules, content negotiation, and the
+        backward/forward/full compatibility vocabulary we extend here
+        \cite{protobufdocs}.
+  \item \textbf{Chapter 5} --- client-side security fundamentals, and
+        \textbf{Chapter 6} --- building APIs with FastAPI: routing, Pydantic
+        models, and \texttt{TestClient}~\cite{fastapidocs}.
+\end{itemize}
+
+No network access, cloud account, or API key is required anywhere in this
+chapter: every fixture is synthetic, embedded, and deterministic, set in the
+fictional \emph{Northwind Robotics} parts and logistics universe.
+
+\begin{warningbox}
+Versioning policy is a \textbf{business commitment} encoded in engineering
+artifacts. A \texttt{Sunset} header, a changelog entry, and a support SLA are
+promises your consumers will plan around. Do not publish a deprecation date
+you are not prepared to honor, and do not retire a version while consumers
+you have not contacted still depend on it. The code in this chapter is simple;
+the discipline around it is the actual subject.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch9-mechanics}
+
+\subsection{A Taxonomy of Change}
+\label{subsec:ch9-taxonomy}
+
+Every versioning decision reduces to one question: \emph{does this change
+break an existing consumer?} Answering it honestly requires a definition
+precise enough to classify borderline cases, not a vibe.
+
+\begin{definition}[Breaking change]
+\label{def:breaking}
+Let $C$ be an API contract and $\mathcal{K}(C)$ the set of client interactions
+(request plus response interpretation) that are valid and succeed under $C$.
+A change producing contract $C'$ is \emph{breaking} if and only if there
+exists at least one interaction $k \in \mathcal{K}(C)$ such that under $C'$,
+$k$ is rejected, fails, or returns a response that a client written against
+$C$ cannot interpret with its existing parsing and handling logic. A change
+with no such $k$ is \emph{non-breaking} (compatible).
+\end{definition}
+
+\begin{definition}[Compatibility modes]
+\label{def:compat}
+A new contract (or schema) version $C'$ is \emph{backward compatible} with
+$C$ if consumers written against $C$ work unchanged against $C'$ (new server,
+old clients). $C'$ is \emph{forward compatible} with $C$ if consumers written
+against $C'$ can meaningfully process data produced under $C$ (old readers,
+new data). A change that is both is \emph{fully compatible}. Web API evolution
+is overwhelmingly concerned with backward compatibility; durable data formats
+(Chapter~4) must care about both directions.
+\end{definition}
+
+With Definition~\ref{def:breaking} in hand, the everyday catalog of changes
+classifies cleanly --- with two notorious edge cases that we flag explicitly.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Change} & \textbf{Verdict} & \textbf{Why} \\
+    \midrule
+    Remove a response field & Breaking & Clients reading the field fail or
+      misinterpret; violates the old contract's response shape. \\
+    Rename a field & Breaking & A rename is a removal plus an addition; the
+      removal half breaks. ``Harmless renames'' are the most common
+      accidental breakage. \\
+    Change a field's type & Breaking & \texttt{price} as float dollars
+      becoming integer cents deserializes wrongly or fails validation on
+      every old client. \\
+    Change field semantics & Breaking & Same name, same type, new meaning
+      (e.g., \texttt{stock} switches from on-hand to available-to-promise):
+      old clients silently compute wrong answers. Worst class of break ---
+      no error is raised. \\
+    Tighten validation & Breaking & Requests that succeeded now return 400.
+      Loosening validation is non-breaking. \\
+    Add a required request field & Breaking & Old clients cannot supply it;
+      their formerly valid requests are rejected. \\
+    Add an optional request field & Non-breaking & Old requests remain valid;
+      the server defaults the new field. \\
+    Add a response field & Non-breaking\textsuperscript{*} & Tolerant readers
+      ignore it; strict-schema clients may not --- see below. \\
+    Add an endpoint & Non-breaking & Nothing existing changed; new capability
+      only. \\
+    Change a URL path & Breaking & Every hard-coded client reference 404s.
+      URL \emph{additions} are fine; URL \emph{moves} break. \\
+    Change an error code/body & Breaking & Clients branch on status codes and
+      problem-detail members; changing them breaks error-handling paths. \\
+    Add an enum value & \textbf{Conditional} & Breaking for clients that
+      validate exhaustively or \texttt{switch} without a default arm;
+      non-breaking for tolerant readers. See the caveat below. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Change taxonomy under Definition~\ref{def:breaking}.}
+  \label{tab:ch9-taxonomy}
+\end{table}
+
+\paragraph{The enum-addition caveat.}
+Adding a value to an enumeration is the most underestimated breaking change
+in API design. Producers think of enums as closed sets they own; consumers
+frequently compile them into closed \texttt{switch}/\texttt{match} statements,
+strict deserializers, or database check constraints. When Northwind Robotics
+adds \texttt{battery} to the catalog \texttt{category} enum, every mobile
+client whose generated model rejects unknown enum values does not degrade ---
+it \emph{crashes}, typically inside its JSON decoding layer, on an otherwise
+perfectly valid response. The mitigation is contractual: document enums as
+\emph{open} (extensible) from day one, require clients to define fallback
+behavior for unknown values, and provide a sentinel such as
+\texttt{unknown}/\texttt{other} in the published schema. Protocol Buffers
+codifies exactly this posture: unrecognized enum values are preserved and
+surfaced as unknown values rather than rejected~\cite{protobufdocs}. If your
+existing consumer base already treats the enum as closed, adding a value
+\emph{is} a breaking change and belongs in a new version.
+
+\subsection{The Robustness Principle and Its Limits}
+\label{subsec:ch9-postel}
+
+Postel's law --- \emph{be conservative in what you send, be liberal in what
+you accept} --- translates into two concrete API disciplines. On the producer
+side, \textbf{conservative sending} means additive-only evolution, stable
+field names, documented-open enums, and never reusing a retired name for a
+new meaning. On the consumer side, \textbf{liberal acceptance} means the
+\emph{tolerant reader}: ignore fields you do not recognize, do not fail on
+unexpected enum values, do not depend on object member ordering, and treat
+absence of an optional field as a normal case. A consumer base built on
+tolerant readers makes most additive producer changes free, which is why the
+tolerant-reader posture is the single highest-leverage compatibility
+investment an ecosystem can make.
+
+The principle has real limits, and a principal engineer must know them.
+First, \textbf{bug fossilization}: every quirk you silently tolerate ---
+the misspelled field you alias, the malformed date you repair --- becomes a
+de facto contract you can never remove, because some consumer now depends on
+your tolerance. Second, \textbf{ambiguity amplification}: accepting
+\texttt{price} as either a string or a number forces every consumer to guess
+which semantics apply, multiplying interoperability bugs rather than
+preventing them. Third, \textbf{security surface}: liberal parsers are
+historically fertile ground for injection, confusion, and denial-of-service
+attacks; validate strictly at the trust boundary (Chapter~5) and be liberal
+only about \emph{ignoring} the unrecognized, never about \emph{accepting} the
+malformed. The mature reading of Postel is: strict about structure and safety,
+tolerant about extensibility.
+
+\subsection{Versioning Strategies: A Rigorous Comparison}
+\label{subsec:ch9-strategies}
+
+When a change is genuinely breaking, you must mint a new version, and the
+version identifier must live somewhere on the wire. Four placements dominate
+practice; Figure~\ref{fig:ch9-routing} shows the selection flow they share.
+
+\paragraph{URI path versioning.} The version is a path segment:
+\texttt{/v1/catalog/WR-1042}. Strengths: maximally visible and debuggable
+(the version is obvious in every log line and browser address bar); routing
+is trivial for any gateway; per-version cache keys emerge naturally because
+the URI is the primary cache key in HTTP~\cite{rfc9110}; client pinning is
+effortless. Weaknesses: it violates the REST ideal that a URI identifies a
+\emph{resource}, not a representation of it --- \texttt{/v1/catalog/WR-1042}
+and \texttt{/v2/catalog/WR-1042} are the same part wearing two addresses;
+links embedded in stored data (bookmarks, database columns, emails) pin
+consumers to versions; hypermedia payloads must be regenerated per version.
+
+\paragraph{Query-parameter versioning.} \texttt{/catalog/WR-1042?version=2}.
+Largely the URI strategy with worse ergonomics: caches \emph{do} key on query
+strings, so cacheability survives, but intermediaries and logging pipelines
+more often normalize or drop query parameters than path segments, and the
+version reads as optional decoration rather than structural commitment.
+
+\paragraph{Custom header versioning.} \texttt{X-API-Version: 2}. Keeps URIs
+stable and pure, but suffers at the edges: browser debugging is awkward,
+many gateways require explicit configuration to route on custom headers,
+documentation tooling rarely models it, and --- critically --- naive caches
+keyed only on URI will serve a v1 body to a v2 request unless the server
+emits \texttt{Vary: X-API-Version} and every intermediary honors it
+\cite{rfc9110}. Cache poisoning across versions is a real, observed failure
+mode (Section~\ref{sec:ch9-pitfalls}).
+
+\paragraph{Media-type (\texttt{Accept} header) versioning.}
+\texttt{Accept: application/vnd.northwind.catalog+json; version=2}. This is
+the most REST-orthodox placement: the URI identifies the resource; the
+version is a property of the negotiated \emph{representation}, exactly as
+content negotiation intends (Chapter~4)~\cite{rfc9110}. It composes naturally
+with hypermedia and permits resource-by-resource versioning granularity. Its
+costs are the sharpest: the highest complexity floor for consumers,
+near-invisibility in logs and browsers, gateway routing that must parse
+media-type parameters, the same \texttt{Vary: Accept} cache requirement, and
+documentation tooling that assumes path-based APIs. Listing~9.3 implements a
+correct negotiator, including the 406 response for unsupported versions.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{X c c c c}
+    \toprule
+    \textbf{Criterion} & \textbf{URI path} & \textbf{Query param} &
+      \textbf{Custom header} & \textbf{Media type} \\
+    \midrule
+    Cache correctness & Excellent & Good & Fragile (needs \texttt{Vary}) &
+      Fragile (needs \texttt{Vary}) \\
+    Gateway/LB routing & Trivial & Easy & Config required & Config required \\
+    Debuggability (browser, logs) & Excellent & Good & Poor & Poor \\
+    Client pinning difficulty & Trivial & Easy & Moderate & Hard \\
+    Hypermedia fit & Poor & Poor & Good & Excellent \\
+    Doc/tooling support & Excellent & Good & Fair & Fair \\
+    REST resource purity & Poor & Fair & Good & Excellent \\
+    Version granularity & Per API & Per API & Per API & Per resource \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Versioning strategy trade-off matrix.}
+  \label{tab:ch9-matrix}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=stealth, node distance=0.55cm and 1.1cm,
+  box/.style={rectangle, draw, rounded corners, align=center,
+    minimum width=3.4cm, minimum height=0.9cm},
+  decision/.style={diamond, draw, align=center, aspect=2.2, inner sep=1pt},
+  term/.style={rectangle, draw, fill=gray!15, rounded corners, align=center,
+    minimum width=2.6cm, minimum height=0.8cm}]
+  \node[box] (req) {HTTP request};
+  \node[box, right=of req] (extract) {Extract version signal\\ \footnotesize URI segment / query / header / \texttt{Accept}};
+  \node[decision, right=of extract] (known) {Signal\\ recognized?};
+  \node[decision, below=of known] (supported) {Version\\ supported?};
+  \node[term, right=of supported] (reject) {406 Not Acceptable\\ \footnotesize (+\ \texttt{Link} to supported versions)};
+  \node[box, left=of supported] (route) {Route to version handler\\ \footnotesize direct (v2) or via adapter (v1)};
+  \node[term, below=of route] (serve) {Serve from shared service core};
+  \draw[->] (req) -- (extract);
+  \draw[->] (extract) -- (known);
+  \draw[->] (known) -- node[right] {yes} (supported);
+  \draw[->] (known.east) -| node[pos=0.25, above] {no} ($(reject.north)+(0,0.55)$) -- (reject.north);
+  \draw[->] (supported) -- node[above] {yes} (route);
+  \draw[->] (supported) -- node[above] {no} (reject);
+  \draw[->] (route) -- (serve);
+\end{tikzpicture}
+\caption{Version-selection routing flow. An unrecognized \emph{signal} and an
+unsupported \emph{version} are different failures; both surface as 406 (or 404
+for unknown paths) with pointers to supported versions.}
+\label{fig:ch9-routing}
+\end{figure}
+
+\paragraph{What major providers do, and why.}
+\textbf{Stripe} versions by \emph{date}: every account is pinned to a version
+like \texttt{2024-06-20}, sent per request via the \texttt{Stripe-Version}
+header, and each response is rendered through a cascade of
+backward-compatibility transformation layers from current internals down to
+the caller's pinned date. The payoff is that a consumer's integration
+\emph{never changes underneath them} unless they explicitly upgrade, while
+Stripe ships continuous internal change. \textbf{GitHub} versions via a media
+type plus an \texttt{X-GitHub-Api-Version} date header, keeping resource URIs
+stable across versions --- the REST-orthodox choice, suited to a
+hypermedia-rich API. \textbf{Google} versions in the URI (\texttt{/v1/},
+\texttt{/v2/}) and codifies the policy in its API Improvement Proposals:
+discoverability, gateway simplicity, and cache clarity outweigh URI purity at
+Google's operational scale~\cite{gehl2021apidesign}. The pattern to
+internalize is not \emph{which} mechanism won but \emph{why}: each provider
+chose the placement whose costs its consumer base and infrastructure could
+bear, and each pairs the mechanism with a strict non-breaking-change policy
+so that new versions are rare events.
+
+\subsection{Evolution Mechanics: Expand-and-Contract and Dual-Serving}
+\label{subsec:ch9-expandcontract}
+
+The \textbf{expand-and-contract} pattern (also called \emph{parallel change})
+is the canonical zero-downtime migration shape for any shared contract, from
+database schemas~\cite{kleppmann2017ddia} to public APIs. Its discipline is
+that the system passes through an intermediate state in which \emph{both} the
+old and new contracts are simultaneously valid, so no consumer ever observes
+a discontinuity. The pattern has three phases, shown in
+Figure~\ref{fig:ch9-timeline}:
+
+\begin{enumerate}
+  \item \textbf{Expand.} Add the new contract (endpoint version, field, or
+        representation) alongside the old one. Nothing is removed. Old
+        consumers are unaffected by construction; new consumers can opt in.
+  \item \textbf{Migrate.} Move consumers from old to new, at their pace but
+        on your schedule: announce deprecation, publish a migration guide,
+        instrument usage, and run a migration campaign
+        (Section~\ref{subsec:ch9-campaigns}).
+  \item \textbf{Contract.} When telemetry shows the old surface is unused (or
+        below a contractual threshold with stragglers individually engaged),
+        retire it. Only now is the old code deleted.
+\end{enumerate}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % Timeline axis
+  \draw[->, thick] (0,0) -- (14.2,0) node[right] {time};
+  % Phase boundary ticks
+  \foreach \x/\lab in {0/{$T_0$}, 4.2/{$T_1$}, 9.4/{$T_2$}, 13.6/{$T_3$}} {
+    \draw (\x, 0.12) -- (\x, -0.12);
+    \node[below] at (\x, -0.15) {\lab};
+  }
+  % Phase labels above the axis
+  \node[align=center] at (2.1, 0.85) {\textbf{Expand}\\ \footnotesize deploy v2 beside v1};
+  \node[align=center] at (6.8, 0.85) {\textbf{Migrate}\\ \footnotesize consumers move; v1 deprecated};
+  \node[align=center] at (11.5, 0.85) {\textbf{Contract}\\ \footnotesize retire v1};
+  % Serving-state braces below
+  \draw[decorate, decoration={brace, amplitude=5pt, mirror}]
+    (0.1, -1.0) -- (4.1, -1.0) node[midway, below=6pt, note] {v1 only};
+  \draw[decorate, decoration={brace, amplitude=5pt, mirror}]
+    (4.3, -1.0) -- (13.5, -1.0) node[midway, below=6pt, note] {dual-serving: v1 (deprecated) + v2};
+  \draw[decorate, decoration={brace, amplitude=5pt}]
+    (13.7, 0.45) -- (14.1, 0.45) node[midway, above=6pt, note] {v2 only};
+  % Key events
+  \node[note, above] at (0.0, 1.75) {v1 stable};
+  \node[note, above, align=center] at (4.2, 1.75) {v2 GA;\\ \texttt{Deprecation} on v1};
+  \node[note, above, align=center] at (9.4, 1.75) {v1 usage $<$ threshold;\\ sunset countdown};
+  \node[note, above, align=center] at (13.6, 1.75) {\texttt{Sunset} date;\\ v1 returns 410};
+\end{tikzpicture}
+\caption{Expand-and-contract migration timeline. The dual-serving window
+between $T_1$ and $T_3$ is where all consumer risk is absorbed; contraction
+before the window closes is what causes outages.}
+\label{fig:ch9-timeline}
+\end{figure}
+
+\paragraph{Adapters and anti-corruption layers.}
+Dual-serving does \emph{not} mean maintaining two implementations of the
+business logic. The architecture that keeps it affordable is one service core
+expressed in the \emph{newest} domain model, with each older public version
+implemented as a thin \textbf{adapter} --- a pure translation layer mapping
+between the old wire contract and the current model. The adapter is an
+anti-corruption layer in the domain-driven-design sense: it prevents legacy
+vocabulary (\texttt{price} in float dollars, \texttt{in\_stock} as a boolean)
+from leaking into the current model (\texttt{unit\_price\_cents},
+\texttt{stock} count). Adapters must be pure, total, and tested as contracts:
+every field in the old surface must be derivable from the new model, and the
+test suite (Listing~9.4) must prove old clients cannot observe the
+translation. When a field \emph{cannot} be faithfully derived --- say the v2
+model drops a concept v1 exposed --- that is the signal that retirement of
+v1, not another adapter hack, is the honest path. Figure~\ref{fig:ch9-dual}
+shows the serving architecture; Listing~9.1 implements it.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=stealth, node distance=0.6cm and 1.0cm,
+  client/.style={rectangle, draw, rounded corners, align=center,
+    minimum width=2.4cm, minimum height=0.8cm},
+  layer/.style={rectangle, draw, align=center, minimum width=4.6cm,
+    minimum height=0.95cm},
+  corebox/.style={rectangle, draw, align=center, minimum width=4.6cm,
+    minimum height=1.1cm, fill=gray!12}]
+  % Clients
+  \node[client] (web) {Legacy mobile app\\ \footnotesize (v1)};
+  \node[client, below=of web] (partner) {Partner integration\\ \footnotesize (v1)};
+  \node[client, below=of partner] (modern) {New web storefront\\ \footnotesize (v2)};
+  % Gateway
+  \node[layer, right=1.6cm of partner] (gw) {API gateway / router\\ \footnotesize version selection (Figure~\ref{fig:ch9-routing})};
+  % Version surfaces
+  \node[layer, right=1.6cm of gw, yshift=1.1cm] (v1) {v1 adapter\\ \footnotesize translates to v1 wire model\\ \footnotesize +\ \texttt{Deprecation}/\texttt{Sunset} headers};
+  \node[layer, below=0.6cm of v1] (v2) {v2 controller\\ \footnotesize native wire model};
+  % Core
+  \node[corebox, below=0.9cm of v2] (core) {Service core (v2 domain model)\\ \footnotesize catalog logic, validation, pricing};
+  \node[corebox, below=0.5cm of core, minimum height=0.8cm] (db) {Datastore};
+  \node[draw, dashed, inner sep=0.35cm, fit=(v1)(v2)(core)(db),
+    label={[note]above right:single deployable --- one core, $n$ surfaces}] {};
+  % Edges
+  \draw[->] (web.east) -- ++(0.5,0) |- (gw.west);
+  \draw[->] (partner) -- (gw);
+  \draw[->] (modern.east) -- ++(0.5,0) |- (gw.west);
+  \draw[->] (gw.east) |- (v1.west);
+  \draw[->] (gw.east) |- (v2.west);
+  \draw[->] (v1) -- (core);
+  \draw[->] (v2) -- (core);
+  \draw[<->] (core) -- (db);
+  % Telemetry tap
+  \node[client, below=1.5cm of gw, minimum width=3.4cm] (tele) {Usage telemetry\\ \footnotesize per-version counts $\to$ Listing 9.5};
+  \draw[->, dashed] (gw) -- (tele);
+\end{tikzpicture}
+\caption{Dual-serving architecture. Both public versions are surfaces over one
+service core; v1 is a pure adapter with deprecation metadata, and the gateway
+feeds per-version telemetry that later justifies retirement.}
+\label{fig:ch9-dual}
+\end{figure}
+
+\paragraph{Consumer migration campaigns.}
+\label{subsec:ch9-campaigns}
+A deprecation announcement is not a migration. A migration campaign is a
+managed program with an owner, a consumer registry, and a deadline. Identify
+consumers from telemetry (API keys, OAuth client IDs, IP ranges as a last
+resort); segment by traffic and criticality; contact the long tail
+individually --- an email to a consumer doing 40\%\ of your v1 traffic is
+worth more than a banner seen by everyone; publish a migration guide with a
+field-level mapping table and copy-pasteable diffs; offer a feedback channel
+and a published escalation path; and schedule brownouts (short, announced
+windows in which the old version returns errors) as a forcing function for
+consumers who do not read email. Brownouts convert silent dependency into
+visible, survivable failure while there is still time to act.
+
+\paragraph{Usage telemetry as the retirement oracle.}
+The contract phase can only begin when you can \emph{prove} who still depends
+on the old version. Log, at minimum: version, endpoint, consumer identity,
+and timestamp on every request. From that stream compute per-version request
+share, distinct-consumer counts, and trend. Listing~9.5 turns such a log into
+a retirement-readiness verdict. A common threshold policy: schedule sunset
+when the old version drops below 5\%\ of traffic \emph{and} every remaining
+consumer has been contacted; execute sunset only when remaining consumers
+have migrated or formally accepted the cutoff.
+
+\subsection{Deprecation Policy Engineering}
+\label{subsec:ch9-deprecation}
+
+Deprecation is a state, not a deletion. A deprecated version still works; it
+is no longer recommended, receives no enhancements, and has a published
+end-of-life. The wire-level vocabulary is standardized. RFC~8594 introduced
+the \texttt{Deprecation} and \texttt{Sunset} response header fields
+\cite{rfc8594}; RFC~9745 (2025) subsequently revised \texttt{Deprecation},
+replacing the original HTTP-date value with a Unix-timestamp form
+\texttt{@}\emph{<seconds>}, while \texttt{Sunset} retains an HTTP-date. A
+well-behaved deprecated endpoint therefore answers like Listing~9.1's v1
+surface:
+
+\begin{itemize}
+  \item \texttt{Deprecation: @1788220800} --- the moment deprecation began
+        (RFC~9745 form; RFC~8594-era deployments used an HTTP-date here).
+  \item \texttt{Sunset: Sat, 01 May 2027 00:00:00 GMT} --- the committed
+        moment the version becomes unresponsive.
+  \item \texttt{Link: <https://api.example/v2/catalog>;
+        rel="successor-version"} and
+        \texttt{rel="deprecation"} pointing at the migration guide ---
+        machine-followable pointers, not just prose.
+\end{itemize}
+
+Around those headers sits the policy. \textbf{Sunset timelines} must be
+generous and public: twelve months is a common floor for external APIs with
+managed consumers; six may suffice for a fast-moving partner API; internal
+APIs can contract in weeks. \textbf{Stability SLAs} put the promise in the
+contract: ``no breaking changes within a major version,'' ``deprecated
+versions receive security fixes until sunset,'' ``at least 12 months between
+deprecation and sunset.'' \textbf{SemVer for APIs} gives the changelog its
+grammar: MAJOR for breaking changes (a new version), MINOR for
+backward-compatible additions (new field, new endpoint, new \emph{documented
+open} enum value), PATCH for compatible fixes. \textbf{Changelog discipline}
+means every change is dated, classified by that grammar, and written for the
+consumer (\emph{``field X added to resource Y''}), not the implementer.
+\textbf{Communication channels} scale with blast radius: headers and
+changelogs for the attentive, developer-portal banners and newsletters for
+the reachable, direct contact for the identified, brownouts for the rest.
+
+\subsection{Schema Evolution Rules}
+\label{subsec:ch9-schema}
+
+Within a version, the schema may only move in compatible directions. The
+rulebook:
+
+\begin{enumerate}
+  \item \textbf{Additive only.} New fields, new endpoints, new optional
+        parameters. Never remove, never rename, never retype within a
+        version.
+  \item \textbf{Never reuse names.} A retired name is reserved forever;
+        reintroducing \texttt{price} with new semantics corrupts every
+        stored payload and cached response that still carries the old
+        meaning. Protocol Buffers encodes this as \texttt{reserved} field
+        numbers and names --- adopt the same discipline in JSON contracts
+        even though the format cannot enforce it~\cite{protobufdocs}.
+  \item \textbf{Enums are open by contract.} Publish them as extensible,
+        ship a sentinel value, and require client fallback behavior. Adding
+        a value to an enum documented as closed is a breaking change.
+  \item \textbf{Unknown fields are tolerated, not errors.} This is where the
+        wire format matters. In JSON, tolerance is a \emph{client
+        discipline}: nothing in the format stops a strict deserializer from
+        rejecting unknown members, so the contract must ask clients to
+        ignore them (and generated models must be configured to do so). In
+        Protocol Buffers, tolerance is a \emph{format property}: unknown
+        tags are skipped by the wire parser itself, and since proto3 they
+        are even retained on reserialize, so a proxy can pass through fields
+        it does not understand~\cite{protobufdocs}. JSON gives you
+        tolerance by convention; Protobuf gives it to you by construction
+        (Chapter~4).
+\end{enumerate}
+
+\paragraph{Compatibility testing in CI.}
+Rules without enforcement are wishes. The enforcement mechanism is a
+breaking-change gate in the pipeline: diff the proposed OpenAPI description
+against the published one, classify every delta, and fail the build on any
+breaking change that is not accompanied by a version bump~\cite{openapi31}.
+This is what tools such as \texttt{oasdiff} automate; Listing~9.2 builds a
+minimal but real gate with stdlib plus PyYAML so the classification logic is
+fully inspectable. The gate belongs on the pull request, where the cost of
+the conversation is lowest --- discovering a break in code review costs
+minutes; discovering it from a consumer's pager costs trust.
+
+\subsection{Version Policy at Scale}
+\label{subsec:ch9-scale}
+
+Every concurrently supported version carries a recurring cost: adapter code
+and its tests, a documentation surface, a compatibility CI lane, on-call
+knowledge, and the combinatorial test matrix against every other moving part
+of the system. A useful mental model:
+
+\begin{equation}
+C_{\text{carry}}(n) \;=\; n \cdot c_{\text{adapter}} \;+\; c_{\text{test}} \cdot \binom{n}{2} \;+\; c_{\text{docs}} \cdot n \;+\; c_{\text{incident}}(n)
+\label{eq:ch9-cost}
+\end{equation}
+
+\noindent where $n$ is the number of live versions. The quadratic term ---
+pairwise interaction testing --- is why ``just keep every version forever''
+collapses operationally long before it collapses financially. Practical
+policies: \textbf{two live versions} (current plus previous) for most
+external APIs; \textbf{three} for platforms with slow-moving enterprise
+consumers, with the third on an accelerated sunset; date-based schemes like
+Stripe's bound $n$ by time rather than count (``all versions younger than 24
+months''), which caps cost automatically. \textbf{Internal APIs} may adopt
+much shorter windows --- weeks to months --- because consumers are
+enumerable, reachable, and often deployable by the same organization;
+coordinated expand-and-contract with a two-week dual-serving window is
+routine. \textbf{External APIs} must assume unenumerable consumers, cached
+copies of old documentation, and contracts you cannot see; timelines stretch
+to quarters or years, and retirement requires the full campaign machinery of
+Section~\ref{subsec:ch9-campaigns}. The universal rule: the number of
+versions you support is a product decision with an engineering budget, not
+an engineering convenience.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch9-code}
+
+All listings are typed Python~3.11, offline, deterministic, and set in the
+Northwind Robotics catalog universe. Install the dependencies first
+(Section~\ref{sec:ch9-deps}), place each listing in a working directory such
+as \texttt{C:\textbackslash Training\textbackslash ch09}, and run from
+PowerShell.
+
+\subsection{Listing 9.1 --- Dual-Serving Catalog API (v1 + v2 over One Core)}
+\label{subsec:ch9-listing1}
+
+One service core holds the v2 domain model; the v1 surface is a pure adapter
+with live \texttt{Deprecation}, \texttt{Sunset}, and \texttt{Link} headers.
+Running the module executes a deterministic demonstration against FastAPI's
+\texttt{TestClient} --- no server, no network~\cite{fastapidocs}.
+
+\begin{minted}{python}
+"""Dual-serving Catalog API (v1 + v2) for Northwind Robotics.
+
+Chapter 9, Listing 9.1 -- one v2 domain model serves two public versions.
+The v1 surface is a pure adapter over the v2 model and carries RFC 8594 /
+RFC 9745 deprecation metadata. Offline: run the module for a deterministic
+demonstration via FastAPI's TestClient.
+"""
+
+from __future__ import annotations
+
+import enum
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field
+
+# --- Deprecation policy constants (dates are fixed => deterministic output) ---
+DEPRECATED_AT = datetime(2026, 9, 1, tzinfo=timezone.utc)
+SUNSET_AT = datetime(2027, 5, 1, tzinfo=timezone.utc)
+DEPRECATION_HEADER = f"@{int(DEPRECATED_AT.timestamp())}"          # RFC 9745
+SUNSET_HEADER = "Sat, 01 May 2027 00:00:00 GMT"                    # RFC 8594
+MIGRATION_GUIDE = "https://docs.northwind-robotics.example/catalog/migration"
+
+
+# --- Single source of truth: the v2 domain model ------------------------------
+class Category(str, enum.Enum):
+    """Open enum: consumers MUST tolerate unknown values (fallback rule)."""
+
+    ACTUATOR = "actuator"
+    SENSOR = "sensor"
+    CONTROLLER = "controller"
+    BATTERY = "battery"  # added mid-lifecycle; safe only because enum is open
+
+
+class PartV2(BaseModel):
+    """Current (v2) domain model. All business logic speaks only this type."""
+
+    part_id: str
+    sku: str
+    name: str
+    unit_price_cents: int = Field(ge=0)
+    currency: str = "USD"
+    category: Category
+    stock: int = Field(ge=0)
+    tags: list[str] = []
+    status: str = "active"
+
+
+class PartV1(BaseModel):
+    """Legacy (v1) wire contract, frozen forever: float-dollar price, bool stock."""
+
+    id: str
+    sku: str
+    name: str
+    price: float
+    category: str
+    in_stock: bool
+
+
+CATALOG: dict[str, PartV2] = {
+    p.part_id: p
+    for p in [
+        PartV2(part_id="WR-1042", sku="SRV-T450", name="Torque Servo T450",
+               unit_price_cents=12999, category=Category.ACTUATOR, stock=34,
+               tags=["servo", "high-torque"]),
+        PartV2(part_id="WR-2210", sku="LDR-M90", name="Lidar Module M90",
+               unit_price_cents=45900, category=Category.SENSOR, stock=0,
+               tags=["lidar", "navigation"]),
+        PartV2(part_id="WR-3307", sku="CTL-AX12", name="Axis Controller AX12",
+               unit_price_cents=8900, category=Category.CONTROLLER, stock=112,
+               tags=["controller", "can-bus"]),
+        PartV2(part_id="WR-4100", sku="BAT-LP38", name="LiPo Pack LP38",
+               unit_price_cents=15450, category=Category.BATTERY, stock=57,
+               tags=["battery", "38wh"]),
+    ]
+}
+
+
+# --- Anti-corruption layer: v2 domain model -> frozen v1 wire contract --------
+def to_v1(part: PartV2) -> PartV1:
+    """Pure, total translation: every v1 field is derivable from the v2 model."""
+
+    return PartV1(
+        id=part.part_id,
+        sku=part.sku,
+        name=part.name,
+        price=round(part.unit_price_cents / 100, 2),
+        category=part.category.value,
+        in_stock=part.stock > 0,
+    )
+
+
+def lookup(part_id: str) -> PartV2 | None:
+    return CATALOG.get(part_id.upper())
+
+
+app = FastAPI(title="Northwind Robotics Catalog API", version="2.0.0")
+
+
+@app.middleware("http")
+async def deprecation_middleware(request: Request, call_next) -> Response:
+    """Stamp RFC 8594/9745 lifecycle metadata on every v1 response."""
+
+    response: Response = await call_next(request)
+    if request.url.path.startswith("/v1/"):
+        response.headers["Deprecation"] = DEPRECATION_HEADER
+        response.headers["Sunset"] = SUNSET_HEADER
+        response.headers["Link"] = (
+            f'<{MIGRATION_GUIDE}>; rel="deprecation", '
+            f'</v2/catalog>; rel="successor-version"'
+        )
+    return response
+
+
+def not_found(version: str, part_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={"type": "about:blank", "title": "Part not found",
+                 "status": 404, "detail": f"no part '{part_id}' in {version}"},
+    )
+
+
+# --- v1 surface (deprecated): adapter over the core ---------------------------
+@app.get("/v1/catalog", response_model=list[PartV1])
+def list_catalog_v1() -> list[PartV1]:
+    return [to_v1(p) for p in CATALOG.values()]
+
+
+@app.get("/v1/catalog/{part_id}", response_model=PartV1)
+def get_part_v1(part_id: str) -> PartV1 | JSONResponse:
+    part = lookup(part_id)
+    return to_v1(part) if part else not_found("v1", part_id)
+
+
+# --- v2 surface (current): native domain model --------------------------------
+@app.get("/v2/catalog", response_model=list[PartV2])
+def list_catalog_v2() -> list[PartV2]:
+    return list(CATALOG.values())
+
+
+@app.get("/v2/catalog/{part_id}", response_model=PartV2)
+def get_part_v2(part_id: str) -> PartV2 | JSONResponse:
+    part = lookup(part_id)
+    return part if part else not_found("v2", part_id)
+
+
+def demo() -> None:
+    client = TestClient(app)
+    r1 = client.get("/v1/catalog/WR-1042")
+    print("== v1 (deprecated) ==")
+    print("Deprecation:", r1.headers.get("Deprecation"))
+    print("Sunset:     ", r1.headers.get("Sunset"))
+    print("Link:       ", r1.headers.get("Link"))
+    print("Body:       ", r1.json())
+    r2 = client.get("/v2/catalog/WR-1042")
+    print("\n== v2 (current) ==")
+    print("Deprecation:", r2.headers.get("Deprecation"))
+    print("Body:       ", r2.json())
+    r3 = client.get("/v2/catalog/NOPE-1")
+    print("\n== unknown part ==", r3.status_code, r3.json()["detail"])
+
+
+if __name__ == "__main__":
+    demo()
+\end{minted}
+
+\subsection{Listing 9.2 --- OpenAPI Breaking-Change Gate (CI in a Box)}
+\label{subsec:ch9-listing2}
+
+The gate diffs two OpenAPI~3.x YAML descriptions, classifies every delta
+against the taxonomy of Table~\ref{tab:ch9-taxonomy}, prints a report, and
+exits non-zero on any breaking change --- the exact behavior you wire into a
+pull-request pipeline~\cite{openapi31}. It deliberately handles the
+high-signal subset (paths, operations, request bodies, response schemas) and
+assumes inline schemas; resolving \texttt{\$ref} is Capstone~3.
+
+\begin{minted}{python}
+"""OpenAPI breaking-change gate (Chapter 9, Listing 9.2).
+
+Classifies the delta between an OLD and a NEW OpenAPI 3.x YAML spec as
+BREAKING or NON-BREAKING and exits non-zero when any breaking change exists.
+Stdlib + PyYAML only. Inline schemas assumed (no $ref resolution).
+
+Usage (PowerShell):
+    python openapi_diff_gate.py catalog_v1.yaml catalog_v2.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import enum
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+HTTP_METHODS = frozenset(
+    {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
+)
+
+
+class Severity(enum.Enum):
+    BREAKING = "BREAKING"
+    NON_BREAKING = "NON-BREAKING"
+
+
+@dataclass(frozen=True)
+class Change:
+    severity: Severity
+    location: str
+    message: str
+
+    def render(self) -> str:
+        return f"[{self.severity.value:>12}] {self.location}: {self.message}"
+
+
+def _operations(path_item: dict[str, Any]) -> dict[str, Any]:
+    return {m: op for m, op in path_item.items() if m.lower() in HTTP_METHODS}
+
+
+def _diff_schema(
+    old: dict[str, Any],
+    new: dict[str, Any],
+    location: str,
+    direction: str,  # "request" or "response"
+    changes: list[Change],
+) -> None:
+    old_props: dict[str, Any] = old.get("properties", {}) or {}
+    new_props: dict[str, Any] = new.get("properties", {}) or {}
+    new_required = set(new.get("required", []) or [])
+
+    for name in old_props:
+        if name not in new_props:
+            changes.append(Change(
+                Severity.BREAKING, location,
+                f"property '{name}' removed from {direction} schema"))
+
+    for name, new_prop in new_props.items():
+        if name not in old_props:
+            if direction == "request" and name in new_required:
+                changes.append(Change(
+                    Severity.BREAKING, location,
+                    f"required request property '{name}' added"))
+            else:
+                changes.append(Change(
+                    Severity.NON_BREAKING, location,
+                    f"optional {direction} property '{name}' added"))
+            continue
+        old_type = old_props[name].get("type")
+        new_type = new_prop.get("type")
+        if old_type != new_type:
+            changes.append(Change(
+                Severity.BREAKING, location,
+                f"property '{name}' type changed {old_type!r} -> {new_type!r}"))
+        elif old_type == "object":
+            _diff_schema(old_props[name], new_prop,
+                         f"{location}.{name}", direction, changes)
+        elif old_type == "array":
+            _diff_schema(old_props[name].get("items", {}) or {},
+                         new_prop.get("items", {}) or {},
+                         f"{location}.{name}[]", direction, changes)
+        old_enum = old_props[name].get("enum")
+        new_enum = new_prop.get("enum")
+        if old_enum and new_enum:
+            removed = set(old_enum) - set(new_enum)
+            if removed:
+                changes.append(Change(
+                    Severity.BREAKING, location,
+                    f"enum value(s) removed from '{name}': {sorted(removed)}"))
+            added = set(new_enum) - set(old_enum)
+            if added:
+                changes.append(Change(
+                    Severity.NON_BREAKING, location,
+                    f"enum value(s) added to '{name}': {sorted(added)} "
+                    "(safe only if the enum is documented as open)"))
+
+
+def _json_schema(media: dict[str, Any]) -> dict[str, Any]:
+    content = media.get("content", {}) or {}
+    return (content.get("application/json", {}) or {}).get("schema", {}) or {}
+
+
+def _diff_operation(
+    old: dict[str, Any],
+    new: dict[str, Any],
+    location: str,
+    changes: list[Change],
+) -> None:
+    old_body = _json_schema(old.get("requestBody", {}) or {})
+    new_body = _json_schema(new.get("requestBody", {}) or {})
+    if new_body and old_body:
+        _diff_schema(old_body, new_body, f"{location} requestBody",
+                     "request", changes)
+    elif new_body and not old_body and new_body.get("required"):
+        changes.append(Change(
+            Severity.BREAKING, location,
+            "request body with required properties introduced"))
+
+    old_responses: dict[str, Any] = old.get("responses", {}) or {}
+    new_responses: dict[str, Any] = new.get("responses", {}) or {}
+    for code in old_responses:
+        if code not in new_responses:
+            changes.append(Change(
+                Severity.BREAKING, location,
+                f"response status '{code}' removed"))
+    for code in new_responses:
+        if code not in old_responses:
+            changes.append(Change(
+                Severity.NON_BREAKING, location,
+                f"response status '{code}' added"))
+    for code in old_responses.keys() & new_responses.keys():
+        _diff_schema(_json_schema(old_responses[code]),
+                     _json_schema(new_responses[code]),
+                     f"{location} response {code}", "response", changes)
+
+
+def diff_specs(old: dict[str, Any], new: dict[str, Any]) -> list[Change]:
+    changes: list[Change] = []
+    old_paths: dict[str, Any] = old.get("paths", {}) or {}
+    new_paths: dict[str, Any] = new.get("paths", {}) or {}
+
+    for path in old_paths:
+        if path not in new_paths:
+            changes.append(Change(Severity.BREAKING, path, "path removed"))
+    for path in new_paths:
+        if path not in old_paths:
+            changes.append(Change(Severity.NON_BREAKING, path, "path added"))
+
+    for path in old_paths.keys() & new_paths.keys():
+        old_ops = _operations(old_paths[path])
+        new_ops = _operations(new_paths[path])
+        for method in old_ops:
+            if method not in new_ops:
+                changes.append(Change(
+                    Severity.BREAKING, f"{method.upper()} {path}",
+                    "operation removed"))
+        for method in new_ops:
+            if method not in old_ops:
+                changes.append(Change(
+                    Severity.NON_BREAKING, f"{method.upper()} {path}",
+                    "operation added"))
+        for method in old_ops.keys() & new_ops.keys():
+            _diff_operation(old_ops[method], new_ops[method],
+                            f"{method.upper()} {path}", changes)
+    return changes
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("old_spec", type=Path)
+    parser.add_argument("new_spec", type=Path)
+    args = parser.parse_args(argv)
+
+    old = yaml.safe_load(args.old_spec.read_text(encoding="utf-8"))
+    new = yaml.safe_load(args.new_spec.read_text(encoding="utf-8"))
+    changes = diff_specs(old, new)
+
+    breaking = [c for c in changes if c.severity is Severity.BREAKING]
+    for change in changes:
+        print(change.render())
+    print(f"\n{len(changes)} change(s): {len(breaking)} breaking, "
+          f"{len(changes) - len(breaking)} non-breaking")
+    if breaking:
+        print("GATE RESULT: FAIL -- breaking changes require a new version")
+        return 1
+    print("GATE RESULT: PASS -- all changes are backward compatible")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+\end{minted}
+
+The two fixture specs below describe the Catalog contract before and after
+the breaking v1-to-v2 redesign. Save them beside the gate.
+
+\begin{minted}{yaml}
+# catalog_v1.yaml -- published contract (the baseline the gate protects)
+openapi: "3.1.0"
+info:
+  title: Northwind Robotics Catalog API
+  version: "1.4.0"
+paths:
+  /catalog:
+    get:
+      operationId: listCatalog
+      responses:
+        "200":
+          description: All parts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, sku, name, price, category, in_stock]
+                      properties:
+                        id: {type: string}
+                        sku: {type: string}
+                        name: {type: string}
+                        price: {type: number}
+                        category: {type: string, enum: [actuator, sensor, controller]}
+                        in_stock: {type: boolean}
+  /catalog/{partId}:
+    get:
+      operationId: getPart
+      responses:
+        "200":
+          description: One part
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, sku, name, price, category, in_stock]
+                properties:
+                  id: {type: string}
+                  sku: {type: string}
+                  name: {type: string}
+                  price: {type: number}
+                  category: {type: string, enum: [actuator, sensor, controller]}
+                  in_stock: {type: boolean}
+        "404":
+          description: Not found
+\end{minted}
+
+\begin{minted}{yaml}
+# catalog_v2.yaml -- proposed contract (renames and retypes => gate must FAIL)
+openapi: "3.1.0"
+info:
+  title: Northwind Robotics Catalog API
+  version: "2.0.0"
+paths:
+  /catalog:
+    get:
+      operationId: listCatalog
+      responses:
+        "200":
+          description: All parts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [part_id, sku, name, unit_price_cents, category, stock]
+                      properties:
+                        part_id: {type: string}
+                        sku: {type: string}
+                        name: {type: string}
+                        unit_price_cents: {type: integer}
+                        currency: {type: string}
+                        category: {type: string, enum: [actuator, sensor, controller, battery]}
+                        stock: {type: integer}
+  /catalog/{partId}:
+    get:
+      operationId: getPart
+      responses:
+        "200":
+          description: One part
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [part_id, sku, name, unit_price_cents, category, stock]
+                properties:
+                  part_id: {type: string}
+                  sku: {type: string}
+                  name: {type: string}
+                  unit_price_cents: {type: integer}
+                  currency: {type: string}
+                  category: {type: string, enum: [actuator, sensor, controller, battery]}
+                  stock: {type: integer}
+        "404":
+          description: Not found
+  /catalog/health:
+    get:
+      operationId: catalogHealth
+      responses:
+        "200":
+          description: Liveness probe
+\end{minted}
+
+\subsection{Listing 9.3 --- Media-Type Version Negotiator}
+\label{subsec:ch9-listing3}
+
+A correct negotiator for
+\texttt{Accept: application/vnd.northwind.catalog+json; version=2}: it parses
+q-values and parameters per RFC~9110~\cite{rfc9110}, selects the best
+supported version, and yields 406 (with a \texttt{Link} to supported
+versions) when nothing matches.
+
+\begin{minted}{python}
+"""Media-type version negotiation (Chapter 9, Listing 9.3).
+
+Parses Accept headers carrying vendor media types with a `version=N`
+parameter, honors q-values, and returns None (-> HTTP 406) when no supported
+version matches. Run the module for a deterministic negotiation table plus a
+TestClient demonstration. Stdlib + FastAPI.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+
+VENDOR_TYPE = "application/vnd.northwind.catalog+json"
+SUPPORTED_VERSIONS = (1, 2)
+DEFAULT_VERSION = 2
+
+PART_V1 = {"id": "WR-1042", "sku": "SRV-T450", "name": "Torque Servo T450",
+           "price": 129.99, "category": "actuator", "in_stock": True}
+PART_V2 = {"part_id": "WR-1042", "sku": "SRV-T450", "name": "Torque Servo T450",
+           "unit_price_cents": 12999, "currency": "USD",
+           "category": "actuator", "stock": 34}
+
+
+@dataclass(frozen=True)
+class MediaRange:
+    media_type: str
+    q: float
+    version: int | None
+    order: int
+
+
+def parse_accept(header: str | None) -> list[MediaRange]:
+    """Parse an Accept header into q-sorted media ranges (stable on ties)."""
+
+    if not header:
+        return [MediaRange("*/*", 1.0, None, 0)]
+    ranges: list[MediaRange] = []
+    for order, raw in enumerate(header.split(",")):
+        tokens = [t.strip() for t in raw.split(";")]
+        media_type = tokens[0].lower()
+        q, version = 1.0, None
+        for param in tokens[1:]:
+            if "=" not in param:
+                continue
+            key, _, value = param.partition("=")
+            key, value = key.strip().lower(), value.strip().strip('"')
+            if key == "q":
+                try:
+                    q = float(value)
+                except ValueError:
+                    q = 0.0
+            elif key == "version":
+                try:
+                    version = int(value)
+                except ValueError:
+                    version = None
+        ranges.append(MediaRange(media_type, q, version, order))
+    acceptable = [r for r in ranges if r.q > 0.0]
+    return sorted(acceptable, key=lambda r: (-r.q, r.order))
+
+
+def negotiate(
+    header: str | None,
+    supported: tuple[int, ...] = SUPPORTED_VERSIONS,
+    default: int = DEFAULT_VERSION,
+) -> int | None:
+    """Return the best supported version for the header, or None (-> 406).
+
+    A vendor range with an explicit version matches only that version; a bare
+    vendor type, application/json, or */* maps to the server default.
+    """
+
+    best_version: int | None = None
+    best_q = -1.0
+    for r in parse_accept(header):
+        if r.media_type == VENDOR_TYPE and r.version is not None:
+            if r.version in supported and r.q > best_q:
+                best_version, best_q = r.version, r.q
+        elif r.media_type in (VENDOR_TYPE, "application/json", "*/*"):
+            if r.q > best_q:
+                best_version, best_q = default, r.q
+    return best_version
+
+
+app = FastAPI(title="Northwind Robotics Catalog (media-type versioned)")
+
+
+@app.get("/catalog/{part_id}")
+def get_part(part_id: str, request: Request) -> JSONResponse:
+    version = negotiate(request.headers.get("accept"))
+    if version is None:
+        return JSONResponse(
+            status_code=406,
+            content={"type": "about:blank", "title": "Not Acceptable",
+                     "status": 406,
+                     "detail": "supported: " + ", ".join(
+                         f"{VENDOR_TYPE}; version={v}"
+                         for v in SUPPORTED_VERSIONS)},
+            headers={"Link": f'</catalog>; rel="versions"'},
+        )
+    body = PART_V1 if version == 1 else PART_V2
+    return JSONResponse(
+        content=body,
+        media_type=f"{VENDOR_TYPE}; version={version}",
+        headers={"Vary": "Accept"},
+    )
+
+
+def demo() -> None:
+    cases = [
+        None,
+        "application/json",
+        "application/vnd.northwind.catalog+json; version=1",
+        "application/vnd.northwind.catalog+json; version=2",
+        "application/vnd.northwind.catalog+json; version=1;q=0.4, "
+        "application/vnd.northwind.catalog+json; version=2;q=0.9",
+        "application/vnd.northwind.catalog+json; version=3",
+        "application/xml",
+    ]
+    print(f"{'Accept header':<78} -> version")
+    for header in cases:
+        print(f"{str(header):<78} -> {negotiate(header)}")
+    client = TestClient(app)
+    r = client.get("/catalog/WR-1042",
+                   headers={"Accept": f"{VENDOR_TYPE}; version=3"})
+    print("\n406 case:", r.status_code, r.json()["detail"])
+
+
+if __name__ == "__main__":
+    demo()
+\end{minted}
+
+\subsection{Listing 9.4 --- Consumer-Tolerance Test Suite}
+\label{subsec:ch9-listing4}
+
+Compatibility is a property you \emph{test}, not assert. This pytest suite
+plays a frozen v1-era client against the live dual-serving app of
+Listing~9.1 and proves the tolerant-reader guarantees: unknown fields are
+ignored, additive changes are invisible, new enum values degrade to a
+fallback instead of crashing, and the v1 surface keeps its promised shape
+plus its deprecation metadata.
+
+\begin{minted}{python}
+"""Consumer-tolerance contract tests (Chapter 9, Listing 9.4).
+
+Proves that a frozen v1-era client keeps working while the API evolves:
+unknown-field tolerance, additive changes, open-enum fallback, and the
+stability of the deprecated v1 surface. Run: pytest -q
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from catalog_api import app
+
+# A v1-era client knows exactly these fields and nothing else.
+LEGACY_FIELDS = frozenset({"id", "sku", "name", "price", "category", "in_stock"})
+LEGACY_CATEGORIES = frozenset({"actuator", "sensor", "controller"})
+
+
+def legacy_parse_part(payload: dict) -> dict:
+    """Tolerant reader: extract known fields, ignore everything else."""
+
+    return {k: payload[k] for k in LEGACY_FIELDS & payload.keys()}
+
+
+def legacy_category(value: str) -> str:
+    """Open-enum fallback rule documented in the v1 contract."""
+
+    return value if value in LEGACY_CATEGORIES else "unknown"
+
+
+@pytest.fixture(scope="module")
+def client() -> TestClient:
+    return TestClient(app)
+
+
+def test_v1_surface_keeps_every_promised_field(client: TestClient) -> None:
+    response = client.get("/v1/catalog")
+    assert response.status_code == 200
+    parts = response.json()
+    assert parts, "fixture catalog must not be empty"
+    for part in parts:
+        assert LEGACY_FIELDS <= set(part), f"v1 contract violated: {part}"
+        assert isinstance(part["price"], float)
+        assert isinstance(part["in_stock"], bool)
+
+
+def test_unknown_fields_are_ignored_by_tolerant_reader() -> None:
+    future_payload = {
+        "id": "WR-9000", "sku": "NXT-1", "name": "Next-Gen Servo",
+        "price": 42.5, "category": "actuator", "in_stock": True,
+        # Fields a future version might add:
+        "unit_price_cents": 4250, "stock": 7, "tags": ["servo"],
+        "dimensions": {"w_mm": 40, "h_mm": 20}, "carbon_footprint_g": 812,
+    }
+    parsed = legacy_parse_part(future_payload)
+    assert parsed == {
+        "id": "WR-9000", "sku": "NXT-1", "name": "Next-Gen Servo",
+        "price": 42.5, "category": "actuator", "in_stock": True,
+    }
+
+
+def test_new_enum_value_degrades_to_fallback_not_crash() -> None:
+    # 'battery' was added after this client shipped; fallback keeps it alive.
+    assert legacy_category("battery") == "unknown"
+    assert legacy_category("actuator") == "actuator"
+
+
+def test_v2_additive_fields_do_not_leak_into_v1(client: TestClient) -> None:
+    v1 = client.get("/v1/catalog/WR-1042").json()
+    v2 = client.get("/v2/catalog/WR-1042").json()
+    assert set(v1) == LEGACY_FIELDS
+    assert {"unit_price_cents", "stock", "currency", "tags"} <= set(v2)
+    # Adapter fidelity: v1 values are derivable from the v2 model.
+    assert v1["price"] == round(v2["unit_price_cents"] / 100, 2)
+    assert v1["in_stock"] == (v2["stock"] > 0)
+
+
+def test_v1_carries_deprecation_metadata_v2_does_not(client: TestClient) -> None:
+    v1 = client.get("/v1/catalog/WR-1042")
+    assert v1.headers["Deprecation"].startswith("@")
+    assert "Sunset" in v1.headers
+    assert 'rel="successor-version"' in v1.headers["Link"]
+    v2 = client.get("/v2/catalog/WR-1042")
+    assert "Deprecation" not in v2.headers
+    assert "Sunset" not in v2.headers
+\end{minted}
+
+\subsection{Listing 9.5 --- Retirement-Readiness Report Generator}
+\label{subsec:ch9-listing5}
+
+Retirement is a data-driven decision. This tool consumes a JSON-lines
+access-log fixture (gateway logs exported offline), computes per-version
+traffic share, distinct consumers, and monthly trend, and emits a verdict
+against a threshold policy. The embedded fixture shows v1 declining toward
+the 5\%\ retirement line.
+
+\begin{minted}{python}
+"""Retirement-readiness report generator (Chapter 9, Listing 9.5).
+
+Reads a JSON-lines access log (one event per line: ts, path, consumer) and
+reports per-version usage share, distinct consumers, and monthly trend, then
+emits a retirement verdict against the chapter's threshold policy.
+
+Usage (PowerShell):
+    python retirement_report.py --demo            # embedded fixture
+    python retirement_report.py access_log.jsonl  # your own export
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from collections import defaultdict
+from pathlib import Path
+
+RETIRE_SHARE_THRESHOLD = 0.05  # retire when v1 < 5% of catalog traffic...
+
+DEMO_LOG = """\
+{"ts": "2026-05-04T09:13:00Z", "path": "/v1/catalog/WR-1042", "consumer": "partner-acme"}
+{"ts": "2026-05-05T10:01:00Z", "path": "/v2/catalog", "consumer": "storefront-web"}
+{"ts": "2026-05-06T11:40:00Z", "path": "/v2/catalog/WR-2210", "consumer": "storefront-web"}
+{"ts": "2026-06-02T09:00:00Z", "path": "/v2/catalog", "consumer": "storefront-web"}
+{"ts": "2026-06-03T09:05:00Z", "path": "/v2/catalog", "consumer": "partner-globex"}
+{"ts": "2026-06-04T12:31:00Z", "path": "/v2/catalog/WR-4100", "consumer": "warehouse-wms"}
+{"ts": "2026-06-05T15:10:00Z", "path": "/v2/catalog", "consumer": "storefront-web"}
+{"ts": "2026-07-01T09:00:00Z", "path": "/v2/catalog", "consumer": "storefront-web"}
+{"ts": "2026-07-02T09:10:00Z", "path": "/v2/catalog/WR-3307", "consumer": "partner-globex"}
+{"ts": "2026-07-03T10:20:00Z", "path": "/v2/catalog", "consumer": "warehouse-wms"}
+{"ts": "2026-07-04T11:00:00Z", "path": "/v2/catalog", "consumer": "mobile-ios-4.0"}
+{"ts": "2026-07-05T13:45:00Z", "path": "/v2/catalog/WR-1042", "consumer": "storefront-web"}
+{"ts": "2026-08-02T08:30:00Z", "path": "/v2/catalog", "consumer": "storefront-web"}
+{"ts": "2026-08-02T09:00:00Z", "path": "/v2/catalog", "consumer": "partner-globex"}
+{"ts": "2026-08-03T09:30:00Z", "path": "/v2/catalog/WR-4100", "consumer": "warehouse-wms"}
+{"ts": "2026-08-04T10:00:00Z", "path": "/v2/catalog", "consumer": "mobile-ios-4.0"}
+{"ts": "2026-08-05T11:15:00Z", "path": "/v2/catalog/WR-2210", "consumer": "storefront-web"}
+{"ts": "2026-08-06T12:00:00Z", "path": "/v2/catalog", "consumer": "partner-globex"}
+{"ts": "2026-08-07T12:30:00Z", "path": "/v2/catalog/WR-3307", "consumer": "warehouse-wms"}
+{"ts": "2026-08-08T13:00:00Z", "path": "/v2/catalog", "consumer": "mobile-ios-4.0"}
+{"ts": "2026-08-09T14:20:00Z", "path": "/v2/catalog/WR-1042", "consumer": "storefront-web"}
+"""
+
+
+def path_version(path: str) -> str | None:
+    for prefix in ("/v1/", "/v2/"):
+        if path.startswith(prefix):
+            return prefix.strip("/")
+    return None
+
+
+def build_report(lines: list[str]) -> str:
+    total: dict[str, int] = defaultdict(int)
+    consumers: dict[str, set[str]] = defaultdict(set)
+    monthly: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        event = json.loads(raw)
+        version = path_version(str(event["path"]))
+        if version is None:
+            continue  # unversioned traffic is out of scope for this report
+        total[version] += 1
+        consumers[version].add(str(event["consumer"]))
+        monthly[str(event["ts"])[:7]][version] += 1
+
+    grand_total = sum(total.values())
+    if grand_total == 0:
+        return "No versioned traffic found; nothing to report."
+
+    out = ["RETIREMENT-READINESS REPORT -- Northwind Robotics Catalog API",
+           "=" * 62, f"Total versioned requests: {grand_total}", ""]
+    for version in sorted(total):
+        share = total[version] / grand_total
+        out.append(f"{version}: {total[version]:>4} requests "
+                   f"({share:6.1%}), {len(consumers[version])} consumer(s): "
+                   f"{sorted(consumers[version])}")
+    out += ["", "Monthly trend (v1 share): "]
+    for month in sorted(monthly):
+        m = monthly[month]
+        month_total = sum(m.values())
+        out.append(f"  {month}: v1={m.get('v1', 0):>2} v2={m.get('v2', 0):>2} "
+                   f"(v1 share {m.get('v1', 0) / month_total:6.1%})")
+
+    months = sorted(monthly)
+    first = monthly[months[0]]
+    last = monthly[months[-1]]
+    first_share = first.get("v1", 0) / sum(first.values())
+    last_share = last.get("v1", 0) / sum(last.values())
+    declining = last_share <= first_share
+    v1_share = total.get("v1", 0) / grand_total
+
+    out += ["", "Verdict:"]
+    if v1_share < RETIRE_SHARE_THRESHOLD and declining:
+        out.append(f"  v1 share {v1_share:.1%} < {RETIRE_SHARE_THRESHOLD:.0%} "
+                   "and declining: SCHEDULE SUNSET BROWNOUTS, confirm the "
+                   f"remaining consumer(s) {sorted(consumers.get('v1', []))}, "
+                   "then retire on the published date.")
+    else:
+        out.append(f"  v1 share {v1_share:.1%} (declining={declining}): KEEP "
+                   "v1 RUNNING; continue migration campaign and re-evaluate "
+                   "next month.")
+    return "\n".join(out)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("logfile", type=Path, nargs="?",
+                        help="JSON-lines access log export")
+    parser.add_argument("--demo", action="store_true",
+                        help="use the embedded deterministic fixture")
+    args = parser.parse_args(argv)
+
+    if args.demo or args.logfile is None:
+        lines = DEMO_LOG.splitlines()
+    else:
+        lines = args.logfile.read_text(encoding="utf-8").splitlines()
+    print(build_report(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch9-pitfalls}
+
+\begin{warningbox}
+Every anti-pattern below has caused a real production incident class. They
+are ordered roughly by frequency of appearance in design reviews.
+\end{warningbox}
+
+\paragraph{1. Version-per-endpoint chaos.}
+Letting individual endpoints evolve their own versions independently
+(\texttt{/v1/orders}, \texttt{/v3/customers}, \texttt{/v2/orders/items})
+shatters the API into a combinatorial mess: no single document describes the
+system, client SDKs must track a version matrix, and gateway routing becomes
+archaeology. Version the \emph{API} (or at most the bounded context), not the
+endpoint. Media-type versioning is the one legitimate exception because its
+per-resource granularity is negotiated, not routed.
+
+\paragraph{2. Silently changing semantics within a version.}
+Renaming nothing, retyping nothing --- just quietly redefining what
+\texttt{stock} means from ``on hand'' to ``available to promise.'' No client
+errors fire; every client silently computes wrong answers. Semantic drift is
+the most damaging break precisely because nothing detects it except business
+outcomes. The defense is contractual: field \emph{meaning} is part of the
+contract, documented, and covered by consumer-tolerance tests with fixed
+fixtures.
+
+\paragraph{3. Breaking changes via ``harmless'' renames.}
+\texttt{price} becomes \texttt{unit\_price\_cents}; \texttt{id} becomes
+\texttt{part\_id}. Each rename is internally justified (clarity! units in the
+name!) and externally a removal-plus-addition --- a breaking change wearing a
+refactor's clothes (Listing~9.2's fixture pair demonstrates exactly this, and
+the gate fails the build). If a name must change, add the new name, keep
+serving the old one, and migrate.
+
+\paragraph{4. Never retiring versions.}
+Versions without sunsets accumulate into permanent carrying cost
+(Equation~\ref{eq:ch9-cost}): every adapter, doc set, and CI lane lives
+forever, and eventually the team maintains contracts nobody remembers
+designing. A version without a deprecation plan is a mortgage with no
+amortization schedule.
+
+\paragraph{5. Version in both URI and header.}
+\texttt{/v1/catalog} with \texttt{X-API-Version: 2} --- which wins? Every
+consumer picks a different answer, support tickets multiply, and the gateway
+must implement a precedence rule that no document defined. Choose exactly one
+version signal per API and reject requests that carry conflicting ones.
+
+\paragraph{6. Ignoring cache poisoning across versions.}
+With header- or media-type-based versioning, a shared cache keyed on URI
+alone will happily serve a v1 body to a v2 request. The mitigations are
+mandatory, not optional: emit \texttt{Vary: X-API-Version} (or
+\texttt{Vary: Accept}) on every versioned response and verify intermediaries
+honor it~\cite{rfc9110} --- or use URI versioning and let the URI do the
+keying. Listing~9.3 emits \texttt{Vary: Accept} for this reason.
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch9-lab}
+
+\subsection*{Lab: Evolve the Catalog API from v1 to v2}
+You own the Northwind Robotics Catalog API. The v1 contract (float-dollar
+\texttt{price}, boolean \texttt{in\_stock}) cannot express multi-currency
+pricing or real stock counts, so a v2 contract has been designed. Execute the
+full expand-and-contract lifecycle.
+
+\textbf{Setup (PowerShell):}
+\begin{minted}{text}
+cd C:\Training\ch09
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt   # see Section 9.11
+\end{minted}
+
+\begin{enumerate}
+  \item \textbf{Expand.} Save Listing~9.1 as \texttt{catalog\_api.py} and run
+        \texttt{python catalog\_api.py}. Observe that v1 and v2 both answer
+        and that v1 responses carry \texttt{Deprecation}, \texttt{Sunset},
+        and \texttt{Link} headers while v2 responses do not.
+  \item \textbf{Gate the change.} Save Listing~9.2 as
+        \texttt{openapi\_diff\_gate.py} plus the two fixture specs and run
+        \texttt{python openapi\_diff\_gate.py catalog\_v1.yaml catalog\_v2.yaml};
+        confirm it reports the renames and retypes as BREAKING and exits 1
+        (\texttt{echo \$LASTEXITCODE}). Then diff \texttt{catalog\_v1.yaml}
+        against itself and confirm the gate passes and exits 0 --- this is
+        the ``no changes'' CI lane.
+  \item \textbf{Prove consumer survival.} Save Listing~9.4 as
+        \texttt{test\_consumer\_tolerance.py} and run
+        \texttt{pytest -q}. All five tests must pass: they are the evidence
+        that the expand phase harmed no one.
+  \item \textbf{Negotiate.} Save Listing~9.3 as
+        \texttt{media\_type\_negotiation.py}, run it, and verify the
+        negotiation table: explicit versions select their representation,
+        bare types get the default, unsupported versions yield \texttt{None}
+        (HTTP 406).
+  \item \textbf{Contract.} Save Listing~9.5 as
+        \texttt{retirement\_report.py} and run
+        \texttt{python retirement\_report.py --demo}. Read the verdict: v1 is
+        below the 5\%\ threshold and declining, with exactly one identified
+        straggler --- the campaign's final contact list.
+\end{enumerate}
+
+\subsection*{War Story: The ``Harmless'' Enum Addition}
+A robotics parts platform (the kind Northwind Robotics sells into) shipped a
+seemingly trivial release: the catalog \texttt{category} enum gained a new
+value, \texttt{battery}, to support a product-line launch. The API team ran
+their compatibility checks --- no fields removed, no types changed, all
+endpoints identical --- and deployed on a Tuesday. By Wednesday morning,
+crash dashboards for the two largest mobile consumers were vertical. Both
+apps had been built from generated models in which the enum was a
+\emph{closed} native type; their JSON decoders threw on the unknown value,
+and because decoding happened inside the list parser, a single battery part
+anywhere in a page of results poisoned the entire response. The apps did not
+degrade --- they died on launch screens that happened to render category
+chips.
+
+The postmortem lessons are this chapter in miniature. (1)~The producer's
+compatibility model (additive = safe) did not match the consumers' parsing
+model (closed enum = fatal), and under Definition~\ref{def:breaking} the
+change \emph{was} breaking for that consumer base. (2)~The enum had never
+been documented as open, so consumers reasonably treated it as closed.
+(3)~The fix was not code but contract: the API now publishes every enum as
+extensible with an \texttt{unknown} sentinel, consumer SDKs regenerate with
+fallback arms, a consumer-tolerance fixture suite (the pattern of
+Listing~9.4) injects synthetic unknown enum values in CI, and genuinely
+closed enums can only change in new major versions. The enum addition that
+crashed the fleet is now the first slide of their API design onboarding.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch9-exercises}
+
+\begin{enumerate}[label=\textbf{E9.\arabic*.}, leftmargin=2.2cm]
+  \item \textbf{Classification drill.} Classify each as breaking or
+        non-breaking, citing Definition~\ref{def:breaking}: (a) adding an
+        optional \texttt{warehouse} field to the part response; (b) making a
+        previously optional request field required; (c) changing
+        \texttt{price} from dollars to cents while renaming it
+        \texttt{unit\_price\_cents}; (d) reordering JSON object members;
+        (e) changing a 404 detail message; (f) adding \texttt{410 Gone} as a
+        \emph{new} response for retired resources.
+  \item \textbf{Extend the gate.} Listing~9.2 ignores path and query
+        \texttt{parameters}. Extend it so that adding a \emph{required}
+        parameter or removing an existing parameter is flagged breaking.
+        Add fixtures proving both directions.
+  \item \textbf{q-value correctness.} Construct an \texttt{Accept} header in
+        which a lower-q explicit version must lose to a higher-q wildcard,
+        and verify Listing~9.3's \texttt{negotiate} returns the default.
+        Then construct the reverse.
+  \item \textbf{Adapter audit.} Propose a v2 field that \emph{cannot} be
+        back-translated into the v1 surface of Listing~9.1 (e.g., a
+        multi-currency price list). What are the three honest options, and
+        which does expand-and-contract prescribe?
+  \item \textbf{Cache audit.} Your API uses \texttt{X-API-Version}. Write the
+        exact response headers required for safe shared caching, and explain
+        what breaks if a CDN ignores \texttt{Vary}.
+  \item \textbf{Deep dive: closed ecosystems.} Your consumers are all mobile
+        apps with six-month release laggards and generated strict models.
+        Defend or reject media-type versioning for this base, and choose
+        deprecation timelines accordingly.
+  \item \textbf{Deep dive: the exception clause.} Your threat model team
+        demands an immediate breaking change to close an auth bypass.
+        Reconcile ``never break within a version'' with security response;
+        define the policy you would publish \emph{before} the incident.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch9-interview}
+
+\subsection*{Junior (Q1--Q10)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{What is an API version?}
+        A distinctly identified, supported contract between the API and its
+        consumers --- not just a URL prefix. Minting one declares that the
+        contract changed incompatibly; supporting one commits you to its
+        stability SLA.
+  \item \textbf{Define a breaking change.}
+        Any change after which at least one formerly valid, successful client
+        interaction is rejected, fails, or becomes uninterpretable by a
+        client written against the old contract (Definition~\ref{def:breaking}).
+  \item \textbf{Classify these five changes: removing a response field;
+        adding an optional request field; renaming \texttt{price} to
+        \texttt{unit\_price}; adding a new endpoint; changing a field from
+        float to integer.}
+        Breaking; non-breaking; breaking (rename = remove + add);
+        non-breaking; breaking.
+  \item \textbf{Is adding a response field breaking?}
+        For tolerant readers, no --- unknown members are ignored. For clients
+        with strict schema validation or closed generated models, it can be.
+        Your contract must state which client posture you support.
+  \item \textbf{Why is URI versioning so popular despite being ``un-RESTful''?}
+        Operational clarity: visible in logs and browsers, trivially routed
+        by gateways, naturally cache-keyed, and effortless for consumers to
+        pin. Most organizations value those over URI purity.
+  \item \textbf{What does HTTP 406 mean in a versioned API?}
+        Not Acceptable --- the server cannot produce any representation the
+        client's \texttt{Accept} header permits, e.g.\ an unsupported
+        \texttt{version=N} media-type parameter.
+  \item \textbf{What is the difference between deprecation and retirement?}
+        Deprecated means still functional but discouraged, no longer
+        enhanced, and scheduled for removal; retired (sunset) means the
+        surface no longer responds (typically 410 Gone or a redirect).
+  \item \textbf{What are the \texttt{Deprecation} and \texttt{Sunset}
+        headers?}
+        Standardized response headers (RFC~8594, with \texttt{Deprecation}
+        revised by RFC~9745) announcing when a surface was deprecated and
+        when it will become unresponsive, so clients can detect lifecycle
+        state programmatically~\cite{rfc8594}.
+  \item \textbf{Give two examples of non-breaking changes.}
+        Adding an endpoint; adding an optional request field or a response
+        field (for tolerant readers); adding an enum value to a
+        documented-open enum; loosening validation.
+  \item \textbf{Why should you never reuse a retired field name?}
+        Stored payloads, caches, and old clients still carry the old meaning;
+        reusing the name silently reinterprets their data. Retired names are
+        reserved forever --- Protobuf enforces this with \texttt{reserved}
+        \cite{protobufdocs}.
+\end{enumerate}
+
+\subsection*{Mid (Q11--Q20)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{URI vs.\ header versioning --- defend a choice for a public
+        partner API.}
+        URI path: partners debug with curl and browsers, gateways route on
+        paths for free, caches key correctly without \texttt{Vary}, and
+        pinning is obvious in code review. I would accept the REST-purity
+        cost and document why. (Full credit answers argue either side with
+        the trade-off matrix, not dogma.)
+  \item \textbf{How does Stripe's date-based versioning work?}
+        Accounts pin an API version by date; requests may override per call
+        with a version header. Internally, responses are rendered from
+        current code through a stack of backward-compatibility transforms
+        down to the pinned date, so integrations never change underneath a
+        consumer until they choose to upgrade.
+  \item \textbf{What is expand-and-contract (parallel change)?}
+        A three-phase migration: \emph{expand} (add the new contract beside
+        the old, remove nothing), \emph{migrate} (move consumers with
+        telemetry and campaigns), \emph{contract} (retire the old surface
+        only when usage proves it safe). It keeps an intermediate state where
+        both contracts are valid, so consumers never see a discontinuity
+        \cite{kleppmann2017ddia}.
+  \item \textbf{What is an anti-corruption layer in versioned APIs?}
+        An adapter that translates between an old public contract and the
+        current domain model, preventing legacy vocabulary from leaking into
+        new code. It must be pure, total, and contract-tested; fields that
+        cannot be faithfully derived signal retirement, not more translation.
+  \item \textbf{How do you dual-serve two versions without duplicating
+        business logic?}
+        One service core owns the newest domain model; older versions are
+        thin adapters over it; a gateway routes by version signal; telemetry
+        on the router feeds the retirement decision
+        (Figure~\ref{fig:ch9-dual}).
+  \item \textbf{How do caches interact with header-based versioning?}
+        Caches key primarily on URI; two versions sharing a URI poison each
+        other unless responses carry \texttt{Vary} on the versioning header
+        and every intermediary honors it~\cite{rfc9110}. URI versioning
+        sidesteps the problem entirely.
+  \item \textbf{When may you break compatibility without minting a new
+        version?}
+        Only under pre-published exception clauses: critical security fixes,
+        legally mandated changes, correcting behavior that contradicts the
+        documented contract, or surfaces explicitly labeled unstable/beta.
+        The clause must exist \emph{before} it is invoked.
+  \item \textbf{Your consumer base can't tolerate new enum values. What are
+        your options?}
+        Treat enum growth as breaking: mint a new version; or add a parallel
+        string field with the extended value set and freeze the enum; or run
+        a migration campaign to tolerant SDKs first, then grow the enum.
+        What you may not do is add the value and hope.
+  \item \textbf{What belongs in a migration guide?}
+        A field-level old-to-new mapping table, behavioral deltas (semantics,
+        errors, defaults), copy-pasteable request/response diffs, SDK upgrade
+        steps, the sunset timeline, and a support channel.
+  \item \textbf{How does SemVer apply to APIs?}
+        MAJOR = breaking contract change (new version); MINOR =
+        backward-compatible addition (field, endpoint, open-enum value);
+        PATCH = compatible fix. The changelog classifies every dated entry
+        by this grammar.
+\end{enumerate}
+
+\subsection*{Senior (Q21--Q27)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=21]
+  \item \textbf{Design a breaking-change CI gate.}
+        Diff the proposed OpenAPI description against the published baseline;
+        classify deltas (removed paths/operations/properties, type changes,
+        new required request fields, removed enum values) as breaking; fail
+        the pipeline unless the PR also bumps the major version. Keep the
+        classifier inspectable (Listing~9.2) and treat warnings (enum
+        additions) as human-review triggers~\cite{openapi31}.
+  \item \textbf{How do you decide when to retire a version?}
+        Telemetry, not calendar: schedule sunset when the old version falls
+        below a traffic-share threshold (commonly $\sim$5\%) \emph{and} is
+        trending down; execute only when every remaining consumer has
+        migrated or formally accepted the cutoff. Listing~9.5 automates the
+        verdict.
+  \item \textbf{Compare JSON and Protocol Buffers for schema evolution.}
+        JSON tolerance is client discipline --- the format cannot stop a
+        strict deserializer from rejecting unknown members, so contracts must
+        mandate tolerant readers. Protobuf tolerance is a wire property:
+        unknown tags are skipped by the parser and retained on reserialize,
+        and \texttt{reserved} makes name/tag reuse impossible
+        \cite{protobufdocs}. JSON evolves by convention; Protobuf by
+        construction (Chapter~4).
+  \item \textbf{How many versions should you support concurrently?}
+        As few as the consumer base permits: two (current + previous) is the
+        common external policy; three for slow enterprise bases; date-based
+        schemes cap by age instead of count. Each added version pays adapter,
+        docs, CI, and pairwise-testing costs that grow superlinearly
+        (Equation~\ref{eq:ch9-cost}).
+  \item \textbf{How do internal and external API versioning policies differ?}
+        Internal consumers are enumerable and often deployable by your own
+        org, so dual-serving windows of weeks and aggressive retirement are
+        feasible. External consumers are unenumerable and uncontractable at
+        scale, so timelines stretch to quarters/years, communication needs
+        full campaign machinery, and brownouts replace direct outreach for
+        the long tail.
+  \item \textbf{What are brownouts and when are they justified?}
+        Scheduled, announced windows in which a deprecated surface returns
+        errors, used late in a migration campaign to surface silent
+        dependencies while rollback is still safe. Justified only after
+        direct outreach, with clear notice, and never near the sunset date
+        itself.
+  \item \textbf{How do you handle a breaking change to a stored representation
+        (e.g., cached payloads, event log) while versioning the API?}
+        Decouple wire version from storage version: persist in the newest
+        schema with upcasting on read, serve old wire versions via adapters,
+        and never let a retired wire contract dictate the storage format.
+        This is the DDIA dual of expand-and-contract applied to data at rest
+        \cite{kleppmann2017ddia}.
+\end{enumerate}
+
+\subsection*{Staff (Q28--Q34)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=28]
+  \item \textbf{Design a version policy for an organization with 200 internal
+        APIs and 15 external ones.}
+        Federated guardrails: a single published policy defining breaking
+        changes, mandatory CI diff gates on every spec repo, internal APIs
+        capped at two versions with 30--90 day dual-serving windows enforced
+        by platform tooling, external APIs on contractual 12-month sunsets
+        with a consumer registry, and an exceptions board owning the
+        security-break clause. Uniform telemetry format so retirement
+        decisions are mechanical everywhere.
+  \item \textbf{When is versioning the wrong tool?}
+        When the change can be expressed additively, when consumers are few
+        and coordinated (migrate in place), or when the real problem is
+        missing tolerant-reader discipline. Every version you can avoid
+        minting saves its full carrying cost forever.
+  \item \textbf{A principal argues for ``versionless'' APIs. Evaluate.}
+        Versionless means maximal additive discipline plus guaranteed
+        tolerant readers --- achievable in controlled ecosystems (internal,
+        strong SDK governance) and effectively what Stripe simulates
+        externally. It fails where you cannot govern client parsing behavior;
+        there, explicit versions are the honest acknowledgment of
+        uncontrolled consumers.
+  \item \textbf{How do you price the cost of a version to justify retirement
+        to leadership?}
+        Quantify Equation~\ref{eq:ch9-cost} per version: adapter maintenance
+        hours, CI lane minutes, documentation drift incidents, on-call
+        context-switch cost, and the quadratic test matrix; then put the
+        telemetry (consumers remaining, their traffic share) beside it.
+        Retirement business cases write themselves when both numbers are
+        honest.
+  \item \textbf{Design the deprecation-communication architecture for a
+        platform with 50k API consumers.}
+        Layered: wire-level (\texttt{Deprecation}/\texttt{Sunset}/\texttt{Link}
+        headers on every response), artifact-level (changelog, migration
+        guides, versioned docs), channel-level (portal banners, newsletter,
+        status page), and direct (registry-driven outreach to identified
+        top consumers, brownouts for the unresponsive tail). Each layer
+        catches the consumers the previous one missed.
+  \item \textbf{Your gateway must route five versions of fifty endpoints at
+        100k RPS. What breaks first, and how do you design for it?}
+        Per-version route tables and adapter latency compound; the answer is
+        pushing version dispatch to cheap, cacheable rules (URI prefix
+        routing at the edge), keeping adapters in-process and allocation-free
+        on hot paths, and making version count a managed budget precisely
+        because routing and translation cost scales with $n$.
+  \item \textbf{Write the policy for the security-exception clause.}
+        Scope (severity-defined), authority (who may invoke), consumer
+        notification (maximum feasible notice, out-of-band for identified
+        consumers), compatibility duty of care (provide patched old-version
+        endpoint where feasible), and post-incident retrospective updating
+        the contract. A break invoked without this pre-published framework
+        is indistinguishable from an accident.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch9-bibliography}
+
+\begin{itemize}
+  \item RFC~8594, \emph{The Sunset HTTP Header Field} (and its original
+        \texttt{Deprecation} definition) --- the wire-level deprecation
+        vocabulary~\cite{rfc8594}.
+  \item RFC~9745, \emph{The Deprecation HTTP Header Field} (2025) ---
+        revises \texttt{Deprecation} to the \texttt{@}\emph{<unix-timestamp>}
+        form; read alongside RFC~8594.
+  \item RFC~9110, \emph{HTTP Semantics} --- \texttt{Accept}, content
+        negotiation, \texttt{Vary}, and cache-key behavior underpinning every
+        versioning placement decision~\cite{rfc9110}.
+  \item OpenAPI Specification 3.1 --- the contract description format our CI
+        gate diffs~\cite{openapi31}.
+  \item Stripe, \emph{API versioning documentation} and the engineering blog
+        post \emph{APIs as infrastructure: future-proofing Stripe with
+        versioning} --- the canonical date-based versioning write-up.
+  \item J.~Gehl, \emph{API Design Patterns} --- versioning and
+        backward-compatibility chapters~\cite{gehl2021apidesign}.
+  \item M.~Kleppmann, \emph{Designing Data-Intensive Applications}, ch.~4 ---
+        schema evolution, rolling upgrades, and the theoretical basis of
+        expand-and-contract~\cite{kleppmann2017ddia}.
+  \item Google API Improvement Proposals AIP-180 (\emph{Backwards
+        compatibility}) and AIP-185 (\emph{API versioning}) --- Google's
+        codified policy.
+  \item Microsoft REST API Guidelines, \emph{Versioning} section --- a
+        second large-scale policy to compare against Google's.
+  \item Protocol Buffers documentation, \emph{Updating a Message Type} ---
+        tag reservation, unknown fields, and enum open/closed
+        semantics~\cite{protobufdocs}.
+  \item The \texttt{oasdiff} project (Tufin) --- production-grade OpenAPI
+        diffing and breaking-change detection that Listing~9.2 miniaturizes.
+  \item FastAPI documentation --- routers, middleware, and
+        \texttt{TestClient} used throughout the listings~\cite{fastapidocs}.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch9-capstones}
+
+\subsection*{Capstone 9.1 --- Add v2 to an Existing API with an Adapter Layer \hfill [junior]}
+\textbf{Objective:} Take any single-version CRUD API (your Chapter~6 project
+qualifies) and evolve one resource through a breaking redesign without
+breaking v1 consumers.
+
+\textbf{Inputs/Datasets:} The existing API; the synthetic Northwind Robotics
+catalog fixture from Listing~9.1 as the domain data.
+
+\textbf{Steps:} (1)~Define the v2 contract for the resource (at least one
+rename and one retype). (2)~Implement the v2 model as the service core.
+(3)~Write a pure \texttt{to\_v1} adapter and mount both surfaces.
+(4)~Add \texttt{Deprecation}, \texttt{Sunset}, and \texttt{Link} middleware
+on v1. (5)~Write adapter-fidelity tests proving v1 values derive from v2.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] v1 and v2 respond correctly for every seeded record.
+  \item[$\square$] v1 responses carry all three lifecycle headers; v2 carries
+        none.
+  \item[$\square$] Adapter tests pass deterministically offline.
+  \item[$\square$] No business logic is duplicated between surfaces.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a third, experimental version behind an opt-in
+header; measure adapter overhead with a fixed-iteration timing loop.
+
+\subsection*{Capstone 9.2 --- Media-Type Version Negotiation Middleware \hfill [mid]}
+\textbf{Objective:} Generalize Listing~9.3 into reusable FastAPI middleware
+that version-negotiates \emph{every} endpoint of an API by vendor media type.
+
+\textbf{Inputs/Datasets:} Listing~9.3; the dual-serving app of Listing~9.1
+refactored to a single \texttt{/catalog} URI.
+
+\textbf{Steps:} (1)~Implement the negotiator as middleware that resolves the
+version and stashes it in request state. (2)~Route representations through an
+adapter registry keyed by version. (3)~Emit 406 with a machine-readable
+supported-versions body on failure. (4)~Emit \texttt{Vary: Accept} on all
+versioned responses. (5)~Test q-value precedence, unsupported versions, and
+default selection.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All negotiation outcomes match a published decision table.
+  \item[$\square$] 406 bodies enumerate supported \texttt{version=N} values.
+  \item[$\square$] \texttt{Vary: Accept} present on every 200.
+  \item[$\square$] Full pytest suite passes offline.
+\end{itemize}
+
+\textbf{Stretch Goals:} Content-negotiate a second wire format
+(\texttt{+json} vs.\ \texttt{+cbor}-style suffix) orthogonally to version.
+
+\subsection*{Capstone 9.3 --- Production Breaking-Change CI Gate \hfill [mid]}
+\textbf{Objective:} Harden Listing~9.2 into a gate you would actually run on
+pull requests.
+
+\textbf{Inputs/Datasets:} Listing~9.2; the two catalog fixture specs; three
+additional spec pairs you author (purely additive, parameter-level breaking,
+\texttt{\$ref}-based).
+
+\textbf{Steps:} (1)~Add \texttt{\$ref} resolution for local references.
+(2)~Diff path/query \texttt{parameters} (new required or removed =
+breaking). (3)~Classify enum growth as a \emph{warning} tier between breaking
+and clean. (4)~Emit a machine-readable JSON report alongside the text one.
+(5)~Add a \texttt{--allow-breaking-with=VERSION\_BUMP} escape hatch that
+passes only when \texttt{info.version}'s major component increased.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Exit code 1 exactly when breaking changes exist without a
+        major bump.
+  \item[$\square$] All five fixture pairs produce the expected verdicts.
+  \item[$\square$] JSON report round-trips through \texttt{json.loads}.
+\end{itemize}
+
+\textbf{Stretch Goals:} Detect semantic-risk heuristics (format changes,
+pattern tightening, \texttt{additionalProperties: false} introductions).
+
+\subsection*{Capstone 9.4 --- Deprecation Campaign Plan \& Retirement Analytics \hfill [senior]}
+\textbf{Objective:} Design and instrument the complete retirement program for
+a deprecated version, from announcement to 410.
+
+\textbf{Inputs/Datasets:} Listing~9.5 and its log fixture, extended by you to
+6 months and 12 synthetic consumers with realistic migration curves.
+
+\textbf{Steps:} (1)~Write the one-page deprecation policy (dates, SLAs,
+channels, brownout schedule). (2)~Extend the report generator with
+per-consumer trend lines and a projected-zero-crossing date via linear
+fit. (3)~Produce the consumer contact list ranked by dependency.
+(4)~Script the brownout simulator: given the log, estimate which consumers
+would notice first. (5)~Define the go/no-go checklist for executing sunset.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Policy document covers timeline, SLAs, channels, and
+        exceptions.
+  \item[$\square$] Report projects a retirement date and names remaining
+        consumers deterministically.
+  \item[$\square$] Go/no-go checklist is mechanical (every item checkable
+        from telemetry).
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a ``what-if'' mode showing how the projected date
+shifts if the top two consumers migrate next month.
+
+\subsection*{Capstone 9.5 --- Version Governance at Platform Scale \hfill [staff]}
+\textbf{Objective:} Design the versioning and retirement governance system
+for a fictitious platform org running 40 internal and 6 external APIs.
+
+\textbf{Inputs/Datasets:} A synthetic portfolio registry you author (YAML:
+per-API versions, consumer counts, traffic shares, owners); this chapter's
+cost model (Equation~\ref{eq:ch9-cost}).
+
+\textbf{Steps:} (1)~Codify the policy: breaking-change definition, allowed
+strategies per audience, sunset floors, exception clauses. (2)~Build a
+registry linter that flags policy violations (version in URI \emph{and}
+header; third live version without waiver; deprecated version lacking a
+sunset date). (3)~Compute the portfolio's carrying cost under your model and
+identify the five most expensive versions. (4)~Write the RFC-style decision
+record proposing your org-wide strategy mix. (5)~Define the telemetry schema
+every API must emit.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Policy document is complete enough to lint mechanically.
+  \item[$\square$] Linter flags at least the four violation classes above on
+        a seeded registry.
+  \item[$\square$] Cost report ranks versions and is reproducible offline.
+  \item[$\square$] Decision record defends the strategy mix against at least
+        two alternatives.
+\end{itemize}
+
+\textbf{Stretch Goals:} Simulate ten years of portfolio growth and show when
+the quadratic term of Equation~\ref{eq:ch9-cost} forces policy change.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch9-deps}
+
+All code runs offline after a one-time install. From PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\begin{minted}{text}
+fastapi>=0.110
+pydantic>=2.7
+pyyaml>=6.0
+jsonschema>=4.21
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+\subsection{fastapi ($\geq$ 0.110)}
+\textbf{Description:} The ASGI web framework used for every served API in
+this chapter. \textbf{Why included:} routing, Pydantic integration,
+middleware (deprecation headers), and \texttt{TestClient} for offline
+demonstrations~\cite{fastapidocs}. \textbf{Alternatives:} Flask + manual
+validation; Starlette directly (FastAPI's base). \textbf{Installation:}
+\texttt{pip install "fastapi>=0.110"}.
+
+\subsection{pydantic ($\geq$ 2.7)}
+\textbf{Description:} Type-driven data validation and serialization library.
+\textbf{Why included:} defines the v1/v2 wire models and the domain model in
+Listing~9.1; its strict-by-default validation is the producer-side
+counterpart to the chapter's consumer tolerance rules. \textbf{Alternatives:}
+\texttt{dataclasses} + manual checks; attrs; marshmallow.
+\textbf{Installation:} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{pyyaml ($\geq$ 6.0)}
+\textbf{Description:} YAML parser/emitter. \textbf{Why included:} the
+breaking-change gate (Listing~9.2) reads OpenAPI descriptions authored in
+YAML, the format real API teams use~\cite{openapi31}. \textbf{Alternatives:}
+ruamel.yaml (round-trip fidelity); parsing JSON-flavored OpenAPI with stdlib
+\texttt{json}. \textbf{Installation:} \texttt{pip install "pyyaml>=6.0"}.
+
+\subsection{jsonschema ($\geq$ 4.21)}
+\textbf{Description:} JSON Schema validation engine. \textbf{Why included:}
+exercise and capstone work validating consumer fixtures against published
+schemas (E9.2, Capstone~9.3's semantic checks); not required by the printed
+listings. \textbf{Alternatives:} manual validation; Pydantic's schema export.
+\textbf{Installation:} \texttt{pip install "jsonschema>=4.21"}.
+
+\subsection{httpx ($\geq$ 0.27)}
+\textbf{Description:} Sync/async HTTP client. \textbf{Why included:} the
+transport underneath FastAPI's \texttt{TestClient} --- required for
+Listings~9.1, 9.3, and 9.4 to run offline. \textbf{Alternatives:} requests
+(synchronous, not ASGI-native); urllib (stdlib, low-level).
+\textbf{Installation:} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest ($\geq$ 8)}
+\textbf{Description:} Test framework. \textbf{Why included:} runs the
+consumer-tolerance suite (Listing~9.4) and every capstone's acceptance
+checks. \textbf{Alternatives:} unittest (stdlib); nose2.
+\textbf{Installation:} \texttt{pip install "pytest>=8"}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch9-summary}
+
+\begin{itemize}
+  \item A breaking change is defined by its victims: any change that
+        invalidates a formerly successful client interaction. Renames, type
+        changes, semantic drift, validation tightening, and required-field
+        additions are all breaking; additions and loosening are not ---
+        except enum growth against closed consumer parsers.
+  \item Postel's law, applied maturely, means strict about structure and
+        safety, tolerant about extensibility. Tolerant readers make additive
+        evolution free; blind tolerance fossilizes bugs into contracts.
+  \item Four versioning placements --- URI path, query parameter, custom
+        header, media type --- trade cache correctness, gateway simplicity,
+        debuggability, and REST purity differently. Stripe (dates), GitHub
+        (header + media type), and Google (URI) each chose rationally for
+        their consumer base; none is universally right.
+  \item Expand-and-contract is the only honest zero-downtime migration
+        shape: add beside, migrate with telemetry, contract on evidence.
+        Dual-serving keeps $n$ surfaces affordable by putting one domain
+        model behind pure, tested adapters.
+  \item Deprecation is engineered, not announced: \texttt{Deprecation}/
+        \texttt{Sunset}/\texttt{Link} headers (RFC~8594, revised by
+        RFC~9745), published timelines, stability SLAs, SemVer changelogs,
+        and layered communication~\cite{rfc8594}.
+  \item Schema discipline is additive-only with reserved names and open
+        enums; JSON tolerates by convention, Protobuf by construction
+        \cite{protobufdocs}.
+  \item Compatibility belongs in CI: an OpenAPI diff gate fails the build on
+        breaking changes before consumers do.
+  \item Every live version carries recurring, superlinear cost. Retirement
+        is the goal state; telemetry --- not the calendar --- grants
+        permission to reach it.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch9-quickref}
+
+\subsection*{Breaking-Change Checklist}
+Breaking: removed/renamed field $\bullet$ type or semantics change $\bullet$
+tightened validation $\bullet$ new required request field $\bullet$ removed
+endpoint/operation $\bullet$ changed URL $\bullet$ changed error
+codes/shape $\bullet$ enum value \emph{removed} $\bullet$ enum value
+\emph{added to a documented-closed enum}. Non-breaking: added endpoint
+$\bullet$ added optional request field $\bullet$ added response field
+(tolerant readers) $\bullet$ loosened validation $\bullet$ added enum value
+to a documented-open enum.
+
+\subsection*{Strategy Matrix (Condensed)}
+URI path --- best ops ergonomics, worst REST purity $\bullet$ query param ---
+URI-like, weaker tooling $\bullet$ custom header --- pure URIs, fragile
+caches, needs \texttt{Vary} $\bullet$ media type --- most REST-orthodox,
+highest consumer complexity, needs \texttt{Vary: Accept}. Pick one signal;
+never two.
+
+\subsection*{Deprecation-Header Reference}
+\texttt{Deprecation: @}\emph{<unix-ts>} (RFC~9745; RFC~8594 used HTTP-date)
+--- when deprecation began. \texttt{Sunset: }\emph{<HTTP-date>} (RFC~8594)
+--- when the surface dies. \texttt{Link: <...>; rel="deprecation"} --- policy
+document. \texttt{rel="successor-version"} --- where to migrate. Lifecycle:
+introduced $\to$ current $\to$ deprecated $\to$ sunset $\to$ retired (410).
+
+\input{chapters/_standard_addendum}

@@ -1,0 +1,3015 @@
+%% ============================================================================
+%% Chapter 10: Idempotency, Caching & Concurrency Control
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Idempotency, Caching \& Concurrency Control}
+\label{ch:idempotency}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Networks fail in the middle. Not before your request, not after the response
+arrives, but precisely in the interval where neither party can tell whether
+the other side acted. Every production API lives inside that interval: a
+client that times out cannot distinguish \emph{the server never received the
+request} from \emph{the server executed it and the response was lost}. Three
+disciplines together turn that ambiguity from a source of corruption into an
+engineering property you can prove things about. \emph{Idempotency} makes
+repeating an operation safe. \emph{Caching} makes repeating a read cheap.
+\emph{Concurrency control} makes simultaneous writes correct. This chapter
+treats all three as one coherent correctness program, because in production
+they are never exercised separately: the retry that saves your client from a
+timeout is the same mechanism that double-charges your customer when the
+endpoint is not idempotent, and the cache that absorbs your read traffic is
+the same mechanism that serves a stale balance when validation is sloppy.
+
+We begin formally. Idempotency is defined as a fixed-point property on
+observable state --- $f(f(x)) = f(x)$ --- and we map that definition onto the
+HTTP method vocabulary of RFC~9110, separating what the specification
+guarantees (GET, PUT, DELETE) from what well-designed APIs \emph{add}
+(idempotent POST via idempotency keys)~\cite{rfc9110}. The IETF
+\texttt{Idempotency-Key} draft is studied as a wire protocol with precise
+replay semantics: same key and same payload replays the stored response,
+same key and different payload is a 422, a concurrent duplicate in flight is
+a 409, and keys expire on a 24-hour window in the style Stripe popularized.
+We then dismantle the exactly-once myth: the Two Generals' Problem makes
+distributed exactly-once delivery impossible, and the achievable substitute
+--- at-least-once delivery combined with idempotent processing --- is what
+the literature calls \emph{effectively-once}~\cite{kleppmann2017ddia}.
+
+The caching half of the chapter is a guided tour of RFC~9111: the
+\texttt{Cache-Control} directive vocabulary (\texttt{max-age}, the widely
+confused \texttt{no-cache} versus \texttt{no-store}, \texttt{private} versus
+\texttt{public}, \texttt{stale-while-revalidate}, \texttt{stale-if-error},
+\texttt{must-revalidate}), strong and weak validators, the
+\texttt{If-None-Match}/304 dance, heuristic freshness, surrogate keys for
+CDN purging, \texttt{Vary}, and cache poisoning through unkeyed
+inputs~\cite{rfc9110}. Concurrency control gets equal rigor: the lost-update
+problem is developed as a worked interleaving, optimistic locking with
+\texttt{If-Match}/ETag is given its precise status-code algebra (428, 412,
+and when 409 is the honest answer), pessimistic patterns are scoped to where
+they belong, and distributed locks are presented together with their failure
+modes and the fencing-token fix~\cite{kleppmann2017ddia,nygard2018releaseit}.
+
+The code is production-shaped and entirely offline. You will build a
+SQLite-backed \texttt{Idempotency-Key} middleware for FastAPI and prove,
+with fifty concurrent duplicate submits released on a single barrier, that
+exactly one mutation occurs; a conditional-requests demo that measures the
+bandwidth a 304 saves; an optimistic-locked inventory resource for the
+fictional Northwind Robotics warehouse; a double-submit storm harness that
+reproduces the classic double-charge incident and then cures it; and a pure
+stdlib cache-policy simulator that makes RFC~9111 directive semantics
+executable. Everything is typed Python~3.11, deterministic, and tested with
+in-process ASGI clients~\cite{fastapidocs,pydanticdocs}.
+
+\begin{keyconceptbox}
+A retry is a second attempt at a request whose first outcome is
+\emph{unknown}. Idempotency converts ``unknown'' into ``safe to repeat'':
+at-least-once delivery plus idempotent processing yields effectively-once
+semantics. Caching and concurrency control are the read-side and write-side
+halves of the same discipline: validators (ETag, Last-Modified) let a cache
+prove freshness with \texttt{If-None-Match}, and the same validators let a
+writer prove it is overwriting the state it actually read with
+\texttt{If-Match}. One mechanism --- the validator --- underwrites both.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch10-objectives}
+
+After completing this chapter you will be able to:
+
+\begin{enumerate}
+  \item Define idempotency formally as a fixed-point property on observable
+        state, and classify every HTTP method by its RFC~9110 safety and
+        idempotency guarantees~\cite{rfc9110}.
+  \item Implement the IETF \texttt{Idempotency-Key} protocol end to end:
+        client key generation, fingerprinted request storage, response
+        snapshotting, replay semantics, in-flight deduplication (409),
+        mismatch rejection (422), expiry windows, and per-account scoping.
+  \item Explain why distributed exactly-once delivery is impossible (Two
+        Generals' Problem) and construct the effectively-once substitute
+        from at-least-once delivery plus idempotent
+        processing~\cite{kleppmann2017ddia}.
+  \item Author correct \texttt{Cache-Control} policies, distinguish
+        \texttt{no-cache} from \texttt{no-store}, apply
+        \texttt{stale-while-revalidate} and \texttt{stale-if-error}
+        deliberately, and choose strong versus weak validators correctly.
+  \item Diagnose the lost-update problem from an interleaving, and prevent
+        it with optimistic concurrency control using \texttt{If-Match},
+        selecting 428, 412, and 409 precisely.
+  \item Evaluate pessimistic locking, database constraints, and distributed
+        locks (with fencing tokens) against optimistic control for a given
+        workload~\cite{kleppmann2017ddia}.
+  \item Prove, with a deterministic concurrency test, that a retry storm
+        against an idempotent endpoint produces exactly one observable
+        mutation.
+\end{enumerate}
+
+\textbf{Prerequisites.} Chapters~0--6: the HTTP wire protocol including
+methods, status codes, and header semantics (Chapter~1); consuming APIs from
+Python with \texttt{httpx} and retry discipline (Chapter~2); REST resource
+modeling (Chapter~3); JSON serialization and canonicalization
+(Chapter~4); the FastAPI application factory, dependency injection,
+middleware, and \texttt{TestClient} patterns (Chapter~6). Comfort with
+\texttt{threading.Barrier}, \texttt{sqlite3}, and \texttt{hashlib} from the
+Python standard library is assumed; no database server, network access, or
+cloud account is required anywhere in this chapter.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Prerequisite} & \textbf{Where it is used here} \\
+    \midrule
+    HTTP methods, status codes, headers & method idempotency algebra; 304/409/412/422/428 selection \\
+    Retry loops with backoff (Ch.~2) & why non-idempotent retry is unsafe; the money-transfer argument \\
+    REST resources and representations (Ch.~3) & ETags as representation validators; conditional PUT \\
+    JSON canonicalization (Ch.~4) & request fingerprinting for idempotency keys \\
+    FastAPI middleware and TestClient (Ch.~6) & the idempotency middleware and all offline tests \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Prerequisite map for Chapter~10.}
+  \label{tab:ch10-prereqs}
+\end{table}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch10-mechanics}
+
+\subsection{Idempotency: A Formal Definition}
+\label{sec:ch10-idempotency-formal}
+
+\begin{definition}[Idempotent operation]
+\label{def:idempotent}
+Let $S$ be the set of observable server states and let an API operation be a
+function $f : S \to S$. The operation is \emph{idempotent} iff applying it
+twice is observationally indistinguishable from applying it once:
+\[
+  f(f(x)) = f(x) \quad \text{for all } x \in S.
+\]
+``Observable'' deliberately includes side effects a client can detect ---
+ledger entries, emails sent, robots dispatched --- and excludes
+implementation-internal artifacts such as log lines or monotonic request
+counters.
+\end{definition}
+
+Two consequences deserve emphasis. First, idempotency is a property of the
+\emph{effect}, not of the \emph{response}: a replayed request may legally
+return the freshly stored receipt rather than re-executing, and it may even
+return a different status code in degenerate cases (a second DELETE
+returning 404) while remaining idempotent, because the \emph{state} is
+unchanged. Second, idempotency is not safety. A safe method (GET, HEAD)
+changes nothing at all; an idempotent method may change state on the first
+application but not on repetition. The identity function is the only safe
+operation; every fixed-point operation is idempotent.
+
+RFC~9110 assigns each standard method a fixed position in this
+algebra~\cite{rfc9110}, reproduced in Table~\ref{tab:ch10-methods}. The
+subtle row is DELETE: the first call transitions the resource to
+``absent''; every subsequent call finds the fixed point already reached.
+POST is the only mainstream method with \emph{no} guarantee --- which is
+precisely why POST is the method that carries charges, bookings, and
+dispatches, and precisely why the industry layered idempotency keys on top
+of it.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c X}
+    \toprule
+    \textbf{Method} & \textbf{Safe} & \textbf{Idempotent} & \textbf{Effect of a retry} \\
+    \midrule
+    GET, HEAD & yes & yes & none; caches may even answer locally \\
+    OPTIONS, TRACE & yes & yes & none \\
+    PUT & no & yes & same absolute state written again \\
+    DELETE & no & yes & resource remains absent (fixed point) \\
+    POST & no & \textbf{no} & a second, independent side effect \\
+    PATCH & no & no (in general) & depends on the delta encoding \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Safety and idempotency per RFC~9110~\cite{rfc9110}. PATCH is
+  idempotent only if the patch document encodes an absolute, not relative,
+  transformation.}
+  \label{tab:ch10-methods}
+\end{table}
+
+\begin{examplebox}
+\textbf{Fixed points in one inventory endpoint.} Consider
+\texttt{PUT /inventory/NWR-AXLE-42} with body
+\texttt{\{"quantity": 30\}}. Whether executed once or fifty times, the
+observable state ends at \texttt{quantity = 30}: the operation is
+idempotent. Now consider \texttt{POST /inventory/NWR-AXLE-42/adjustments}
+with body \texttt{\{"delta": -5\}}. Each execution appends a new adjustment;
+fifty executions reserve 250 units. The POST is not idempotent, and no
+amount of careful client retry logic can make it safe unless the server
+adds a deduplication mechanism. That mechanism is the idempotency key.
+\end{examplebox}
+
+\subsection{The Idempotency-Key Protocol}
+\label{sec:ch10-idempotency-keys}
+
+The \texttt{Idempotency-Key} pattern, standardized as an IETF draft and
+popularized by Stripe, upgrades an unsafe POST into an idempotent operation
+by attaching a client-generated unique key to each logical request. The
+server stores the outcome keyed by that value and answers duplicates from
+the store instead of re-executing. The protocol has five design decisions,
+each of which is a failure mode when gotten wrong.
+
+\textbf{Key generation.} The key must be generated by the \emph{client}, one
+per logical operation (typically a UUIDv4 minted when the user opens the
+checkout form, not when the request is sent). All retries of that operation
+--- manual retries, library retries, load-balancer retries --- reuse the
+same key. A new key means a new operation; that is the entire contract.
+
+\textbf{Storage design.} The server persists, per key: a \emph{request
+fingerprint} (a SHA-256 over method, route, and canonical request body), a
+\emph{response snapshot} (status code, body, content type), a lifecycle
+state (\texttt{in\_flight} or \texttt{completed}), and a creation timestamp
+for expiry. The fingerprint is what makes key reuse detectable: it must
+cover the route, not only the body, or the same JSON sent to two endpoints
+will collide.
+
+\textbf{Replay semantics.} Three collision outcomes, three status codes:
+\begin{itemize}
+  \item Same key, same fingerprint, state \texttt{completed} $\rightarrow$
+        replay the stored response byte-for-byte, marked with a header such
+        as \texttt{Idempotency-Replayed: true} so observability can
+        distinguish replays from executions.
+  \item Same key, different fingerprint $\rightarrow$ \textbf{422}. The
+        client reused a key for a different logical operation; replaying
+        would silently corrupt intent, and executing would double-apply.
+  \item Same key, same fingerprint, state \texttt{in\_flight}
+        $\rightarrow$ \textbf{409} with \texttt{Retry-After}, because the
+        original is still executing and its outcome does not exist yet.
+        (Some drafts discuss 425 Too Early; 409 is the widely deployed
+        choice because the condition is a genuine state conflict.)
+\end{itemize}
+
+\textbf{Expiry.} Keys cannot be stored forever; Stripe retains them for 24
+hours. The expiry window is a correctness parameter, not housekeeping: it
+bounds how long a duplicate can be recognized as a duplicate, and therefore
+bounds how late a retry may arrive. Choose it from your client's worst-case
+retry horizon, not from storage cost.
+
+\textbf{Scoping.} Keys are unique per \emph{account}, not globally --- two
+tenants must never replay each other's responses, and key uniqueness
+pressure should not cross tenant boundaries. Endpoints are bound implicitly
+by the fingerprint (a key reused on a different route mismatches), which
+prevents cross-endpoint replay without extra bookkeeping.
+
+Figure~\ref{fig:ch10-replay-flow} shows the full decision flow as
+implemented in Listing~10.1.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    startstop/.style={rectangle, rounded corners, draw=packtgray, fill=packtorange!15,
+                      text width=3.3cm, align=center, minimum height=0.9cm},
+    decision/.style={diamond, draw=packtgray, fill=blue!8, text width=2.6cm,
+                     align=center, inner sep=1pt, aspect=2.2},
+    outcome/.style={rectangle, draw=packtgray, fill=green!10, text width=3.1cm,
+                    align=center, minimum height=0.9cm},
+    flow/.style={->, thick, packtgray},
+    node distance=0.55cm and 0.9cm]
+
+  \node[startstop] (arrive) {POST arrives with \texttt{Idempotency-Key}};
+  \node[decision, below=of arrive] (seen) {Key seen before?};
+  \node[decision, below left=0.7cm and -0.2cm of seen] (match) {Fingerprint matches?};
+  \node[decision, below right=0.7cm and -0.6cm of seen] (state) {State \texttt{completed}?};
+  \node[outcome, below=of match] (unproc) {\textbf{422} key reused with different payload};
+  \node[outcome, below=of state] (inflight) {\textbf{409} + \texttt{Retry-After}: still in flight};
+  \node[outcome, right=1.0cm of inflight] (replay) {Replay stored response + \texttt{Idempotency-Replayed}};
+  \node[startstop, right=1.0cm of replay] (execute) {Mark \texttt{in\_flight}, execute, snapshot response};
+
+  \draw[flow] (arrive) -- (seen);
+  \draw[flow] (seen) -| node[note, pos=0.25, above]{yes, and fingerprint differs} (match);
+  \draw[flow] (match) -- node[note, left]{no} (unproc);
+  \draw[flow] (seen) -| node[note, pos=0.3, above]{yes, same payload} (state);
+  \draw[flow] (state) -- node[note, left]{no} (inflight);
+  \draw[flow] (state) -- node[note, above]{yes} (replay);
+  \draw[flow] (seen.east) -| node[note, pos=0.2, above right]{no (or expired)} (execute.north);
+\end{tikzpicture}
+\caption{Idempotency-key decision flow. Exactly one path executes business
+logic; every other path returns a deterministic, side-effect-free answer.}
+\label{fig:ch10-replay-flow}
+\end{figure}
+
+\begin{warningbox}
+The response snapshot must be written in the same transaction as the state
+mutation, or the system has a crash window in which the effect happened but
+the receipt was never recorded. A retry arriving in that window either
+double-executes (if the key row was rolled back) or deadlocks (if the key
+row survived as \texttt{in\_flight} forever). Store first, commit once,
+replay forever --- and never store the response before the mutation is
+durable.
+\end{warningbox}
+
+\subsection{The Exactly-Once Illusion}
+\label{sec:ch10-exactly-once}
+
+Every distributed systems curriculum eventually confronts the Two Generals'
+Problem: two armies must agree on an attack time using messengers who may be
+captured. No finite protocol of unreliable messages can guarantee both sides
+act together, because the last messenger's arrival is itself unknowable to
+the sender. An HTTP request over a flaky network \emph{is} the Two Generals:
+after a timeout, the client cannot know whether the request was lost before
+execution or the response was lost after it. Exactly-once delivery is
+therefore not a difficult engineering goal; it is a theorem-level
+impossibility~\cite{kleppmann2017ddia}.
+
+What is achievable --- and what production systems actually ship --- is the
+composition
+\[
+  \text{at-least-once delivery} \;+\; \text{idempotent processing}
+  \;=\; \text{effectively-once semantics}.
+\]
+The transport is allowed to deliver duplicates (and will); the processor is
+built so duplicates are observationally inert. Every deduplication mechanism
+has a \emph{window}: the idempotency-key TTL, the message-ID retention
+period, the dedup log's compaction horizon. A duplicate arriving outside the
+window is indistinguishable from a new request. Sizing the window from the
+client's maximum retry horizon, and monitoring how full it runs, is the
+operational discipline that makes ``effectively'' honest.
+
+\subsection{HTTP Caching Machinery per RFC 9110/9111}
+\label{sec:ch10-caching}
+
+HTTP caching exists to eliminate two things: \emph{latency} (a cache closer
+than the origin answers faster) and \emph{origin load} (a shared cache
+answers instead of the origin at all). Both are achieved by the same small
+machinery: a \emph{freshness lifetime} the origin assigns, and
+\emph{validators} the cache uses to prove freshness when the lifetime has
+run out~\cite{rfc9110}.
+
+\textbf{Freshness directives.} \texttt{Cache-Control} is a comma-separated
+directive vocabulary; the directives that matter most are summarized in
+Table~\ref{tab:ch10-directives}. The single most expensive confusion in the
+vocabulary is \texttt{no-cache} versus \texttt{no-store}. Despite its name,
+\texttt{no-cache} permits \emph{storage} --- it forbids \emph{serving}
+without revalidation. \texttt{no-store} forbids storage entirely and is the
+correct choice for responses containing credentials, account data, or
+one-time tokens.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Directive} & \textbf{Semantics} \\
+    \midrule
+    \texttt{max-age=n} & fresh for $n$ seconds; a cache may serve without contacting the origin \\
+    \texttt{no-cache} & may store, \emph{must} revalidate before every reuse \\
+    \texttt{no-store} & may not store at all; every request reaches the origin \\
+    \texttt{private} & only the single-user (browser) cache may store \\
+    \texttt{public} & shared caches (CDNs, proxies) may store \\
+    \texttt{stale-while-revalidate=n} & may serve stale for $n$ seconds past expiry while refreshing in the background \\
+    \texttt{stale-if-error=n} & may serve stale for $n$ seconds if the origin errors \\
+    \texttt{must-revalidate} & once stale, never serve without a successful revalidation (overrides stale serving) \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Core \texttt{Cache-Control} response directives (RFC~9111).}
+  \label{tab:ch10-directives}
+\end{table}
+
+\textbf{Validators: strong and weak.} When a stored response is stale, the
+cache revalidates with a \emph{conditional request}. Two validators exist.
+\texttt{Last-Modified} is a one-second-granularity timestamp ---
+\emph{weak}, because two changes inside one second are invisible to it.
+\texttt{ETag} is an opaque tag; a \emph{strong} ETag must change whenever
+the representation changes by a single byte, while a weak ETag (prefixed
+\texttt{W/}) asserts only semantic equivalence. Strong ETags support range
+requests and byte-sensitive caches; weak ETags are for representations whose
+bytes may legitimately vary (e.g.\ recompressed but semantically identical
+bodies). The golden rule: a strong ETag is a content address --- compute it
+from the representation bytes (SHA-256 is ideal) or from a version counter
+when the representation is a pure function of the versioned state.
+\emph{Never} let a client invent the validator.
+
+The conditional flow is two headers deep: the cache presents its stored
+validator with \texttt{If-None-Match} (or \texttt{If-Modified-Since}), and
+the origin answers \textbf{304 Not Modified} with no body when the
+validator still matches. Figure~\ref{fig:ch10-conditional} shows the
+sequence; Listing~10.2 measures the saved bytes.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    actor/.style={rectangle, draw=packtgray, fill=blue!8, minimum width=2.2cm,
+                  minimum height=0.8cm},
+    msg/.style={->, thick, packtgray},
+    rmsg/.style={->, thick, dashed, packtgray},
+    node distance=2.6cm]
+
+  \node[actor] (client) {Client};
+  \node[actor, right=of client] (cache) {Cache / CDN};
+  \node[actor, right=of cache] (origin) {Origin API};
+  \draw[packtgray] ($(client.south west)+(0.2,-0.1)$) -- ++(0,-5.6);
+  \draw[packtgray] ($(cache.south west)+(0.2,-0.1)$) -- ++(0,-5.6);
+  \draw[packtgray] ($(origin.south west)+(0.2,-0.1)$) -- ++(0,-5.6);
+
+  \draw[msg]  ($(client.south)+(0.2,-0.35)$) -- node[above, note]{GET /parts/NWR-AXLE-42} ($(cache.south)+(-2.2,-0.35)$);
+  \draw[msg]  ($(cache.south)+(0.2,-0.9)$)  -- node[above, note]{GET (cache miss)} ($(origin.south)+(-2.2,-0.9)$);
+  \draw[rmsg] ($(origin.south)+(-2.2,-1.5)$) -- node[above, note]{200 + body + \texttt{ETag: "a1\ldots"} + \texttt{max-age=60}} ($(cache.south)+(0.2,-1.5)$);
+  \draw[rmsg] ($(cache.south)+(-2.2,-2.05)$) -- node[above, note]{200 + body (stored)} ($(client.south)+(0.2,-2.05)$);
+
+  \draw[msg]  ($(client.south)+(0.2,-3.0)$) -- node[above, note]{GET (after expiry)} ($(cache.south)+(-2.2,-3.0)$);
+  \draw[msg]  ($(cache.south)+(0.2,-3.55)$) -- node[above, note]{GET + \texttt{If-None-Match: "a1\ldots"}} ($(origin.south)+(-2.2,-3.55)$);
+  \draw[rmsg] ($(origin.south)+(-2.2,-4.15)$) -- node[above, note]{\textbf{304 Not Modified} (no body, freshness reset)} ($(cache.south)+(0.2,-4.15)$);
+  \draw[rmsg] ($(cache.south)+(-2.2,-4.7)$) -- node[above, note]{200 from stored body} ($(client.south)+(0.2,-4.7)$);
+\end{tikzpicture}
+\caption{Conditional request sequence. The revalidation round trip still
+costs latency, but the 304 transfers zero representation bytes; with
+\texttt{max-age} still fresh, the round trip disappears entirely.}
+\label{fig:ch10-conditional}
+\end{figure}
+
+\textbf{Heuristic freshness.} When the origin sends validators but no
+explicit lifetime, caches may apply the RFC~9111 heuristic:
+$\text{freshness} = 0.1 \times (\text{Date} - \text{Last\text{-}Modified})$.
+A document untouched for a week is guessed fresh for about 17 hours. The
+heuristic is a fallback, not a design; explicit \texttt{max-age} is always
+preferable because it is a decision rather than a guess.
+
+\textbf{Surrogate keys and CDNs.} A surrogate key (e.g.\
+\texttt{Surrogate-Key: part:NWR-AXLE-42 catalog}) tags stored responses at
+the CDN so that one mutation can purge thousands of URLs by tag instead of
+enumerating paths. Tag-based invalidation converts the classic ``two hard
+things'' joke into an operational primitive: writes emit tags, purges
+reference tags, and the cache invalidation problem becomes a bookkeeping
+problem.
+
+\textbf{Vary and cache poisoning.} The cache key is, by default, method +
+URI. If the response depends on any request header --- \texttt{Accept},
+\texttt{Accept-Encoding}, \texttt{Accept-Language}, an authorization scope
+--- the response must declare it with \texttt{Vary}, or the cache will serve
+one client's representation to another. The hostile version of this mistake
+is \emph{cache poisoning}: if an unkeyed input (a reflected header, a query
+parameter ignored by the key) influences the response, an attacker can store
+a poisoned representation under an innocent key and have the cache deliver
+it to everyone~\cite{nygard2018releaseit}. Rule: every byte of the response
+must be a function of the cache key plus the \texttt{Vary} set.
+
+\subsection{Concurrency Control: The Lost-Update Problem}
+\label{sec:ch10-concurrency}
+
+Caching controls how \emph{readers} see state; concurrency control decides
+what happens when \emph{writers} collide. The canonical failure is the lost
+update, worked out interleaving by interleaving in
+Figure~\ref{fig:ch10-lost-update}: two clients read the same inventory row,
+each computes a new value from its private copy, and the second write
+silently overwrites the first. Neither client errored. The invariant
+``reserved $\leq$ on hand'' is violated anyway. The bug is not in either
+request; it is in the \emph{composition} --- which is why no amount of
+single-request validation finds it~\cite{kleppmann2017ddia}.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    step/.style={rectangle, draw=packtgray, fill=blue!8, text width=4.4cm,
+                 align=left, minimum height=0.85cm},
+    badstep/.style={rectangle, draw=packtgray, fill=packtorange!20, text width=4.4cm,
+                    align=left, minimum height=0.85cm},
+    timeline/.style={->, thick, packtgray},
+    node distance=0.5cm]
+
+  \node[flowstep] (a1) {A: GET $\rightarrow$ \texttt{qty=35}, \texttt{ETag "v1"}};
+  \node[flowstep, below=of a1] (b1) {B: GET $\rightarrow$ \texttt{qty=35}, \texttt{ETag "v1"}};
+  \node[flowstep, below=of b1] (a2) {A: reserves 5 $\rightarrow$ PUT \texttt{qty=30}, \texttt{If-Match "v1"} \checkmark};
+  \node[badstep, below=of a2] (b2) {B: reserves 8 $\rightarrow$ PUT \texttt{qty=27}, \texttt{If-Match "v1"}};
+
+  \node[left=0.6cm of a1, font=\footnotesize\itshape, text=packtgray] {time};
+  \draw[timeline] ($(a1.north west)+(-0.35,0.25)$) -- ($(b2.south west)+(-0.35,-0.25)$);
+
+  \node[badstep, right=1.1cm of b2, text width=5.3cm] (verdict)
+    {\textbf{Without} \texttt{If-Match}: B's write lands, A's reservation of
+     5 is lost; 43 units promised against 35 on hand. \textbf{With}
+     \texttt{If-Match}: B's precondition fails $\rightarrow$ 412, B re-reads
+     \texttt{qty=30}, reserves 8 $\rightarrow$ \texttt{qty=22}. Nothing
+     lost.};
+  \draw[->, thick, packtgray, dashed] (b2) -- (verdict);
+\end{tikzpicture}
+\caption{The lost-update interleaving. Reads interleave harmlessly; the
+second blind write is the corruption. A conditional write converts the race
+into a deterministic rejection.}
+\label{fig:ch10-lost-update}
+\end{figure}
+
+\textbf{Optimistic locking with If-Match.} HTTP's native answer is the
+conditional write. The server stamps every representation with a strong ETag
+derived from a version counter; a writer echoes it in \texttt{If-Match}; the
+server applies the write inside an atomic compare-and-set:
+\[
+  \text{apply} \iff \text{version}_{\text{current}} = \text{version}_{\text{sent}}.
+\]
+The status-code algebra is precise and worth memorizing:
+\begin{itemize}
+  \item \textbf{428 Precondition Required} --- the server \emph{requires}
+        conditional writes and the client sent none. This is the API
+        declaring ``blind overwrites are forbidden here.''
+  \item \textbf{412 Precondition Failed} --- the client sent a precondition
+        and it evaluated false: someone wrote first. The correct client
+        behavior is read--re-decide--retry.
+  \item \textbf{409 Conflict} --- the request conflicts with server state
+        for \emph{business} reasons (duplicate natural key, invalid state
+        transition), not with a representation version. Use 409 for semantic
+        conflicts and in-flight idempotency collisions; use 412 strictly for
+        failed preconditions. Confusing them sends clients down the wrong
+        recovery path.
+\end{itemize}
+Optimistic control shines when contention is rare: zero locks held, no
+blocking, and the retry cost is paid only by actual collisions. Its price is
+the read-modify-write retry loop, which under hot contention can livelock;
+the fix is bounded retries with jittered backoff and escalation.
+
+\textbf{Pessimistic patterns.} When contention is hot or the retry of a
+failed operation is expensive (a payment re-authorization, a compiled
+report), take the lock up front: \texttt{SELECT \ldots\ FOR UPDATE} in the
+database, or a serialized queue per aggregate. Pessimism trades throughput
+for predictability; it is the right tool for short critical sections over
+hot rows, and the wrong tool for long user think-times, where a held lock
+outlives the session.
+
+\textbf{Distributed locks and fencing.} A lock service (Redis,
+ZooKeeper-style consensus) extends mutual exclusion across processes, but a
+paused lock holder is indistinguishable from a dead one: the lease expires,
+a second client acquires the lock, and the paused client wakes up and writes
+anyway. The fix is a \emph{fencing token} --- a monotonic number issued with
+every lock acquisition --- which the resource checks on every write,
+rejecting any token older than the newest it has seen. The lock provides
+mutual exclusion for efficiency; the fencing token provides correctness for
+safety. A distributed lock without fencing is a race condition with extra
+infrastructure~\cite{kleppmann2017ddia}.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Strategy} & \textbf{Choose when} & \textbf{Cost} \\
+    \midrule
+    Optimistic (If-Match/CAS) & low-to-moderate contention; cheap retries & retry loop; livelock risk on hot keys \\
+    Pessimistic (DB row lock) & hot rows; expensive retries; short critical sections & blocking, lock management, deadlock risk \\
+    Serialized queue / single writer & per-aggregate ordering is natural & throughput ceiling of one writer \\
+    Distributed lock + fencing token & cross-process mutual exclusion & lock service dependency; fencing enforced at the resource \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Concurrency-control strategy selection.}
+  \label{tab:ch10-strategies}
+\end{table}
+
+\subsection{Retries Meet Idempotency: The Money-Transfer Argument}
+\label{sec:ch10-retries}
+
+Chapter~2 taught clients to retry with exponential backoff and jitter.
+Chapter~10 supplies the correctness condition that makes that teaching safe:
+\emph{a client may retry freely iff the operation is idempotent or carries
+an idempotency key}. Consider the canonical non-idempotent operation --- a
+money transfer POST --- under a timeout:
+
+\begin{enumerate}
+  \item The client sends \texttt{POST /transfers \{amount\_cents: 2500\}}.
+  \item The server executes it; the response is lost in the network.
+  \item The client retries. Without a key, the server executes \emph{again}.
+        The customer is charged twice; the ledger is authoritative; the
+        duplicate must now be discovered and refunded by a human.
+\end{enumerate}
+
+The argument generalizes into a design rule with three clauses. (1)~The
+outcome of a timed-out request is \emph{unknown}, never ``failed'' ---
+treating it as failed is the bug. (2)~Retrying an unknown-outcome
+non-idempotent request creates exactly one duplicate per ambiguity window;
+load balancers, proxies, and HTTP libraries all create such windows, often
+without the application code's knowledge. (3)~The only client-side fix is to
+make the retry \emph{recognizable}: same key, same payload, so the server's
+dedup machinery can collapse the storm to one execution. Idempotency keys
+are therefore not a server feature; they are the second half of the retry
+contract, and an SDK that retries POST without minting a key is unsafe by
+construction.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch10-code}
+
+All listings run offline on Python~3.11+ against in-process ASGI test
+clients; concurrency is exercised with \texttt{threading.Barrier} and
+assertions on final state, never on wall-clock timing. Set up once per
+machine from PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi httpx pydantic pytest
+pytest -q
+\end{minted}
+
+\subsection{Listing 10.1 --- SQLite-Backed Idempotency-Key Middleware}
+\label{sec:ch10-listing1}
+
+The middleware implements the full decision flow of
+Figure~\ref{fig:ch10-replay-flow}: atomic check-and-insert against a SQLite
+store (the \texttt{PRIMARY KEY} constraint \emph{is} the concurrency
+control), fingerprinting over method + route + canonical JSON body, response
+snapshotting, 422 on fingerprint mismatch, 409 with \texttt{Retry-After}
+while the twin is in flight, per-account scoping, and a Stripe-style 24-hour
+TTL. Two deliberate design choices deserve attention. First, keys are
+claimed \emph{before} execution and the row is \emph{abandoned} on
+exceptions and 5xx responses, because a server-side failure is an outcome a
+client must be allowed to retry. Second, the store's single connection is
+guarded by one \texttt{RLock}; correctness lives in the atomic
+\texttt{INSERT}, not in the volume of the bookkeeping.
+
+\begin{minted}{python}
+"""Listing 10.1 -- SQLite-backed Idempotency-Key middleware for FastAPI.
+
+Northwind Robotics Payments API. Offline-first, typed Python 3.11+.
+Implements the IETF `Idempotency-Key` draft semantics:
+
+* first request with a key executes and snapshots the response,
+* same key + same payload replays the stored response,
+* same key + different payload is rejected with 422,
+* a concurrent duplicate while the first is in flight gets 409,
+* keys expire after a configurable TTL (default: 24 hours, Stripe-style),
+* keys are scoped per account (header ``X-Account-Id``).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
+from starlette.middleware.base import (
+    BaseHTTPMiddleware,
+    RequestResponseEndpoint,
+)
+
+IDEMPOTENCY_KEY_HEADER = "idempotency-key"
+REPLAYED_HEADER = "idempotency-replayed"
+DEFAULT_TTL_SECONDS = 24 * 60 * 60  # Stripe-style 24-hour key expiry
+IDEMPOTENT_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+
+# --------------------------------------------------------------------------
+# Persistence: the idempotency key store
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class StoredResponse:
+    """Immutable snapshot of a completed response."""
+
+    status_code: int
+    body: bytes
+    content_type: str
+
+
+class IdempotencyStore:
+    """SQLite-backed key store.
+
+    One row per (scope, key). Rows transition ``in_flight`` -> ``completed``.
+    A single connection guarded by an RLock keeps concurrent handler
+    threads serialized, so ``begin`` is an atomic check-and-insert.
+    """
+
+    def __init__(self, path: str = ":memory:", ttl_seconds: float = DEFAULT_TTL_SECONDS) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                scope        TEXT NOT NULL,
+                idem_key     TEXT NOT NULL,
+                fingerprint  TEXT NOT NULL,
+                state        TEXT NOT NULL CHECK (state IN ('in_flight', 'completed')),
+                status_code  INTEGER,
+                response_body BLOB,
+                content_type TEXT,
+                created_at   REAL NOT NULL,
+                PRIMARY KEY (scope, idem_key)
+            )
+            """
+        )
+        self._conn.commit()
+
+    def _prune_expired(self, now: float) -> None:
+        self._conn.execute(
+            "DELETE FROM idempotency_keys WHERE created_at + ? < ?",
+            (self.ttl_seconds, now),
+        )
+
+    def begin(
+        self, scope: str, key: str, fingerprint: str, now: Optional[float] = None
+    ) -> tuple[str, Optional[StoredResponse]]:
+        """Atomically claim a key or classify the collision.
+
+        Returns one of:
+          ("started",  None)   -- caller won the race and must execute,
+          ("replay",   stored) -- same fingerprint, completed: replay it,
+          ("mismatch", None)   -- same key, different payload: 422,
+          ("in_flight", None)  -- same key in flight concurrently: 409.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            self._prune_expired(now)
+            try:
+                self._conn.execute(
+                    "INSERT INTO idempotency_keys"
+                    " (scope, idem_key, fingerprint, state, created_at)"
+                    " VALUES (?, ?, ?, 'in_flight', ?)",
+                    (scope, key, fingerprint, now),
+                )
+                self._conn.commit()
+                return ("started", None)
+            except sqlite3.IntegrityError:
+                row = self._conn.execute(
+                    "SELECT fingerprint, state, status_code, response_body,"
+                    "       content_type"
+                    " FROM idempotency_keys WHERE scope = ? AND idem_key = ?",
+                    (scope, key),
+                ).fetchone()
+            if row is None:  # pragma: no cover - defensive
+                raise RuntimeError("idempotency row vanished mid-transaction")
+            if row[0] != fingerprint:
+                return ("mismatch", None)
+            if row[1] == "in_flight":
+                return ("in_flight", None)
+            return ("replay", StoredResponse(row[2], bytes(row[3]), row[4]))
+
+    def complete(
+        self, scope: str, key: str, stored: StoredResponse
+    ) -> None:
+        """Attach the finished response snapshot to the claimed key."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE idempotency_keys"
+                " SET state = 'completed', status_code = ?,"
+                "     response_body = ?, content_type = ?"
+                " WHERE scope = ? AND idem_key = ? AND state = 'in_flight'",
+                (stored.status_code, stored.body, stored.content_type, scope, key),
+            )
+            self._conn.commit()
+
+    def abandon(self, scope: str, key: str) -> None:
+        """Release the key after a 5xx/exception so the client may retry."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM idempotency_keys"
+                " WHERE scope = ? AND idem_key = ? AND state = 'in_flight'",
+                (scope, key),
+            )
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+def fingerprint_request(method: str, path: str, body: bytes) -> str:
+    """SHA-256 over method + route + canonical body.
+
+    Hashing only the body is a classic bug: the same JSON payload sent to
+    two different endpoints must not collide, so the route is part of the
+    fingerprint. JSON bodies are canonicalized so key order is irrelevant.
+    """
+    try:
+        canonical = json.dumps(
+            json.loads(body.decode("utf-8")), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        canonical = body
+    digest = hashlib.sha256()
+    digest.update(method.upper().encode("ascii"))
+    digest.update(b"\x00")
+    digest.update(path.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(canonical)
+    return digest.hexdigest()
+
+
+def _problem(status: int, title: str, detail: str, type_slug: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        media_type="application/problem+json",
+        content={
+            "type": f"https://api.northwind-robotics.example/problems/{type_slug}",
+            "title": title,
+            "status": status,
+            "detail": detail,
+        },
+    )
+
+
+class IdempotencyMiddleware(BaseHTTPMiddleware):
+    """Applies Idempotency-Key semantics to unsafe methods."""
+
+    def __init__(
+        self,
+        app: FastAPI,
+        store: IdempotencyStore,
+        methods: frozenset[str] = IDEMPOTENT_METHODS,
+    ) -> None:
+        super().__init__(app)
+        self.store = store
+        self.methods = methods
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        key = request.headers.get(IDEMPOTENCY_KEY_HEADER)
+        if request.method not in self.methods or not key:
+            return await call_next(request)
+
+        scope = request.headers.get("x-account-id", "anonymous")
+        body = await request.body()
+        fingerprint = fingerprint_request(request.method, request.url.path, body)
+
+        outcome, stored = self.store.begin(scope, key, fingerprint)
+        if outcome == "mismatch":
+            return _problem(
+                422,
+                "Idempotency-key payload mismatch",
+                "This Idempotency-Key was already used with a different request"
+                " payload. Keys identify one logical request; mint a new key"
+                " for a new operation.",
+                "idempotency-key-mismatch",
+            )
+        if outcome == "in_flight":
+            response = _problem(
+                409,
+                "Request with this idempotency key is in flight",
+                "A concurrent request carrying the same Idempotency-Key is"
+                " still being processed. Retry after a short backoff.",
+                "idempotency-key-in-flight",
+            )
+            response.headers["Retry-After"] = "1"
+            return response
+        if outcome == "replay" and stored is not None:
+            return Response(
+                content=stored.body,
+                status_code=stored.status_code,
+                media_type=stored.content_type,
+                headers={REPLAYED_HEADER: "true"},
+            )
+
+        # We claimed the key: execute and snapshot, or abandon on failure.
+        try:
+            downstream = await call_next(request)
+            body_bytes = b""
+            async for chunk in downstream.body_iterator:
+                body_bytes += chunk
+        except Exception:
+            self.store.abandon(scope, key)
+            raise
+
+        content_type = downstream.headers.get("content-type", "application/json")
+        if downstream.status_code < 500:
+            self.store.complete(
+                scope, key, StoredResponse(downstream.status_code, body_bytes, content_type)
+            )
+        else:
+            # Server-side failures are never replayed; free the key.
+            self.store.abandon(scope, key)
+        return Response(
+            content=body_bytes,
+            status_code=downstream.status_code,
+            media_type=content_type,
+        )
+
+
+# --------------------------------------------------------------------------
+# Demo application: Northwind Robotics payments ledger
+# --------------------------------------------------------------------------
+class TransferRequest(BaseModel):
+    """One funds movement between internal accounts."""
+
+    from_account: str = Field(min_length=1)
+    to_account: str = Field(min_length=1)
+    amount_cents: int = Field(gt=0)
+
+
+class TransferReceipt(BaseModel):
+    transfer_id: str
+    from_account: str
+    to_account: str
+    amount_cents: int
+    sequence: int
+
+
+class Ledger:
+    """Thread-safe in-memory ledger; the observable side effect under test."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._transfers: list[TransferReceipt] = []
+
+    def post(self, request: TransferRequest) -> TransferReceipt:
+        with self._lock:
+            receipt = TransferReceipt(
+                transfer_id=f"tr_{len(self._transfers) + 1:06d}",
+                from_account=request.from_account,
+                to_account=request.to_account,
+                amount_cents=request.amount_cents,
+                sequence=len(self._transfers) + 1,
+            )
+            self._transfers.append(receipt)
+            return receipt
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._transfers)
+
+    def total_cents(self) -> int:
+        with self._lock:
+            return sum(t.amount_cents for t in self._transfers)
+
+
+def create_app(store: Optional[IdempotencyStore] = None) -> FastAPI:
+    """Application factory; each test gets an isolated store + ledger."""
+    app = FastAPI(title="Northwind Robotics Payments", version="1.0.0")
+    app.state.store = store if store is not None else IdempotencyStore()
+    app.state.ledger = Ledger()
+    app.add_middleware(IdempotencyMiddleware, store=app.state.store)
+
+    @app.post("/api/v1/payments/transfers", status_code=201)
+    def create_transfer(payload: TransferRequest) -> TransferReceipt:
+        return app.state.ledger.post(payload)
+
+    return app
+\end{minted}
+
+The test suite proves every branch of the decision flow, culminating in the
+50-thread duplicate storm: fifty workers released on one barrier submit the
+identical keyed payload; the assertion battery checks that the ledger holds
+exactly one transfer, that all fifty callers received the byte-identical
+receipt, and that exactly one response was a non-replayed origin execution.
+
+\begin{minted}{python}
+"""Listing 10.1 test suite -- replay, mismatch, scope, and 50-thread storm.
+
+Concurrency tests assert on final state and response equality only; a
+threading.Barrier maximizes overlap without any timing dependence.
+"""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+from fastapi.testclient import TestClient
+
+from listing_10_1_idempotency_middleware import (
+    REPLAYED_HEADER,
+    IdempotencyStore,
+    create_app,
+    fingerprint_request,
+)
+
+PAYLOAD = {
+    "from_account": "ops-checking",
+    "to_account": "vendor-mecha-parts",
+    "amount_cents": 2500,
+}
+KEY = "9b6f3c1e-6d3a-4a2f-9f6d-0d0f5f3d2a01"
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    app = create_app()
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_first_request_executes_and_second_replays(client: TestClient) -> None:
+    first = client.post(
+        "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+    )
+    assert first.status_code == 201
+    assert REPLAYED_HEADER not in first.headers
+
+    replay = client.post(
+        "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+    )
+    assert replay.status_code == 201
+    assert replay.headers[REPLAYED_HEADER] == "true"
+    assert replay.json() == first.json()
+    assert client.app.state.ledger.count() == 1  # exactly-once effect
+
+
+def test_same_key_different_payload_is_422(client: TestClient) -> None:
+    client.post(
+        "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+    )
+    tampered = dict(PAYLOAD, amount_cents=9999)
+    response = client.post(
+        "/api/v1/payments/transfers", json=tampered, headers={"Idempotency-Key": KEY}
+    )
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert client.app.state.ledger.count() == 1
+
+
+def test_same_key_different_route_is_422(client: TestClient) -> None:
+    """The fingerprint covers the route, not just the body."""
+    client.post(
+        "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+    )
+    response = client.post(
+        "/api/v1/payments/refunds", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+    )
+    assert response.status_code == 422
+
+
+def test_keys_are_scoped_per_account(client: TestClient) -> None:
+    """The same key under another account is a different logical request."""
+    client.post(
+        "/api/v1/payments/transfers",
+        json=PAYLOAD,
+        headers={"Idempotency-Key": KEY, "X-Account-Id": "acct-alpha"},
+    )
+    other = client.post(
+        "/api/v1/payments/transfers",
+        json=PAYLOAD,
+        headers={"Idempotency-Key": KEY, "X-Account-Id": "acct-beta"},
+    )
+    assert other.status_code == 201
+    assert REPLAYED_HEADER not in other.headers
+    assert client.app.state.ledger.count() == 2
+
+
+def test_new_key_means_new_operation(client: TestClient) -> None:
+    for key in ("key-a", "key-b"):
+        response = client.post(
+            "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": key}
+        )
+        assert response.status_code == 201
+    assert client.app.state.ledger.count() == 2
+
+
+def test_in_flight_key_returns_409(client: TestClient) -> None:
+    """Deterministically seed an in-flight row, then collide with it."""
+    import json as _json
+    import time as _time
+
+    store: IdempotencyStore = client.app.state.store
+    body = _json.dumps(PAYLOAD).encode("utf-8")
+    fingerprint = fingerprint_request("POST", "/api/v1/payments/transfers", body)
+    outcome, _ = store.begin("anonymous", KEY, fingerprint, now=_time.time())
+    assert outcome == "started"  # row is now 'in_flight', never completed
+
+    response = client.post(
+        "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+    )
+    assert response.status_code == 409
+    assert response.headers["Retry-After"] == "1"
+    assert client.app.state.ledger.count() == 0
+
+
+def test_expired_key_is_collected_and_reused(client: TestClient) -> None:
+    store = IdempotencyStore(ttl_seconds=60)
+    app = create_app(store=store)
+    with TestClient(app) as expired_client:
+        old = expired_client.post(
+            "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+        )
+        assert old.status_code == 201
+        # Simulate time travel: age every row beyond the TTL.
+        store._conn.execute("UPDATE idempotency_keys SET created_at = created_at - 120")
+        store._conn.commit()
+        again = expired_client.post(
+            "/api/v1/payments/transfers", json=PAYLOAD, headers={"Idempotency-Key": KEY}
+        )
+        assert again.status_code == 201
+        assert REPLAYED_HEADER not in again.headers  # expired: treated as new
+        assert expired_client.app.state.ledger.count() == 2
+
+
+def test_fifty_concurrent_duplicate_submits_mutate_once(client: TestClient) -> None:
+    """50 threads, identical key + payload, released on one barrier.
+
+    Exactly one transfer may exist at the end; every client must observe
+    the same receipt body; exactly one response is a non-replayed origin
+    response. Duplicates that arrive while the winner is in flight get
+    409 and retry until the snapshot is available.
+    """
+    workers = 50
+    barrier = threading.Barrier(workers)
+    results: list[tuple[int, bytes, bool]] = []
+    results_lock = threading.Lock()
+
+    def submit() -> None:
+        barrier.wait()
+        attempts = 0
+        while True:
+            attempts += 1
+            assert attempts < 200, "retry storm did not converge"
+            response = client.post(
+                "/api/v1/payments/transfers",
+                json=PAYLOAD,
+                headers={"Idempotency-Key": KEY},
+            )
+            if response.status_code == 409:
+                continue  # winner still in flight; poll for the snapshot
+            with results_lock:
+                results.append(
+                    (
+                        response.status_code,
+                        response.content,
+                        response.headers.get(REPLAYED_HEADER) == "true",
+                    )
+                )
+            return
+
+    threads = [threading.Thread(target=submit) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert client.app.state.ledger.count() == 1  # one observable mutation
+    assert client.app.state.ledger.total_cents() == 2500
+    assert len(results) == workers
+    statuses = {status for status, _, _ in results}
+    bodies = {body for _, body, _ in results}
+    assert statuses == {201}
+    assert len(bodies) == 1  # every caller received the identical receipt
+    non_replayed = sum(1 for _, _, replayed in results if not replayed)
+    assert non_replayed == 1  # exactly one origin execution
+\end{minted}
+
+\subsection{Listing 10.2 --- Conditional Requests: Strong ETags and the 304 Flow}
+\label{sec:ch10-listing2}
+
+A strong validator is a content address: SHA-256 over the exact
+representation bytes, rendered from a canonical serializer (sorted keys,
+compact separators --- Chapter~4's canonicalization discipline doing double
+duty). The demo fetches a part, repeats the fetch conditionally, mutates the
+state, and prints the byte ledger: 200 with the full body, 304 with zero
+bytes, then a rotated ETag after the write.
+
+\begin{minted}{python}
+"""Listing 10.2 -- Conditional requests: strong ETags and the 304 flow.
+
+Northwind Robotics parts-catalog API. The ETag is a strong validator:
+SHA-256 over the exact representation bytes, so any byte-level change of
+the representation yields a new tag. The demo measures the bandwidth a
+304 Not Modified saves on a repeat fetch. Offline, deterministic.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+
+
+def strong_etag(representation: bytes) -> str:
+    """A strong validator: the quoted SHA-256 of the exact response bytes."""
+    return '"' + hashlib.sha256(representation).hexdigest() + '"'
+
+
+@dataclass
+class PartRecord:
+    sku: str
+    name: str
+    unit_price_cents: int
+    stock: int
+
+    def render(self) -> bytes:
+        """Canonical JSON bytes: one state maps to exactly one byte string."""
+        return json.dumps(
+            {
+                "sku": self.sku,
+                "name": self.name,
+                "unit_price_cents": self.unit_price_cents,
+                "stock": self.stock,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+
+CATALOG: dict[str, PartRecord] = {
+    "NWR-AXLE-42": PartRecord("NWR-AXLE-42", "Heavy-duty drive axle", 189_99, 35),
+    "NWR-SERVO-7": PartRecord("NWR-SERVO-7", "Precision servo motor", 74_50, 212),
+}
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Catalog", version="1.0.0")
+
+    @app.get("/parts/{sku}")
+    def get_part(sku: str, request: Request) -> Response:
+        part = CATALOG.get(sku)
+        if part is None:
+            return Response(status_code=404)
+        body = part.render()
+        etag = strong_etag(body)
+        headers = {
+            "ETag": etag,
+            "Cache-Control": "public, max-age=60",
+        }
+        if request.headers.get("if-none-match") == etag:
+            # Validator matches: the client's copy is current. Send no body.
+            return Response(status_code=304, headers=headers)
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers=headers,
+        )
+
+    @app.post("/parts/{sku}/restock", status_code=200)
+    def restock(sku: str, units: int) -> dict[str, object]:
+        part = CATALOG[sku]
+        part.stock += units  # state change -> new representation -> new ETag
+        return {"sku": sku, "stock": part.stock}
+
+    return app
+
+
+def measure_conditional_savings() -> dict[str, int | float | bool]:
+    """Fetch a part twice; the second fetch is a conditional GET.
+
+    Returns byte counts proving the 304 path transfers no representation.
+    """
+    from fastapi.testclient import TestClient
+
+    snapshot = CATALOG["NWR-AXLE-42"].stock  # keep the module fixture stable
+    try:
+        with TestClient(create_app()) as client:
+            first = client.get("/parts/NWR-AXLE-42")
+            assert first.status_code == 200
+            etag = first.headers["etag"]
+            first_bytes = len(first.content)
+
+            second = client.get(
+                "/parts/NWR-AXLE-42", headers={"If-None-Match": etag}
+            )
+            assert second.status_code == 304
+            assert second.headers["etag"] == etag
+            second_bytes = len(second.content)
+
+            # The origin state changes: the old validator no longer matches.
+            client.post("/parts/NWR-AXLE-42/restock", params={"units": 5})
+            third = client.get(
+                "/parts/NWR-AXLE-42", headers={"If-None-Match": etag}
+            )
+            assert third.status_code == 200
+            assert third.headers["etag"] != etag
+
+            saved_pct = 100.0 * (1 - second_bytes / first_bytes)
+            return {
+                "first_status": first.status_code,
+                "first_bytes": first_bytes,
+                "second_status": second.status_code,
+                "second_bytes": second_bytes,
+                "saved_pct": round(saved_pct, 1),
+                "etag_rotated_after_restock": third.headers["etag"] != etag,
+            }
+    finally:
+        CATALOG["NWR-AXLE-42"].stock = snapshot
+
+
+if __name__ == "__main__":
+    stats = measure_conditional_savings()
+    print("Conditional-request bandwidth measurement")
+    print("-----------------------------------------")
+    print(f"initial GET      : {stats['first_status']} "
+          f"({stats['first_bytes']} bytes)")
+    print(f"conditional GET  : {stats['second_status']} "
+          f"({stats['second_bytes']} bytes)")
+    print(f"bandwidth saved  : {stats['saved_pct']}%")
+    print(f"ETag rotated on write: {stats['etag_rotated_after_restock']}")
+\end{minted}
+
+\begin{minted}{python}
+"""Listing 10.2 tests -- ETag stability, 304 flow, rotation on mutation."""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from listing_10_2_conditional_requests import (
+    CATALOG,
+    create_app,
+    measure_conditional_savings,
+    strong_etag,
+)
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    with TestClient(create_app()) as test_client:
+        yield test_client
+    CATALOG["NWR-AXLE-42"].stock = 35  # restore the seeded fixture
+
+
+def test_strong_etag_is_content_addressed() -> None:
+    assert strong_etag(b"payload") == strong_etag(b"payload")
+    assert strong_etag(b"payload") != strong_etag(b"payloae")
+    assert strong_etag(b"x").startswith('"') and strong_etag(b"x").endswith('"')
+
+
+def test_repeat_get_yields_identical_etag(client: TestClient) -> None:
+    one = client.get("/parts/NWR-AXLE-42")
+    two = client.get("/parts/NWR-AXLE-42")
+    assert one.headers["etag"] == two.headers["etag"]
+    assert one.headers["cache-control"] == "public, max-age=60"
+
+
+def test_if_none_match_short_circuits_to_304(client: TestClient) -> None:
+    etag = client.get("/parts/NWR-SERVO-7").headers["etag"]
+    response = client.get("/parts/NWR-SERVO-7", headers={"If-None-Match": etag})
+    assert response.status_code == 304
+    assert response.content == b""
+    assert response.headers["etag"] == etag  # 304 still carries validators
+
+
+def test_mutation_rotates_etag_and_invalidates_cache(client: TestClient) -> None:
+    before = client.get("/parts/NWR-AXLE-42")
+    client.post("/parts/NWR-AXLE-42/restock", params={"units": 10})
+    after = client.get(
+        "/parts/NWR-AXLE-42", headers={"If-None-Match": before.headers["etag"]}
+    )
+    assert after.status_code == 200
+    assert after.headers["etag"] != before.headers["etag"]
+    assert after.json()["stock"] == 45
+
+
+def test_unknown_part_is_404(client: TestClient) -> None:
+    assert client.get("/parts/NOPE-1").status_code == 404
+
+
+def test_demo_reports_full_savings() -> None:
+    stats = measure_conditional_savings()
+    assert stats["second_status"] == 304
+    assert stats["second_bytes"] == 0
+    assert stats["saved_pct"] == 100.0
+    assert stats["etag_rotated_after_restock"] is True
+\end{minted}
+
+Running the demo prints the measured savings:
+
+\begin{minted}{text}
+Conditional-request bandwidth measurement
+-----------------------------------------
+initial GET      : 200 (88 bytes)
+conditional GET  : 304 (0 bytes)
+bandwidth saved  : 100.0%
+ETag rotated on write: True
+\end{minted}
+
+\subsection{Listing 10.3 --- Optimistic Locking with If-Match on Inventory}
+\label{sec:ch10-listing3}
+
+The inventory resource stamps every representation with a version-derived
+strong ETag (\texttt{"v3"}) and refuses blind writes: no \texttt{If-Match}
+is 428, a stale \texttt{If-Match} is 412, and only an exact match reaches
+the atomic compare-and-swap. The status codes are not decoration --- each
+selects a different client recovery strategy (add the header; re-read and
+re-decide; resolve a business conflict).
+
+\begin{minted}{python}
+"""Listing 10.3 -- Optimistic locking with If-Match on an inventory API.
+
+Northwind Robotics warehouse inventory. Every representation carries a
+version-derived ETag (``"v3"``). Writes must present ``If-Match``:
+
+* header missing           -> 428 Precondition Required,
+* header does not match    -> 412 Precondition Failed (lost update refused),
+* header matches           -> write applied, version incremented.
+
+The version counter is a strong validator here because the representation
+is a pure function of the stored state: equal versions imply byte-identical
+bodies. Offline, deterministic.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import dataclass
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
+
+
+@dataclass
+class InventoryRecord:
+    sku: str
+    quantity: int
+    version: int
+
+    def render(self) -> bytes:
+        return json.dumps(
+            {"sku": self.sku, "quantity": self.quantity, "version": self.version},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @property
+    def etag(self) -> str:
+        return f'"v{self.version}"'
+
+
+class InventoryStore:
+    """Thread-safe in-memory inventory keyed by SKU."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._records = {
+            "NWR-AXLE-42": InventoryRecord("NWR-AXLE-42", quantity=35, version=1),
+            "NWR-SERVO-7": InventoryRecord("NWR-SERVO-7", quantity=212, version=1),
+        }
+
+    def get(self, sku: str) -> InventoryRecord | None:
+        with self._lock:
+            record = self._records.get(sku)
+            if record is None:
+                return None
+            return InventoryRecord(record.sku, record.quantity, record.version)
+
+    def compare_and_swap(
+        self, sku: str, expected_etag: str, new_quantity: int
+    ) -> tuple[str, InventoryRecord | None]:
+        """Atomic check-and-set. Returns ('not_found'|'mismatch'|'updated', record)."""
+        with self._lock:
+            record = self._records.get(sku)
+            if record is None:
+                return ("not_found", None)
+            if record.etag != expected_etag:
+                return (
+                    "mismatch",
+                    InventoryRecord(record.sku, record.quantity, record.version),
+                )
+            updated = InventoryRecord(sku, new_quantity, record.version + 1)
+            self._records[sku] = updated
+            return ("updated", updated)
+
+
+def _problem(status: int, title: str, detail: str, slug: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        media_type="application/problem+json",
+        content={
+            "type": f"https://api.northwind-robotics.example/problems/{slug}",
+            "title": title,
+            "status": status,
+            "detail": detail,
+        },
+    )
+
+
+class InventoryUpdate(BaseModel):
+    quantity: int = Field(ge=0)
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Inventory", version="1.0.0")
+    app.state.store = InventoryStore()
+
+    @app.get("/inventory/{sku}")
+    def get_inventory(sku: str) -> Response:
+        record = app.state.store.get(sku)
+        if record is None:
+            return Response(status_code=404)
+        return Response(
+            content=record.render(),
+            media_type="application/json",
+            headers={"ETag": record.etag},
+        )
+
+    @app.put("/inventory/{sku}")
+    def put_inventory(
+        sku: str, payload: InventoryUpdate, request: Request
+    ) -> Response:
+        if_match = request.headers.get("if-match")
+        if if_match is None:
+            return _problem(
+                428,
+                "Precondition required",
+                "Writes to this resource must be conditional: send If-Match"
+                " with the ETag of the representation you based your edit on.",
+                "precondition-required",
+            )
+        outcome, record = app.state.store.compare_and_swap(
+            sku, if_match, payload.quantity
+        )
+        if outcome == "not_found":
+            return Response(status_code=404)
+        if outcome == "mismatch" and record is not None:
+            return _problem(
+                412,
+                "Precondition failed",
+                "The resource changed since your copy: current ETag is"
+                f" {record.etag}, you sent If-Match: {if_match}. Re-read,"
+                " re-decide, and retry.",
+                "precondition-failed",
+            )
+        assert record is not None
+        return Response(
+            content=record.render(),
+            media_type="application/json",
+            headers={"ETag": record.etag},
+        )
+
+    return app
+\end{minted}
+
+\begin{minted}{python}
+"""Listing 10.3 tests -- 428/412 selection and lost-update prevention.
+
+The concurrency test drives a deterministic read-modify-write storm:
+every writer retries with a fresh read until its compare-and-set wins,
+so the final state must equal the sum of all intended increments.
+"""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+from fastapi.testclient import TestClient
+
+from listing_10_3_optimistic_locking import create_app
+
+SKU = "NWR-AXLE-42"
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    with TestClient(create_app()) as test_client:
+        yield test_client
+
+
+def test_write_without_if_match_is_428(client: TestClient) -> None:
+    response = client.put(f"/inventory/{SKU}", json={"quantity": 30})
+    assert response.status_code == 428
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert client.get(f"/inventory/{SKU}").json()["quantity"] == 35
+
+
+def test_stale_if_match_is_412_and_state_is_untouched(client: TestClient) -> None:
+    etag_v1 = client.get(f"/inventory/{SKU}").headers["etag"]
+    # Someone else writes first.
+    winner = client.put(
+        f"/inventory/{SKU}", json={"quantity": 30}, headers={"If-Match": etag_v1}
+    )
+    assert winner.status_code == 200
+    # Our stale write must be rejected.
+    loser = client.put(
+        f"/inventory/{SKU}", json={"quantity": 25}, headers={"If-Match": etag_v1}
+    )
+    assert loser.status_code == 412
+    state = client.get(f"/inventory/{SKU}").json()
+    assert state["quantity"] == 30  # the winner's value, not the stale one
+    assert state["version"] == 2
+
+
+def test_lost_update_scenario_is_prevented(client: TestClient) -> None:
+    """The textbook interleaving: A and B both read v1; A writes; B must lose."""
+    read_a = client.get(f"/inventory/{SKU}")
+    read_b = client.get(f"/inventory/{SKU}")
+    assert read_a.headers["etag"] == read_b.headers["etag"] == '"v1"'
+
+    # A decides from its copy: reserve 5 of 35 -> 30.
+    ok = client.put(
+        f"/inventory/{SKU}",
+        json={"quantity": 35 - 5},
+        headers={"If-Match": read_a.headers["etag"]},
+    )
+    assert ok.status_code == 200
+    assert ok.headers["etag"] == '"v2"'
+
+    # B decides from the same stale copy: reserve 8 of 35 -> 27. Refused.
+    refused = client.put(
+        f"/inventory/{SKU}",
+        json={"quantity": 35 - 8},
+        headers={"If-Match": read_b.headers["etag"]},
+    )
+    assert refused.status_code == 412
+
+    # B re-reads, re-decides against current truth, and retries.
+    fresh = client.get(f"/inventory/{SKU}")
+    retried = client.put(
+        f"/inventory/{SKU}",
+        json={"quantity": fresh.json()["quantity"] - 8},
+        headers={"If-Match": fresh.headers["etag"]},
+    )
+    assert retried.status_code == 200
+    final = client.get(f"/inventory/{SKU}").json()
+    assert final["quantity"] == 35 - 5 - 8  # both reservations, none lost
+    assert final["version"] == 3
+
+
+def test_unknown_sku_is_404(client: TestClient) -> None:
+    assert client.get("/inventory/NOPE").status_code == 404
+    assert (
+        client.put(
+            "/inventory/NOPE", json={"quantity": 1}, headers={"If-Match": '"v1"'}
+        ).status_code
+        == 404
+    )
+
+
+def test_negative_quantity_is_rejected(client: TestClient) -> None:
+    etag = client.get(f"/inventory/{SKU}").headers["etag"]
+    response = client.put(
+        f"/inventory/{SKU}", json={"quantity": -1}, headers={"If-Match": etag}
+    )
+    assert response.status_code == 422
+
+
+def test_concurrent_read_modify_write_storm_loses_nothing(client: TestClient) -> None:
+    """20 threads each increment by one under optimistic retry.
+
+    A writer loops: read -> compute -> conditional write; on 412 it
+    re-reads and retries. Loop termination is state-driven (a successful
+    compare-and-set), never timing-driven.
+    """
+    workers = 20
+    barrier = threading.Barrier(workers)
+    attempts: list[int] = []
+    attempts_lock = threading.Lock()
+
+    def increment_once() -> None:
+        barrier.wait()
+        tries = 0
+        while True:
+            tries += 1
+            assert tries < 500, "optimistic retry loop did not converge"
+            current = client.get(f"/inventory/{SKU}")
+            etag = current.headers["etag"]
+            target = current.json()["quantity"] + 1
+            written = client.put(
+                f"/inventory/{SKU}",
+                json={"quantity": target},
+                headers={"If-Match": etag},
+            )
+            if written.status_code == 200:
+                with attempts_lock:
+                    attempts.append(tries)
+                return
+            assert written.status_code == 412  # only contention may fail us
+
+    threads = [threading.Thread(target=increment_once) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    final = client.get(f"/inventory/{SKU}").json()
+    assert final["quantity"] == 35 + workers  # every increment landed
+    assert final["version"] == 1 + workers    # one version per accepted write
+    assert len(attempts) == workers
+\end{minted}
+
+\subsection{Listing 10.4 --- Double-Submit Storm Harness}
+\label{sec:ch10-listing4}
+
+This harness reproduces the incident shape --- fifty identical
+\texttt{POST /transfers} requests fired from one barrier --- twice: once as
+the unsafe legacy client (no key, every duplicate executes) and once with
+the \texttt{Idempotency-Key}. The output is the chapter's thesis in two
+lines of measured output.
+
+\begin{minted}{python}
+"""Listing 10.4 -- Double-submit storm harness.
+
+Reproduces the classic checkout bug -- a user double-clicks "Pay", the
+load balancer retries a timed-out request, or a mobile client re-sends on
+flaky Wi-Fi -- and proves that an Idempotency-Key turns a storm of N
+duplicate requests into exactly one observable mutation.
+
+The harness is deterministic: workers are released on one
+threading.Barrier, retries on 409 are state-driven (poll until the winner
+publishes its snapshot), and every assertion is on final state, never on
+timing. Run directly for a printed before/after comparison.
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+
+from fastapi.testclient import TestClient
+
+from listing_10_1_idempotency_middleware import REPLAYED_HEADER, create_app
+
+TRANSFERS_URL = "/api/v1/payments/transfers"
+PAYLOAD = {
+    "from_account": "ops-checking",
+    "to_account": "vendor-mecha-parts",
+    "amount_cents": 2500,
+}
+
+
+@dataclass(frozen=True)
+class StormResult:
+    """What a storm of duplicate submits produced."""
+
+    workers: int
+    status_codes: list[int] = field(default_factory=list)
+    bodies: set[bytes] = field(default_factory=set)
+    replayed_count: int = 0
+    ledger_entries: int = 0
+    ledger_total_cents: int = 0
+
+
+def run_double_submit_storm(
+    workers: int = 50, use_idempotency_key: bool = True
+) -> StormResult:
+    """Fire ``workers`` identical POSTs at the API from a single barrier.
+
+    With ``use_idempotency_key=False`` this simulates the unsafe legacy
+    client: every request executes. With the key, exactly one executes.
+    """
+    app = create_app()
+    key = "storm-" + ("keyed" if use_idempotency_key else "naive")
+
+    with TestClient(app) as client:
+        barrier = threading.Barrier(workers)
+        status_codes: list[int] = []
+        bodies: set[bytes] = set()
+        replayed = 0
+        lock = threading.Lock()
+
+        def submit() -> None:
+            nonlocal replayed
+            headers = (
+                {"Idempotency-Key": key} if use_idempotency_key else {}
+            )
+            barrier.wait()
+            attempts = 0
+            while True:
+                attempts += 1
+                assert attempts < 200, "storm did not converge"
+                response = client.post(TRANSFERS_URL, json=PAYLOAD, headers=headers)
+                if response.status_code == 409 and use_idempotency_key:
+                    continue  # winner in flight; poll for its snapshot
+                with lock:
+                    status_codes.append(response.status_code)
+                    bodies.add(response.content)
+                    if response.headers.get(REPLAYED_HEADER) == "true":
+                        replayed += 1
+                return
+
+        threads = [threading.Thread(target=submit) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        return StormResult(
+            workers=workers,
+            status_codes=status_codes,
+            bodies=bodies,
+            replayed_count=replayed,
+            ledger_entries=app.state.ledger.count(),
+            ledger_total_cents=app.state.ledger.total_cents(),
+        )
+
+
+def main() -> None:
+    print("Double-submit storm: 50 identical POST /transfers")
+    print("=" * 52)
+    naive = run_double_submit_storm(workers=50, use_idempotency_key=False)
+    print(f"without Idempotency-Key : {naive.ledger_entries} ledger entries,"
+          f" {naive.ledger_total_cents} cents moved  <-- the incident")
+    keyed = run_double_submit_storm(workers=50, use_idempotency_key=True)
+    print(f"with    Idempotency-Key : {keyed.ledger_entries} ledger entry,"
+          f" {keyed.ledger_total_cents} cents moved, "
+          f"{keyed.replayed_count} replayed responses")
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\begin{minted}{python}
+"""Listing 10.4 tests -- the storm harness proves effectively-once."""
+
+from __future__ import annotations
+
+from listing_10_4_double_submit_storm import run_double_submit_storm
+
+
+def test_naive_client_executes_every_duplicate() -> None:
+    """The unsafe baseline: no key, so all 50 duplicates charge through."""
+    result = run_double_submit_storm(workers=50, use_idempotency_key=False)
+    assert result.ledger_entries == 50
+    assert result.ledger_total_cents == 50 * 2500
+    assert set(result.status_codes) == {201}
+    assert result.replayed_count == 0
+
+
+def test_keyed_storm_mutates_exactly_once() -> None:
+    result = run_double_submit_storm(workers=50, use_idempotency_key=True)
+    assert result.ledger_entries == 1
+    assert result.ledger_total_cents == 2500
+    assert set(result.status_codes) == {201}
+    assert len(result.bodies) == 1  # identical receipt for every caller
+    # Exactly one origin execution; the other 49 observed the replay.
+    assert result.replayed_count == 49
+
+
+def test_small_storms_also_collapse_to_one_mutation() -> None:
+    for workers in (2, 3, 7):
+        result = run_double_submit_storm(workers=workers, use_idempotency_key=True)
+        assert result.ledger_entries == 1
+        assert result.replayed_count == workers - 1
+\end{minted}
+
+\begin{minted}{text}
+Double-submit storm: 50 identical POST /transfers
+====================================================
+without Idempotency-Key : 50 ledger entries, 125000 cents moved  <-- the incident
+with    Idempotency-Key : 1 ledger entry, 2500 cents moved, 49 replayed responses
+\end{minted}
+
+\subsection{Listing 10.5 --- Cache-Policy Simulator}
+\label{sec:ch10-listing5}
+
+The simulator makes RFC~9111 executable: parse a \texttt{Cache-Control}
+policy, script an origin's behavior over a logical timeline (representations
+change at $t=70$, the origin falls over at $t=130$), and compute the exact
+outcome of every request --- HIT, MISS, revalidation hit or miss,
+stale-while-revalidate, stale-if-error, bypass. Because time is a logical
+integer and the origin is a sorted script, every run is bit-for-bit
+reproducible, which makes the simulator a teaching instrument and a policy
+test harness at once.
+
+\begin{minted}{python}
+"""Listing 10.5 -- Cache-policy simulator (pure stdlib).
+
+Given a response's cache policy (Cache-Control directives + validators)
+and a deterministic request timeline against a scripted origin, compute
+the outcome of every request: HIT, MISS, revalidation, stale serve, or
+bypass. Teaches RFC 9111 freshness semantics without a network.
+
+Time is a logical integer (seconds); the origin is a script of
+(t, state) changes, so every run is bit-for-bit reproducible.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from typing import Optional
+
+HEURISTIC_FRACTION = 0.1  # RFC 9111 heuristic: 10% of (Date - Last-Modified)
+
+
+# --------------------------------------------------------------------------
+# Policy parsing
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CachePolicy:
+    """The cache-relevant slice of one origin response."""
+
+    no_store: bool = False
+    no_cache: bool = False
+    must_revalidate: bool = False
+    public: bool = False
+    private: bool = False
+    max_age: Optional[float] = None
+    stale_while_revalidate: Optional[float] = None
+    stale_if_error: Optional[float] = None
+    etag: Optional[str] = None
+    last_modified: Optional[float] = None
+    date: float = 0.0
+
+    def freshness_lifetime(self) -> float:
+        """Explicit max-age wins; otherwise the RFC 9111 heuristic."""
+        if self.max_age is not None:
+            return self.max_age
+        if self.last_modified is not None:
+            return HEURISTIC_FRACTION * max(0.0, self.date - self.last_modified)
+        return 0.0
+
+
+def parse_cache_control(value: str) -> dict[str, Optional[str]]:
+    """'public, max-age=60' -> {'public': None, 'max-age': '60'}."""
+    directives: dict[str, Optional[str]] = {}
+    for token in value.split(","):
+        name, _, arg = token.strip().partition("=")
+        if name:
+            directives[name.lower()] = arg.strip('"') if arg else None
+    return directives
+
+
+def policy_from_headers(
+    cache_control: str,
+    *,
+    etag: Optional[str] = None,
+    last_modified: Optional[float] = None,
+    date: float = 0.0,
+) -> CachePolicy:
+    d = parse_cache_control(cache_control)
+    return CachePolicy(
+        no_store="no-store" in d,
+        no_cache="no-cache" in d,
+        must_revalidate="must-revalidate" in d,
+        public="public" in d,
+        private="private" in d,
+        max_age=float(d["max-age"]) if d.get("max-age") is not None else None,
+        stale_while_revalidate=(
+            float(d["stale-while-revalidate"])
+            if d.get("stale-while-revalidate") is not None
+            else None
+        ),
+        stale_if_error=(
+            float(d["stale-if-error"])
+            if d.get("stale-if-error") is not None
+            else None
+        ),
+        etag=etag,
+        last_modified=last_modified,
+        date=date,
+    )
+
+
+# --------------------------------------------------------------------------
+# Scripted origin
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class OriginState:
+    status: int  # 200 or 500
+    etag: str
+    body_version: int
+
+
+class ScriptedOrigin:
+    """A deterministic origin: a sorted script of (t, OriginState) changes."""
+
+    def __init__(self, script: list[tuple[float, OriginState]]) -> None:
+        if not script:
+            raise ValueError("origin script needs at least one state")
+        self._script = sorted(script, key=lambda item: item[0])
+        self.fetch_count = 0
+
+    def state_at(self, t: float) -> OriginState:
+        state = self._script[0][1]
+        for change_at, candidate in self._script:
+            if change_at <= t:
+                state = candidate
+            else:
+                break
+        return state
+
+    def fetch(self, t: float) -> OriginState:
+        self.fetch_count += 1
+        return self.state_at(t)
+
+
+# --------------------------------------------------------------------------
+# The cache
+# --------------------------------------------------------------------------
+@dataclass
+class StoredEntry:
+    policy: CachePolicy
+    etag: str
+    body_version: int
+    stored_at: float
+
+
+HIT = "HIT"
+MISS = "MISS"
+REVALIDATED_HIT = "REVALIDATED_HIT"    # conditional GET -> 304
+REVALIDATED_MISS = "REVALIDATED_MISS"  # conditional GET -> 200 (new ETag)
+STALE_WHILE_REVALIDATE = "STALE_WHILE_REVALIDATE"
+STALE_IF_ERROR = "STALE_IF_ERROR"
+ERROR = "ERROR"     # origin down, nothing servable
+BYPASS = "BYPASS"   # no-store: never reused
+
+
+class SimulatedCache:
+    """Single-entry shared cache executing RFC 9111 freshness decisions."""
+
+    def __init__(self, origin: ScriptedOrigin) -> None:
+        self.origin = origin
+        self.stored: Optional[StoredEntry] = None
+        self.stats: Counter[str] = Counter()
+
+    def request(self, t: float) -> str:
+        outcome = self._serve(t)
+        self.stats[outcome] += 1
+        return outcome
+
+    def _serve(self, t: float) -> str:
+        entry = self.stored
+        if entry is None or entry.policy.no_store:
+            return self._fetch_and_store(t, miss_label=MISS if entry is None else BYPASS)
+
+        policy = entry.policy
+        age = t - entry.stored_at
+        lifetime = policy.freshness_lifetime()
+        fresh = age <= lifetime and not policy.no_cache
+
+        if fresh:
+            return HIT
+
+        # Stale-while-revalidate: serve stale now, refresh in the background.
+        if (
+            policy.stale_while_revalidate is not None
+            and not policy.no_cache
+            and not policy.must_revalidate
+            and age <= lifetime + policy.stale_while_revalidate
+        ):
+            self._background_revalidate(t, entry)
+            return STALE_WHILE_REVALIDATE
+
+        return self._revalidate(t, entry, age, lifetime)
+
+    def _revalidate(
+        self, t: float, entry: StoredEntry, age: float, lifetime: float
+    ) -> str:
+        policy = entry.policy
+        origin_state = self.origin.fetch(t)
+        if origin_state.status >= 500:
+            if (
+                policy.stale_if_error is not None
+                and not policy.must_revalidate
+                and age <= lifetime + policy.stale_if_error
+            ):
+                return STALE_IF_ERROR
+            return ERROR
+        if origin_state.etag == entry.etag:
+            # 304: freshen the stored entry in place.
+            entry.stored_at = t
+            return REVALIDATED_HIT
+        # 200: a new representation replaces the entry.
+        self.stored = StoredEntry(
+            policy=entry.policy,
+            etag=origin_state.etag,
+            body_version=origin_state.body_version,
+            stored_at=t,
+        )
+        return REVALIDATED_MISS
+
+    def _background_revalidate(self, t: float, entry: StoredEntry) -> None:
+        """Model the async refresh synchronously for determinism."""
+        origin_state = self.origin.fetch(t)
+        if origin_state.status < 500:
+            self.stored = StoredEntry(
+                policy=entry.policy,
+                etag=origin_state.etag,
+                body_version=origin_state.body_version,
+                stored_at=t,
+            )
+
+    def _fetch_and_store(self, t: float, miss_label: str) -> str:
+        origin_state = self.origin.fetch(t)
+        if origin_state.status >= 500:
+            return ERROR
+        policy = CachePolicy(
+            max_age=60, etag=origin_state.etag, date=t
+        )  # demo default; scenarios override via inject()
+        if self.stored is not None and self.stored.policy.no_store:
+            return miss_label  # BYPASS: policy forbids storage entirely
+        self.stored = StoredEntry(
+            policy=policy,
+            etag=origin_state.etag,
+            body_version=origin_state.body_version,
+            stored_at=t,
+        )
+        return miss_label
+
+    def inject(self, policy: CachePolicy, t: float) -> None:
+        """Prime the cache with an entry under an explicit policy."""
+        state = self.origin.state_at(t)
+        self.stored = StoredEntry(
+            policy=policy,
+            etag=state.etag,
+            body_version=state.body_version,
+            stored_at=t,
+        )
+
+
+def run_timeline(cache: SimulatedCache, times: list[float]) -> list[str]:
+    return [cache.request(t) for t in times]
+
+
+if __name__ == "__main__":
+    origin = ScriptedOrigin(
+        [
+            (0, OriginState(200, '"v1"', 1)),
+            (70, OriginState(200, '"v2"', 2)),
+            (130, OriginState(500, '"v2"', 2)),
+        ]
+    )
+    cache = SimulatedCache(origin)
+    cache.request(0)  # MISS, stores v1 with max-age=60
+    print("t=10  :", cache.request(10))    # HIT
+    print("t=80  :", cache.request(80))    # revalidate -> new etag v2
+    print("t=150 :", cache.request(150))   # stale, origin down
+    print("stats :", dict(cache.stats))
+\end{minted}
+
+\begin{minted}{python}
+"""Listing 10.5 tests -- directive semantics, proven on scripted timelines."""
+
+from __future__ import annotations
+
+from listing_10_5_cache_simulator import (
+    BYPASS,
+    ERROR,
+    HIT,
+    MISS,
+    OriginState,
+    REVALIDATED_HIT,
+    REVALIDATED_MISS,
+    STALE_IF_ERROR,
+    STALE_WHILE_REVALIDATE,
+    SimulatedCache,
+    ScriptedOrigin,
+    parse_cache_control,
+    policy_from_headers,
+    run_timeline,
+)
+
+
+def make_cache(
+    script: list[tuple[float, OriginState]] | None = None,
+) -> SimulatedCache:
+    if script is None:
+        script = [(0, OriginState(200, '"v1"', 1))]
+    return SimulatedCache(ScriptedOrigin(script))
+
+
+def test_parse_cache_control() -> None:
+    d = parse_cache_control('public, max-age=60, stale-while-revalidate=30')
+    assert d == {"public": None, "max-age": "60", "stale-while-revalidate": "30"}
+
+
+def test_max_age_governs_freshness() -> None:
+    cache = make_cache()
+    cache.inject(policy_from_headers("public, max-age=60", etag='"v1"'), t=0)
+    assert run_timeline(cache, [10, 60]) == [HIT, HIT]
+    assert cache.request(61) == REVALIDATED_HIT  # stale -> conditional GET -> 304
+    assert cache.request(70) == HIT  # freshened by the 304
+
+
+def test_no_store_never_caches() -> None:
+    cache = make_cache()
+    cache.inject(policy_from_headers("no-store", etag='"v1"'), t=0)
+    assert run_timeline(cache, [1, 2, 3]) == [BYPASS, BYPASS, BYPASS]
+    assert cache.origin.fetch_count == 3  # every request hits the origin
+
+
+def test_no_cache_revalidates_every_time() -> None:
+    cache = make_cache()
+    cache.inject(
+        policy_from_headers("no-cache", etag='"v1"', date=0), t=0
+    )
+    # Validators make each revalidation cheap (304), but nothing is served
+    # without contacting the origin first.
+    assert run_timeline(cache, [1, 2]) == [REVALIDATED_HIT, REVALIDATED_HIT]
+    assert cache.origin.fetch_count == 2
+
+
+def test_heuristic_freshness_without_max_age() -> None:
+    cache = make_cache()
+    # Last-Modified 1000s before Date -> heuristic freshness = 100s.
+    policy = policy_from_headers(
+        "public", etag='"v1"', last_modified=0.0, date=1000.0
+    )
+    cache.inject(policy, t=1000.0)
+    assert cache.request(1050.0) == HIT
+    assert cache.request(1200.0) == REVALIDATED_HIT
+
+
+def test_changed_etag_yields_revalidated_miss() -> None:
+    cache = make_cache(
+        [
+            (0, OriginState(200, '"v1"', 1)),
+            (50, OriginState(200, '"v2"', 2)),
+        ]
+    )
+    cache.inject(policy_from_headers("public, max-age=10", etag='"v1"'), t=0)
+    assert cache.request(60) == REVALIDATED_MISS  # 200 with new body
+    assert cache.stored is not None and cache.stored.etag == '"v2"'
+    assert cache.request(65) == HIT  # the fresh replacement now serves
+
+
+def test_stale_while_revalidate_serves_stale_then_refreshes() -> None:
+    cache = make_cache(
+        [
+            (0, OriginState(200, '"v1"', 1)),
+            (40, OriginState(200, '"v2"', 2)),
+        ]
+    )
+    cache.inject(
+        policy_from_headers(
+            "public, max-age=30, stale-while-revalidate=60", etag='"v1"'
+        ),
+        t=0,
+    )
+    assert cache.request(50) == STALE_WHILE_REVALIDATE  # stale served...
+    assert cache.stored is not None and cache.stored.etag == '"v2"'  # ...refreshed
+    assert cache.request(55) == HIT
+
+
+def test_stale_if_error_rescues_an_origin_outage() -> None:
+    cache = make_cache(
+        [
+            (0, OriginState(200, '"v1"', 1)),
+            (100, OriginState(500, '"v1"', 1)),
+        ]
+    )
+    cache.inject(
+        policy_from_headers("public, max-age=30, stale-if-error=300", etag='"v1"'),
+        t=0,
+    )
+    assert cache.request(120) == STALE_IF_ERROR  # origin down, stale saved us
+
+
+def test_must_revalidate_forbids_stale_if_error() -> None:
+    cache = make_cache(
+        [
+            (0, OriginState(200, '"v1"', 1)),
+            (100, OriginState(500, '"v1"', 1)),
+        ]
+    )
+    cache.inject(
+        policy_from_headers(
+            "public, max-age=30, must-revalidate, stale-if-error=300", etag='"v1"'
+        ),
+        t=0,
+    )
+    assert cache.request(120) == ERROR  # must-revalidate wins: no stale serve
+
+
+def test_full_demo_timeline_is_deterministic() -> None:
+    def run() -> tuple[list[str], dict[str, int]]:
+        origin = ScriptedOrigin(
+            [
+                (0, OriginState(200, '"v1"', 1)),
+                (70, OriginState(200, '"v2"', 2)),
+                (130, OriginState(500, '"v2"', 2)),
+            ]
+        )
+        cache = SimulatedCache(origin)
+        outcomes = run_timeline(cache, [0, 10, 80, 100, 150])
+        return outcomes, dict(cache.stats)
+
+    first_outcomes, first_stats = run()
+    second_outcomes, second_stats = run()
+    assert first_outcomes == second_outcomes  # bit-for-bit reproducible
+    assert first_stats == second_stats
+    assert first_outcomes == [MISS, HIT, REVALIDATED_MISS, HIT, ERROR]
+\end{minted}
+
+\begin{keyconceptbox}
+All five listings share one architectural motif: \emph{correctness lives in
+an atomic compare-and-set at a storage boundary}. The idempotency store
+claims keys with a primary-key \texttt{INSERT}; the inventory store swaps
+state under one lock with the expected version in hand; the cache revalidates
+against a validator rather than trusting a clock. Distribution changes the
+storage, not the shape of the argument.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch10-pitfalls}
+
+\subsection{Storing the Response Before Committing the Mutation}
+Writing the idempotency snapshot before the business transaction commits
+inverts the failure window: a crash now leaves a stored success response for
+a mutation that rolled back. The retry then replays a receipt for a transfer
+that never happened. Rule: claim the key early (\texttt{in\_flight}), record
+the response only with (or after) the durable commit, and abandon the claim
+on failure so the client can retry cleanly.
+
+\subsection{Reusing Idempotency Keys Across Endpoints}
+A key must identify one logical operation on one endpoint. Reusing a key on
+a second endpoint either replays the wrong response (if fingerprints are not
+checked) or 422s (if they are). Clients should mint keys per
+\emph{user intent} --- one per checkout form instance --- and servers must
+enforce the fingerprint so sloppy reuse is loud, not silent.
+
+\subsection{Hashing Only the Body, Not the Route}
+A fingerprint computed from the request body alone lets the same key +
+identical JSON body collide across \texttt{/transfers} and
+\texttt{/refunds}. Listing~10.1's \texttt{fingerprint\_request} hashes
+method and path alongside the canonical body for exactly this reason; the
+test \texttt{test\_same\_key\_different\_route\_is\_422} is the regression
+gate.
+
+\subsection{Retrying POST Without Keys}
+An HTTP client library that transparently retries POST on timeout is an
+undocumented double-charge generator. Audit every layer --- your SDK, your
+proxy, your load balancer's retry policy --- and either mint an idempotency
+key per logical operation or disable retries on unsafe methods. Retry
+budgets (Chapter~2) limit \emph{how often}; keys limit \emph{what repeats
+mean}.
+
+\subsection{Weak ETags on Byte-Sensitive Resources}
+A weak validator (\texttt{W/"abc"}) asserts semantic equivalence, not byte
+equality. Using one on a resource that feeds range requests, delta
+encodings, or cryptographic verification lets a cache combine stale bytes
+with fresh offsets. Rule: content-addressed (hash) or version-addressed
+ETags for anything byte-sensitive; weak ETags only for representations that
+legitimately vary in bytes while staying semantically equal.
+
+\subsection{The no-store / no-cache Confusion}
+\texttt{no-cache} \emph{stores} the response and revalidates on every use;
+\texttt{no-store} never stores. Teams that write \texttt{no-cache} on
+responses containing personal data have built a compliant-looking privacy
+leak: the bytes sit in every intermediary on the path. When the data is
+sensitive, the directive is \texttt{no-store}, full stop; add
+\texttt{private} when per-user browser caching is acceptable.
+
+\subsection{Client-Generated ETags}
+Validators are issued by the authority that owns the state --- the server.
+A client that invents an ETag (hashing its own serialization, guessing a
+version) couples the cache protocol to a serialization the server never
+committed to, and optimistic locking degenerates into a coin flip. Clients
+treat ETags as opaque; servers mint them; nobody else touches them.
+
+\subsection{Distributed Locks Without Fencing Tokens}
+A lease-based lock makes a paused holder and a crashed holder
+indistinguishable; when the lease lapses, two clients believe they hold the
+lock. Without fencing tokens checked at the resource, the second acquisition
+does not restore mutual exclusion --- it merely narrows the race window.
+If the resource cannot check tokens, the lock is advisory and must be
+treated as a throughput optimization, never as a correctness
+mechanism~\cite{kleppmann2017ddia}.
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch10-lab}
+
+\subsection{Lab: An Idempotent Payments API That Survives Retry Storms}
+
+\textbf{Scenario.} Northwind Robotics exposes
+\texttt{POST /api/v1/payments/transfers} to its dealer network. Dealers run
+flaky warehouse Wi-Fi; their integration library retries aggressively. Your
+job: ship an endpoint on which \emph{any} number of duplicate submissions
+produces exactly one transfer.
+
+\textbf{Build order.}
+\begin{enumerate}
+  \item Start from Listing~10.1. Run
+        \texttt{pytest test\_listing\_10\_1.py -q} and confirm all eight
+        tests pass.
+  \item Extend \texttt{TransferRequest} with a \texttt{reference} field
+        (dealer-supplied order number) and prove by test that canonical JSON
+        fingerprinting treats reordered keys as the same payload.
+  \item Lower the TTL to 5 minutes and write a test (via the
+        \texttt{now} parameter, not \texttt{sleep}) showing an aged-out key
+        is collected and the operation executes again.
+  \item Add metrics: count executions, replays, mismatches, and in-flight
+        rejections; expose them at \texttt{GET /api/v1/\_meta/idempotency}.
+  \item Run Listing~10.4's storm at 200 workers against your extended app.
+        Acceptance: one ledger entry, 200 identical receipts.
+\end{enumerate}
+
+\textbf{Deliverable.} The extended middleware, the metrics endpoint, and the
+passing storm output pasted into your lab notes.
+
+\subsection{War Story: The Double-Charged Customers}
+\label{sec:ch10-warstory}
+
+A payments team (the details are composited from several public incident
+reviews) shipped a new load balancer configured to retry requests on
+connection reset --- a well-intentioned resilience default. Retries were
+enabled for \emph{all} methods, including POST, on the theory that ``the
+API is mostly idempotent anyway.'' The charges endpoint was not. For three
+days, a small fraction of checkouts --- those whose responses coincided
+with a connection reset --- executed twice. Because both executions
+returned 201 with distinct charge IDs, no client-side error ever fired; the
+first symptom was customers reporting duplicate card charges, hours later,
+through the support queue. Forensics was hampered because the two charges
+had different IDs and timestamps seconds apart: they looked like two
+deliberate purchases. Remediation cost: a weekend of ledger forensics,
+thousands of manual refunds, and a lasting support burden.
+
+Three structural fixes followed. (1)~Retries at every infrastructure layer
+were restricted to idempotent methods unless the request carries an
+idempotency key. (2)~The charges endpoint adopted idempotency keys with a
+24-hour TTL --- the client SDK mints one per checkout session. (3)~Replay
+telemetry (\texttt{Idempotency-Replayed} counts) became a dashboard: a
+replay spike is now an early-warning signal for exactly the network
+conditions that used to produce double charges. The lesson generalizes:
+\emph{infrastructure retries are invisible application behavior}, and any
+retry you did not design is a retry you have not made safe.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch10-exercises}
+
+\begin{enumerate}
+  \item \textbf{[junior]} Classify each as safe, idempotent, both, or
+        neither: GET; PUT; DELETE; POST; \texttt{PATCH} with body
+        \texttt{\{"op": "set", "field": "qty", "value": 5\}};
+        \texttt{PATCH} with body \texttt{\{"op": "inc", "field": "qty"\}}.
+  \item \textbf{[junior]} Your endpoint returns
+        \texttt{Cache-Control: no-cache}. A colleague claims the response
+        is never stored anywhere. Correct them precisely.
+  \item \textbf{[junior]} Given \texttt{max-age=60} and a response stored
+        at $t=0$, which of the requests at $t \in \{30, 60, 61\}$ hit the
+        cache? Verify with Listing~10.5.
+  \item \textbf{[mid]} A client reuses one idempotency key for its whole
+        batch job, varying only the payload. What happens, request by
+        request, against Listing~10.1? Which status codes appear and why?
+  \item \textbf{[mid]} Listing~10.1 abandons the key row on downstream
+        5xx. Argue both sides: should a deterministic 422 (validation
+        failure) be stored and replayed, or abandoned? What does Stripe's
+        design choose, and why?
+  \item \textbf{[mid]} Extend Listing~10.5 with a \texttt{Vary} model: the
+        cache key becomes (URI, Accept-Language). Show a timeline in which
+        omitting \texttt{Vary} serves a French representation to an English
+        requester.
+  \item \textbf{[senior]} Design the database schema for idempotency keys
+        when the mutation and the snapshot must commit atomically in one
+        relational transaction. Where does the \texttt{in\_flight} row
+        live, and what does a crashed transaction leave behind?
+  \item \textbf{[senior]} A hot inventory SKU suffers livelock under
+        optimistic retries: 95\% of conditional writes return 412. Compare
+        three escapes --- bounded retry with jitter, pessimistic row locks,
+        and per-SKU command queues --- and pick one with numbers.
+  \item \textbf{[staff]} Your CDN supports surrogate keys. Design the
+        tagging and purge scheme for the Northwind catalog so that a price
+        change on one part invalidates exactly the affected URLs across
+        product, search, and recommendation surfaces.
+  \item \textbf{[staff]} Prove or refute: ``If every mutation endpoint
+        requires an idempotency key, we no longer need unique constraints
+        in the database.'' Treat the key TTL as the crux of your argument.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch10-interview}
+
+\subsection*{Junior (Q1--Q10)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{Define idempotency in one sentence.}
+        Repeating an operation any number of times leaves the observable
+        state exactly where one application left it: $f(f(x)) = f(x)$.
+  \item \textbf{Which HTTP methods are idempotent by specification?}
+        GET, HEAD, OPTIONS, TRACE (also safe), plus PUT and DELETE. POST is
+        not; PATCH is not in general~\cite{rfc9110}.
+  \item \textbf{Prove POST is not idempotent by spec.}
+        Exhibit a counterexample permitted by the spec:
+        \texttt{POST /orders} creates a new order per request. Two
+        identical requests produce two orders with distinct IDs ---
+        $f(f(x)) \neq f(x)$ on the observable state (order count). Since
+        the specification assigns POST no fixed-point guarantee, no
+        conforming server is required to deduplicate, QED.
+  \item \textbf{Safe versus idempotent --- what is the difference?}
+        Safe methods change nothing (zero applications $\equiv$ one).
+        Idempotent methods may change state once but not additionally on
+        repetition. GET is both; PUT is idempotent but not safe.
+  \item \textbf{Is a second DELETE returning 404 still idempotent?}
+        Yes. Idempotency constrains the \emph{state}, not the status code:
+        after the first DELETE the resource is absent, and it stays absent
+        no matter how often the request repeats.
+  \item \textbf{What is an idempotency key and who generates it?}
+        A unique token (typically UUIDv4) generated by the \emph{client},
+        once per logical operation, sent on every retry of that operation
+        so the server can recognize and collapse duplicates.
+  \item \textbf{What does \texttt{Cache-Control: no-store} mean?}
+        Caches must not store any part of the response; every request must
+        reach the origin. It is the correct directive for credentials and
+        personal data.
+  \item \textbf{What does a 304 Not Modified response contain?}
+        No body --- only headers, including refreshed validators and cache
+        directives. It tells the cache its stored representation is still
+        current.
+  \item \textbf{What is an ETag?}
+        An opaque, server-issued validator identifying one version of a
+        representation. A strong ETag changes when a single byte changes;
+        a weak one (\texttt{W/} prefix) asserts only semantic equivalence.
+  \item \textbf{What status code answers a failed \texttt{If-Match}?}
+        412 Precondition Failed: the resource changed since the client's
+        copy; the client should re-read, re-decide, and retry.
+\end{enumerate}
+
+\subsection*{Mid (Q11--Q22)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{\texttt{no-cache} versus \texttt{no-store}?}
+        \texttt{no-cache} permits storage but requires revalidation before
+        every reuse; \texttt{no-store} forbids storage entirely. The names
+        are famously misleading --- memorize the semantics, not the words.
+  \item \textbf{Design idempotency for a payment endpoint.}
+        Client mints a UUID per checkout intent and sends it as
+        \texttt{Idempotency-Key}. Server: atomic check-and-insert of
+        (account, key) with a fingerprint of method+route+canonical body;
+        execute once; snapshot status+body in the same transaction; replay
+        on duplicate; 422 on fingerprint mismatch; 409 while the twin is in
+        flight; TTL of 24h matched to the client's retry horizon.
+  \item \textbf{412 versus 409 versus 428?}
+        428: the server requires conditional requests and none was sent.
+        412: a precondition (\texttt{If-Match}) was sent and evaluated
+        false. 409: the request conflicts with server \emph{state} ---
+        business-rule conflicts and in-flight idempotency collisions.
+        Precondition problems are 412/428; state conflicts are 409.
+  \item \textbf{Why is exactly-once delivery impossible?}
+        The Two Generals' Problem: over an unreliable channel, no finite
+        message exchange lets both parties be certain the other will act.
+        After a timeout the sender cannot distinguish ``request lost'' from
+        ``response lost,'' so no protocol guarantees exactly-once. Systems
+        ship at-least-once delivery plus idempotent processing:
+        effectively-once~\cite{kleppmann2017ddia}.
+  \item \textbf{What are \texttt{stale-while-revalidate} semantics?}
+        Within the directive's window past expiry, the cache serves the
+        stale representation \emph{immediately} and refreshes it from the
+        origin in the background. Latency stays at cache speed; staleness
+        is bounded by the window; the next request gets the fresh copy.
+  \item \textbf{What is \texttt{stale-if-error} for?}
+        Availability during origin outages: if revalidation fails with an
+        error, the cache may serve the stale entry within the window.
+        \texttt{must-revalidate} disables this escape hatch --- choose it
+        when a stale answer is worse than an error (e.g.\ account
+        balances).
+  \item \textbf{Strong versus weak ETags --- when does the difference
+        matter?}
+        Range requests and byte-level combining: a weak validator cannot
+        prove two byte strings identical, so caches must not use it to
+        satisfy partial-content requests. Content-addressed (hash) ETags
+        are strong by construction.
+  \item \textbf{How would you fingerprint an idempotent request?}
+        SHA-256 over method, route template, and the canonicalized body
+        (JSON with sorted keys and fixed separators). Hashing the body
+        alone misses cross-endpoint collisions; hashing raw bytes misses
+        semantically identical JSON with reordered keys.
+  \item \textbf{What is the lost-update problem?}
+        Two transactions read the same state, compute new states privately,
+        and write; the second write overwrites the first, silently
+        discarding one update. Prevented by conditional writes
+        (compare-and-set on a version) or by serializing access with locks.
+  \item \textbf{What is a fencing token?}
+        A monotonic token issued at lock acquisition and checked by the
+        resource on every write; writes bearing an older token are
+        rejected. It closes the paused-lock-holder hole that lease expiry
+        alone cannot~\cite{kleppmann2017ddia}.
+  \item \textbf{Your client retries timed-out POSTs. What can go wrong and
+        how do you fix it?}
+        A timeout means the outcome is unknown; a blind retry can apply the
+        operation twice (double charge). Fix: mint an idempotency key per
+        logical operation so the server collapses the retry into a replay,
+        or move the operation behind a naturally idempotent PUT.
+  \item \textbf{What is cache poisoning via unkeyed input?}
+        When a response depends on data not present in the cache key or the
+        \texttt{Vary} set (a reflected header, an ignored query
+        parameter), an attacker can store a malicious representation under
+        an innocent key and have the cache serve it to other users.
+        Defense: every response byte is a function of key plus
+        \texttt{Vary}; never reflect unkeyed input.
+\end{enumerate}
+
+\subsection*{Senior (Q23--Q28)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=23]
+  \item \textbf{Why must the idempotency snapshot and the business mutation
+        commit in one transaction?}
+        Otherwise a crash between the two leaves an unrecoverable skew: a
+        replayable receipt for a rolled-back mutation, or a mutation with
+        no receipt whose \texttt{in\_flight} key blocks retries forever.
+        Atomicity converts the pair into one fact~\cite{kleppmann2017ddia}.
+  \item \textbf{Where should the dedup check live: middleware, handler, or
+        database?}
+        The database owns correctness (the unique constraint is the atomic
+        compare-and-set); middleware owns the protocol mapping (422/409/
+        replay); the handler should stay ignorant. Pushing the check into
+        application code above the store reintroduces TOCTOU races.
+  \item \textbf{How do you size the idempotency-key TTL?}
+        From the client's worst-case retry horizon: maximum backoff
+        schedule times maximum attempts, plus clock skew, plus a margin
+        for human-in-the-loop replays (support re-runs). Stripe's 24 hours
+        is a pragmatic upper bound for interactive clients; batch
+        reconcilers may want days.
+  \item \textbf{A shared cache serves one user's account page to another.
+        Root-cause it.}
+        A personalized response reached a shared cache without
+        \texttt{private}/\texttt{no-store}, or the key omitted the
+        authorization dimension (missing \texttt{Vary: Authorization}).
+        The fix is directive hygiene plus key review; the prevention is a
+        policy lint: no 200 with \texttt{Set-Cookie} or per-user data may
+        be \texttt{public}.
+  \item \textbf{Optimistic versus pessimistic control for a hot inventory
+        row --- decide.}
+        Measure collision rate. Below a few percent, optimistic wins (no
+        lock overhead, collisions pay the retry). At high collision rates
+        the retry churn dominates: move to a per-aggregate queue or row
+        lock, trading latency for throughput stability. There is no
+        doctrinaire answer --- only a measured one.
+  \item \textbf{Design the recovery path for a client that receives 409
+        ``idempotency key in flight.''}
+        Bounded poll with backoff (the server hints via
+        \texttt{Retry-After}) until the twin completes and the replay
+        becomes available; on expiry of the bound, surface an explicit
+        ``outcome unknown, reconcile via GET'' state rather than guessing
+        either success or failure.
+\end{enumerate}
+
+\subsection*{Staff (Q29--Q33)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=29]
+  \item \textbf{Design the end-to-end duplicate-defense architecture for a
+        payment platform: client, edge, service, database.}
+        Client mints one key per intent; edge terminates retry storms and
+        never retries unsafe methods itself; service middleware maps the
+        key protocol; the database enforces (account, key) uniqueness and
+        commits effect+snapshot atomically; downstream consumers get
+        effectively-once from the same keys propagated as message IDs.
+        Each layer assumes the others fail.
+  \item \textbf{Your CDN bill tripled after a ``cache everything''
+        initiative. How do you find the waste?}
+        Attribute misses by cause: unkeyed variance (accidental
+        \texttt{Vary}-like inputs such as per-user query tokens),
+        lifetime mis-tuning (one-second \texttt{max-age}), non-cacheable
+        methods, and key explosion from ignored parameters. Then rebuild
+        the policy matrix per surface --- immutable assets long-cached with
+        content-hashed URLs, API responses short-cached with validators,
+        personalized surfaces \texttt{private} or \texttt{no-store}.
+  \item \textbf{When is serving stale data unacceptable, and what is the
+        mechanism that enforces freshness under failure?}
+        When a wrong answer is worse than no answer: balances, entitlement
+        checks, safety interlocks. \texttt{must-revalidate} (and refusal
+        of \texttt{stale-if-error}) converts origin failure into an
+        explicit error rather than a confident lie; that is a product
+        decision encoded in a header.
+  \item \textbf{How do idempotency keys interact with event-driven
+        consumers downstream of the API?}
+        The key (or a derived operation ID) must travel with the emitted
+        event as its dedup identity; consumers apply the same
+        effectively-once pattern with their own dedup stores and windows.
+        The API's replay store protects the synchronous boundary only ---
+        the async boundary needs its own~\cite{kleppmann2017ddia}.
+  \item \textbf{Governance: how do you make 40 teams adopt one idempotency
+        and caching policy?}
+        Codify it where it cannot be skipped: shared middleware for the key
+        protocol (with conformance tests every service must pass), a
+        gateway-level lint for \texttt{Cache-Control} legality, and golden
+        dashboards for replay rate and hit ratio. Then make the paved road
+        faster than the detour --- a platform library doing the right thing
+        by default beats a policy document every
+        time~\cite{gehl2021apidesign,nygard2018releaseit}.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch10-bibliography}
+
+\begin{itemize}
+  \item \textbf{RFC 9110 --- HTTP Semantics}~\cite{rfc9110}. The normative
+        source for method safety and idempotency, status codes 304/409/412/
+        428, conditional request headers (\texttt{If-Match},
+        \texttt{If-None-Match}, \texttt{If-Modified-Since}), ETag strength,
+        and \texttt{Vary}.
+  \item \textbf{RFC 9111 --- HTTP Caching.} The companion specification:
+        \texttt{Cache-Control} directives, freshness lifetimes, heuristic
+        freshness, \texttt{stale-while-revalidate} and
+        \texttt{stale-if-error} (registered extension directives), and
+        cache-invalidation-on-unsafe-methods. (Read alongside
+        RFC~9110~\cite{rfc9110}.)
+  \item \textbf{IETF Draft --- The Idempotency-Key HTTP Header Field.}
+        The standardization effort behind the header: key generation
+        guidance, fingerprinting, and the replay/mismatch/in-flight
+        taxonomy implemented in Listing~10.1.
+  \item \textbf{Stripe API Documentation --- Idempotent Requests.} The
+        canonical production deployment: client-generated keys, 24-hour
+        retention, response replay, and the parameter-mismatch error shape.
+  \item \textbf{Kleppmann, \emph{Designing Data-Intensive
+        Applications}}~\cite{kleppmann2017ddia}. Chapters on transactions
+        and distributed systems: lost updates, serializability, fencing
+        tokens, and the definitive treatment of why exactly-once is
+        impossible and effectively-once is the real target.
+  \item \textbf{Nygard, \emph{Release It!}}~\cite{nygard2018releaseit}.
+        Stability patterns and war stories: how retries, timeouts, and
+        caches behave under failure in real production systems.
+  \item \textbf{Gehl, \emph{API Design Patterns}}~\cite{gehl2021apidesign}.
+        Design-pattern treatment of idempotency, request identifiers, and
+        standard methods as building blocks.
+  \item \textbf{Google AIP-155 (Request identification) and AIP-194
+        (Retries).} Google's API Improvement Proposals for request IDs and
+        retry-safe design: which methods may be retried and how request
+        identifiers make retries safe.
+  \item \textbf{FastAPI and Pydantic documentation}~\cite{fastapidocs,pydanticdocs}.
+        Middleware ordering, \texttt{TestClient} usage, and the validation
+        behavior the chapter's listings rely on.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch10-capstones}
+
+\subsection*{Capstone 10.1 --- Idempotency-Key Client SDK \hfill [junior]}
+\textbf{Objective:} Build the client half of the protocol: a small Python
+class wrapping \texttt{httpx} that mints one key per logical operation and
+replays it across retries, speaking to Listing~10.1's server.
+
+\textbf{Inputs/Datasets:} Listing~10.1 (server); the Northwind Robotics
+transfer payload fixture from the test suite.
+
+\textbf{Steps:} (1)~Implement \texttt{Operation} objects that mint a UUIDv4
+key at construction. (2)~Implement \texttt{submit()} with bounded retry:
+retry on connection error and on 409 (honoring \texttt{Retry-After}),
+never on 422. (3)~Prove a retried submit yields exactly one ledger entry.
+(4)~Prove a tampered payload under the same key surfaces the 422 to the
+caller. (5)~Log every attempt with attempt number and outcome.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] One \texttt{Operation} retries up to 5 times and produces
+        exactly one server-side mutation.
+  \item[$\square$] 422 is never retried; 409 is retried with backoff.
+  \item[$\square$] A second \texttt{Operation} mints a fresh key and
+        executes a second transfer.
+  \item[$\square$] All tests pass offline and deterministically.
+\end{itemize}
+
+\textbf{Stretch Goals:} Persist in-flight operations to a local file so a
+crashed client resumes with the same key.
+
+\subsection*{Capstone 10.2 --- Conditional-GET Sync Agent \hfill [junior]}
+\textbf{Objective:} Write a catalog sync agent that polls
+Listing~10.2's parts API on a fixed schedule and transfers bytes only when
+representations actually changed.
+
+\textbf{Inputs/Datasets:} Listing~10.2; a scripted mutation schedule (restock
+events at chosen logical steps).
+
+\textbf{Steps:} (1)~Keep per-SKU validator state (ETag + body) in a local
+JSON file. (2)~On each poll, send \texttt{If-None-Match} when a validator
+exists. (3)~On 304, keep the stored body and count a zero-byte sync; on 200,
+replace state. (4)~Run 20 polls over the scripted schedule; report bytes
+transferred versus a naive always-GET baseline. (5)~Prove a mid-run restock
+is observed exactly once.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] 304 polls transfer zero representation bytes.
+  \item[$\square$] The agent's local state always equals the server's
+        current representation after each poll.
+  \item[$\square$] The savings report is reproducible from the scripted
+        schedule.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add \texttt{Last-Modified}/\texttt{If-Modified-Since}
+as a fallback when no ETag is present.
+
+\subsection*{Capstone 10.3 --- Optimistic-Locking Order Service \hfill [mid]}
+\textbf{Objective:} Extend Listing~10.3 into an order-reservation service in
+which reserving stock and releasing stock are both conditional writes, with
+a client that performs the read--decide--write--retry loop.
+
+\textbf{Inputs/Datasets:} Listing~10.3; a seeded catalog of 10 SKUs; a
+deterministic order script (seeded random choice of SKU and quantity).
+
+\textbf{Steps:} (1)~Model reservations as quantity transitions guarded by
+\texttt{If-Match}. (2)~Implement the client retry loop with bounded
+attempts and deterministic (seeded) jitter. (3)~Drive 100 concurrent order
+workers from the seeded script. (4)~Assert global conservation: final
+quantity equals initial minus sum of accepted reservations. (5)~Emit a
+contention report: attempts histogram, 412 rate per SKU.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] No lost updates under the 100-worker storm
+        (conservation invariant holds exactly).
+  \item[$\square$] Blind writes receive 428; stale writes receive 412.
+  \item[$\square$] The contention report is identical across runs.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add an adaptive escalation: SKUs whose 412 rate
+exceeds a threshold switch to a serialized per-SKU queue; show the
+throughput/latency trade-off in the report.
+
+\subsection*{Capstone 10.4 --- Cache-Policy Workbench \hfill [senior]}
+\textbf{Objective:} Turn Listing~10.5 into a policy evaluation tool: given a
+traffic timeline and a library of candidate policies, rank them by origin
+load, staleness window, and error resilience.
+
+\textbf{Inputs/Datasets:} Listing~10.5; a synthetic one-hour request
+timeline (request arrivals, origin mutation events, one scripted outage);
+five candidate policies from \texttt{no-store} to
+\texttt{max-age=300, stale-while-revalidate=60, stale-if-error=600}.
+
+\textbf{Steps:} (1)~Load timelines and policies from a JSON fixture.
+(2)~Simulate every (policy, timeline) pair. (3)~Produce a comparison table:
+origin fetches, bytes saved, longest stale serve, requests failed during the
+outage. (4)~Write a one-page recommendation memo choosing a policy per
+surface (product page, pricing API, account page). (5)~Add a regression
+test asserting the ranking is stable.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] The table is reproducible bit-for-bit from the fixtures.
+  \item[$\square$] At least one policy is shown to serve zero failed
+        requests during the scripted outage, and the memo explains why.
+  \item[$\square$] The account page is assigned \texttt{no-store} or
+        \texttt{private} with a one-sentence justification.
+\end{itemize}
+
+\textbf{Stretch Goals:} Model a shared cache with a \texttt{Vary} dimension
+and demonstrate a misconfiguration that leaks across user segments.
+
+\subsection*{Capstone 10.5 --- Correctness Audit of a Retry-Capable Gateway \hfill [staff]}
+\textbf{Objective:} Design and execute a full duplicate-safety audit for a
+fictitious API platform: enumerate every retry source (client SDK, proxy,
+load balancer, queue redelivery), classify every mutation endpoint by
+idempotency posture, and produce the remediation plan.
+
+\textbf{Inputs/Datasets:} A synthetic platform registry you author (YAML: 20
+endpoints with methods, retry sources, and current dedup posture);
+Listings~10.1--10.5 as the reference implementation kit.
+
+\textbf{Steps:} (1)~Build the retry-source inventory: for each endpoint,
+list every layer that can duplicate a request. (2)~Classify endpoints:
+spec-idempotent, key-protected, unprotected. (3)~Write a linter that flags
+unprotected unsafe methods reachable by any retry source. (4)~For the top
+three risk endpoints, specify the fix (key protocol adoption, PUT
+redesign, or constraint-backed dedup) with migration steps. (5)~Define the
+ongoing telemetry: replay rate, 409 rate, 422 rate, and the alert
+thresholds that would have caught the war story of
+Section~\ref{sec:ch10-warstory}.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] The registry linter flags exactly the seeded violations,
+        with zero false positives on the protected endpoints.
+  \item[$\square$] Every remediation references the mechanism that enforces
+        it (unique constraint, fingerprint, fencing token) --- not just a
+        header.
+  \item[$\square$] The telemetry plan includes at least one alert tied to
+        each failure mode in the war story.
+  \item[$\square$] The plan states the blast radius of the idempotency-key
+        store being unavailable and how the platform degrades.
+\end{itemize}
+
+\textbf{Stretch Goals:} Extend the audit across the async boundary: model
+queue redelivery for each endpoint's emitted events and specify the
+consumer-side dedup windows.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch10-deps}
+
+All code runs offline after a one-time install. From PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\begin{minted}{text}
+fastapi>=0.110
+pydantic>=2.7
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+\texttt{sqlite3}, \texttt{hashlib}, \texttt{threading}, and
+\texttt{dataclasses} are Python standard library and need no installation.
+
+\subsection{fastapi ($\geq$ 0.110)}
+\textbf{Description:} The ASGI web framework hosting every served API in
+this chapter. \textbf{Why included:} routing, the middleware extension point
+used by the idempotency layer (Listing~10.1), header access for conditional
+requests (Listings~10.2, 10.3), and the application-factory pattern that
+gives every test an isolated store~\cite{fastapidocs}.
+\textbf{Alternatives:} Starlette directly (FastAPI's base); Flask plus
+manual request validation. \textbf{Installation:}
+\texttt{pip install "fastapi>=0.110"}.
+
+\subsection{pydantic ($\geq$ 2.7)}
+\textbf{Description:} Type-driven validation and serialization library.
+\textbf{Why included:} defines the \texttt{TransferRequest} and
+\texttt{InventoryUpdate} wire contracts; its declarative constraints
+(\texttt{gt=0}, \texttt{ge=0}) are the boundary validation the correctness
+arguments assume~\cite{pydanticdocs}. \textbf{Alternatives:}
+\texttt{dataclasses} with hand-rolled checks; attrs; marshmallow.
+\textbf{Installation:} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{httpx ($\geq$ 0.27)}
+\textbf{Description:} Synchronous and asynchronous HTTP client.
+\textbf{Why included:} it is the transport underneath FastAPI's
+\texttt{TestClient}; every offline test in this chapter runs through it, and
+Capstone~10.1 builds the retrying client SDK on it. \textbf{Alternatives:}
+requests (synchronous only, not ASGI-native); \texttt{urllib} (stdlib,
+low-level). \textbf{Installation:} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest ($\geq$ 8)}
+\textbf{Description:} Test framework. \textbf{Why included:} runs all 33
+tests in this chapter, including the barrier-synchronized concurrency
+suites whose assertions prove exactly-once effect and lost-update
+prevention. \textbf{Alternatives:} unittest (stdlib); nose2.
+\textbf{Installation:} \texttt{pip install "pytest>=8"}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch10-summary}
+
+\begin{itemize}
+  \item \textbf{Idempotency is a fixed-point property} ---
+        $f(f(x)) = f(x)$ on observable state. GET/PUT/DELETE have it by
+        specification; POST gets it by design, via idempotency
+        keys~\cite{rfc9110}.
+  \item \textbf{The Idempotency-Key protocol is a small state machine:}
+        client-minted key, server-side fingerprint (method + route +
+        canonical body), atomic claim, response snapshot, replay on
+        duplicate, 422 on mismatch, 409 while in flight, expiry matched to
+        the client's retry horizon.
+  \item \textbf{Exactly-once delivery is impossible} (Two Generals);
+        at-least-once delivery plus idempotent processing is the
+        effectively-once substitute, and every dedup mechanism has a window
+        that must be sized and monitored~\cite{kleppmann2017ddia}.
+  \item \textbf{Caching is a contract:} the origin assigns a freshness
+        lifetime (\texttt{max-age}) and validators (strong ETag); the cache
+        revalidates with \texttt{If-None-Match} and serves 304s;
+        \texttt{no-cache} $\neq$ \texttt{no-store};
+        \texttt{stale-while-revalidate} buys latency,
+        \texttt{stale-if-error} buys availability, \texttt{must-revalidate}
+        vetoes both.
+  \item \textbf{Concurrency control is compare-and-set at the storage
+        boundary.} Conditional writes with \texttt{If-Match} convert lost
+        updates into 412s; 428 demands the precondition; 409 is for state
+        conflicts. Distributed locks need fencing tokens or they are
+        throughput hints, not correctness.
+  \item \textbf{Retries without idempotency are unsafe by construction.}
+        Every infrastructure layer that retries POST silently is a latent
+        double-charge; the fix is architectural (keys, idempotent methods),
+        not procedural (``be careful'').
+  \item \textbf{Prove it, don't hope:} the chapter's tests collapse
+        50-thread storms into single mutations and 20-writer races into
+        exact arithmetic --- deterministic assertions on final state, never
+        on timing.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch10-quickref}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{l c c l}
+    \toprule
+    \textbf{Method} & \textbf{Safe} & \textbf{Idempotent} & \textbf{Retry policy} \\
+    \midrule
+    GET / HEAD & yes & yes & always safe to retry \\
+    OPTIONS / TRACE & yes & yes & always safe to retry \\
+    PUT & no & yes & safe to retry \\
+    DELETE & no & yes & safe to retry \\
+    POST & no & no & retry only with an idempotency key \\
+    PATCH & no & no & retry only if the delta is absolute or keyed \\
+    \bottomrule
+  \end{tabular}
+  \caption{Method idempotency and retry policy~\cite{rfc9110}.}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{l l}
+    \toprule
+    \textbf{Directive} & \textbf{One-line meaning} \\
+    \midrule
+    \texttt{max-age=n} & serve fresh from cache for $n$ seconds \\
+    \texttt{no-cache} & store OK, but revalidate before every reuse \\
+    \texttt{no-store} & never store; always go to origin \\
+    \texttt{private} / \texttt{public} & browser-only vs.\ shared-cacheable \\
+    \texttt{stale-while-revalidate=n} & serve stale $\le n$s while refreshing \\
+    \texttt{stale-if-error=n} & serve stale $\le n$s when origin errors \\
+    \texttt{must-revalidate} & no stale serving once expired, ever \\
+    \bottomrule
+  \end{tabular}
+  \caption{Cache-Control cheat-sheet.}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{l l}
+    \toprule
+    \textbf{Status} & \textbf{Select when} \\
+    \midrule
+    304 & validator still matches; no body retransmission needed \\
+    409 & state conflict: business rule or in-flight idempotency twin \\
+    412 & \texttt{If-Match}/precondition evaluated false (lost update refused) \\
+    422 & idempotency key reused with a different payload fingerprint \\
+    428 & server requires conditional writes; precondition header missing \\
+    \bottomrule
+  \end{tabular}
+  \caption{Status-code selection for this chapter's machinery.}
+\end{table}
+
+%% ----------------------------------------------------------------------------
+\input{chapters/_standard_addendum}

@@ -1,0 +1,72 @@
+name: book-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  listings:
+    name: Extract listings and run chapter test suites
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install consolidated dependencies
+        run: pip install -r requirements-book.txt
+
+      - name: Verify extracted code is in sync with chapters
+        run: python tools/extract_code.py --check
+
+      - name: Compile-check every extracted listing
+        run: |
+          $files = Get-ChildItem -Recurse code\ch*\*.py
+          python -m py_compile $files.FullName
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Run curated chapter test suites
+        run: |
+          $dirs = Get-ChildItem -Directory code\ch* |
+            Where-Object { Test-Path (Join-Path $_.FullName 'test*.py') -or
+                           (Get-ChildItem $_.FullName -Filter 'test_*.py' -Recurse -ErrorAction SilentlyContinue) }
+          $failed = @()
+          foreach ($d in $dirs) {
+            Write-Host "=== pytest $($d.Name) ==="
+            python -m pytest $d.FullName -q
+            if ($LASTEXITCODE -ne 0) { $failed += $d.Name }
+          }
+          if ($failed) { Write-Error "Failing suites: $($failed -join ', ')"; exit 1 }
+
+  latex:
+    name: Build the book PDF
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: teatimeguest/setup-texlive-action@v3
+        with:
+          packages: scheme-full
+
+      - name: Compile (pdflatex + biber + pdflatex x2)
+        run: |
+          pdflatex -interaction=nonstopmode main.tex
+          biber main
+          pdflatex -interaction=nonstopmode main.tex
+          pdflatex -interaction=nonstopmode main.tex
+
+      - name: Fail on LaTeX errors or undefined references
+        run: |
+          if grep -qE '^!' main.log; then
+            grep -E '^!' main.log; exit 1
+          fi
+          if grep -qE 'undefined references|Citation .* undefined|multiply defined' main.log; then
+            grep -E 'undefined references|Citation .* undefined|multiply defined' main.log; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mastering-apis-pdf
+          path: main.pdf

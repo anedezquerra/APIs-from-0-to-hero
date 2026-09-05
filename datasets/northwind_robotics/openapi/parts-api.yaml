@@ -1,0 +1,153 @@
+# Northwind Robotics Parts API v2 -- compliant reference spec (ch20 style rules)
+openapi: 3.1.0
+info:
+  title: Northwind Robotics Parts API
+  version: 2.4.0
+  description: Read access to the Northwind Robotics synthetic parts catalog.
+  contact:
+    name: Northwind Robotics API Platform (fictional)
+    email: api-platform@example.invalid
+  license:
+    name: Proprietary (synthetic teaching material)
+servers:
+  - url: https://api.northwind-robotics.example.invalid/v2
+    description: Production (synthetic)
+tags:
+  - name: parts
+    description: Operations on the parts catalog.
+paths:
+  /parts:
+    get:
+      operationId: listParts
+      summary: List parts
+      description: Returns a paginated list of catalog parts with optional filters.
+      tags: [parts]
+      parameters:
+        - name: category
+          in: query
+          description: Filter by top-level category.
+          schema:
+            type: string
+        - name: active
+          in: query
+          description: Filter by lifecycle state.
+          schema:
+            type: boolean
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a previous response.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum items per page (default 50, max 200).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: A page of parts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartPage"
+        "400":
+          description: Invalid query parameters.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "429":
+          description: Rate limit exceeded.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /parts/{part_id}:
+    get:
+      operationId: getPart
+      summary: Get one part
+      description: Returns a single part by identifier.
+      tags: [parts]
+      parameters:
+        - name: part_id
+          in: path
+          required: true
+          description: Part identifier (e.g. P-00142).
+          schema:
+            type: string
+            pattern: '^P-\d{5}$'
+      responses:
+        "200":
+          description: The requested part.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Part"
+        "404":
+          description: Part not found.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Part:
+      type: object
+      required: [part_id, sku, name, category, unit_price_cents, active]
+      properties:
+        part_id:
+          type: string
+        sku:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        subcategory:
+          type: string
+        unit_price_cents:
+          type: integer
+          minimum: 0
+        weight_grams:
+          type: integer
+          minimum: 0
+        warehouse_id:
+          type: string
+        active:
+          type: boolean
+    PartPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Part"
+        next_cursor:
+          type: string
+          nullable: true
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+security:
+  - bearerAuth: []

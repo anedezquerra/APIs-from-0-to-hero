@@ -1,0 +1,2508 @@
+%% ============================================================================
+%% Chapter 2: Consuming APIs in Python: From urllib to httpx
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+
+\chapter{Consuming APIs in Python: From urllib to httpx}
+\label{ch:consuming_python}
+
+%% ---------------------------------------------------------------------------
+%% 1. Executive Summary
+%% ---------------------------------------------------------------------------
+
+Consuming an HTTP API looks deceptively simple: build a URL, send a request,
+read some JSON. That mental model survives exactly until the first production
+incident. A consumer that omits timeouts will, under a slow dependency, exhaust
+its worker pool and take down a healthy service. A consumer that retries
+blindly will multiply load on an already struggling server and convert a brown
+outage into a full one. A consumer that parses a response body before checking
+the status code will turn a perfectly meaningful \texttt{503} into a confusing
+\texttt{JSONDecodeError} three stack frames away from the real cause. This
+chapter treats API consumption as the engineering discipline it actually is.
+
+We trace the evolution of Python HTTP clients --- from the standard library's
+\texttt{urllib}, through the ergonomic revolution of \texttt{requests}
+\cite{requestsdocs}, to the modern \texttt{httpx} library with its unified
+sync/async API and HTTP/2 support \cite{httpxdocs} --- and extract the design
+lessons each generation teaches. We then build, piece by piece, a
+production-grade client: explicit connect/read/write/pool timeouts, bounded
+connection pools with keep-alive, retry logic with exponential backoff and full
+jitter (with the underlying mathematics derived, not hand-waved), honoring of
+\texttt{Retry-After} and \texttt{RateLimit} headers per RFC~9110
+\cite{rfc9110}, typed pagination iterators, streaming downloaders with
+cancellation, and an error taxonomy that maps transport failures, status
+failures, and contract failures to distinct, actionable exceptions. Every
+listing is fully typed, runs on Python~3.11+, and is validated \emph{offline}
+against a local stub server or \texttt{httpx.MockTransport}: no network, no
+cloud accounts, no API keys, no flakiness.
+
+The capstone of the chapter is a resilient SDK wrapper around the fictional
+\emph{Northwind Robotics Parts API}: typed \texttt{pydantic} response models
+\cite{pydanticdocs}, telemetry hooks, transport injection for hermetic tests,
+and a complete fault-matrix test suite simulating \texttt{500}s, \texttt{429}s
+with \texttt{Retry-After}, and slow responses. The resilience philosophy
+throughout follows Nygard's \emph{Release It!} \cite{nygard2018releaseit}:
+every integration point is a betrayal waiting to happen, so engineer the
+client to fail fast, fail visibly, and recover gracefully.
+
+%% ---------------------------------------------------------------------------
+%% 2. Learning Objectives & Prerequisites
+%% ---------------------------------------------------------------------------
+
+\section{Learning Objectives \& Prerequisites}
+
+\subsection{Learning Objectives}
+
+After completing this chapter, you will be able to:
+
+\begin{enumerate}
+  \item \textbf{Select} the appropriate Python HTTP client library
+        (\texttt{urllib}, \texttt{requests}, \texttt{httpx}) for a given
+        workload, justifying the choice in terms of sync vs.\ async support,
+        HTTP/2 capability, and dependency footprint.
+  \item \textbf{Design} a robust client anatomy: base-URL joining, header and
+        authentication injection, event hooks, and transport abstraction.
+  \item \textbf{Specify} a complete timeout policy (connect, read, write,
+        pool) and explain why each dimension exists and what failure it
+        bounds.
+  \item \textbf{Size} connection pools correctly, reasoning about keep-alive,
+        DNS caching, TLS session reuse, and the cost of connection churn.
+  \item \textbf{Derive and implement} exponential backoff with full jitter,
+        compute expected-delay bounds, enforce retry budgets, honor
+        \texttt{Retry-After}, and gate retries behind idempotency analysis.
+  \item \textbf{Implement} client-side rate limiting (token bucket) that
+        composes cleanly with server-driven \texttt{429} signals.
+  \item \textbf{Consume} offset, cursor, and link-header paginated endpoints
+        as lazy typed iterators, and stream large payloads with progress
+        reporting and cancellation.
+  \item \textbf{Classify} consumer-side errors into transport, status, and
+        contract categories and map each to an actionable exception hierarchy.
+  \item \textbf{Build and test} a typed SDK wrapper with telemetry hooks and
+        hermetic offline tests via \texttt{httpx.MockTransport}.
+\end{enumerate}
+
+\subsection{Prerequisites}
+
+This chapter assumes mastery of:
+
+\begin{itemize}
+  \item \textbf{Chapter 0:} the curriculum's tooling baseline --- Python 3.11+,
+        a virtual environment, \texttt{pip}, and PowerShell on Windows.
+  \item \textbf{Chapter 1:} the HTTP wire protocol --- methods, status-code
+        classes, headers, message bodies, content negotiation, and the
+        semantics of idempotent vs.\ non-idempotent methods as standardized in
+        RFC~9110 \cite{rfc9110}.
+  \item Core Python: type hints, context managers (\texttt{with}), iterators
+        and generators, and the \texttt{logging} module.
+\end{itemize}
+
+No third-party package knowledge is assumed; each library is introduced from
+first principles. All code runs offline against the local stub server provided
+in Section~\ref{sec:ch02-lab} or against \texttt{httpx.MockTransport}.
+
+\begin{keyconceptbox}
+\textbf{The consumer's contract.} A production API client is not ``code that
+calls an endpoint.'' It is a managed boundary between your process and an
+unreliable network dependency. Its obligations are: bound every wait
+(timeouts), bound every resource (pools, concurrency, memory), bound every
+retry (budgets, jitter, idempotency), and make every failure observable and
+actionable. Everything in this chapter serves one of those four bounds.
+\end{keyconceptbox}
+
+%% ---------------------------------------------------------------------------
+%% 3. Deep Technical Mechanics & Architectural Concepts
+%% ---------------------------------------------------------------------------
+
+\section{Deep Technical Mechanics \& Architectural Concepts}
+
+\subsection{The Evolution of Python HTTP Clients}
+\label{sec:ch02-evolution}
+
+\subsubsection{urllib: the stdlib baseline}
+
+Python ships with \texttt{urllib.request}, a functional but austere client.
+Its virtues are real: zero third-party dependencies, availability on every
+interpreter, and therefore suitability for constrained environments
+(installers, bootstrap scripts, single-file tools, frozen binaries). Its sharp
+edges are equally real:
+
+\begin{itemize}
+  \item \textbf{A single global timeout} passed per call --- no distinction
+        between connect and read phases, and no pool-acquisition bound.
+  \item \textbf{No session abstraction.} Every call re-resolves DNS,
+        re-opens TCP, and re-performs the TLS handshake unless you hand-manage
+        an \texttt{OpenerDirector}; keep-alive is not the default behavior of
+        the high-level API.
+  \item \textbf{Exceptions for non-2xx statuses.} \texttt{HTTPError} is
+        raised for 4xx/5xx, which is defensible but surprises developers
+        trained on \texttt{requests}, and the error doubles as a response
+        object, a notorious source of confusion.
+  \item \textbf{Manual everything:} JSON encoding/decoding, query-string
+        construction, redirect policy, decompression negotiation, and proxy
+        configuration are all the caller's problem.
+\end{itemize}
+
+The lesson \texttt{urllib} teaches is foundational: \emph{an HTTP client is a
+state machine over sockets}, and if the library does not manage that state for
+you, your application code will --- badly, and usually at 3~a.m.
+
+\subsubsection{requests: the ergonomic revolution}
+
+\texttt{requests} \cite{requestsdocs} re-founded Python HTTP consumption on
+two ideas: a humane API (``HTTP for Humans'') and the \textbf{Session} object.
+A \texttt{Session} persists cookies, default headers, and --- critically ---
+a connection pool across requests, making keep-alive the default. Its
+limitations only became pressing a decade later: it is synchronous only,
+HTTP/1.1 only, built on \texttt{urllib3}, and its timeout model (a single
+value or a \texttt{(connect, read)} pair) does not cover write or
+pool-acquisition phases. For a synchronous, HTTP/1.1, request/response
+workload, \texttt{requests} remains a correct and battle-tested choice; its
+deficit is architectural headroom, not correctness.
+
+\subsubsection{httpx: the modern synthesis}
+
+\texttt{httpx} \cite{httpxdocs} keeps the \texttt{requests}-shaped API and
+adds the features the modern era demands:
+
+\begin{itemize}
+  \item \textbf{Dual sync/async clients} (\texttt{httpx.Client} and
+        \texttt{httpx.AsyncClient}) sharing one API surface --- the same
+        instrumentation, retry, and pagination code paths serve threads and
+        \texttt{asyncio} alike.
+  \item \textbf{HTTP/2 support} (via the optional \texttt{h2} package),
+        enabling multiplexed streams over a single connection.
+  \item \textbf{A four-dimensional timeout model}: connect, read, write, and
+        pool timeouts are independently configurable.
+  \item \textbf{Transport injection}: \texttt{httpx.MockTransport} lets tests
+        exercise the \emph{entire} client stack --- pooling, redirects,
+        timeouts, hooks --- without a socket ever being opened.
+  \item \textbf{Event hooks}: per-client middleware for logging, tracing, and
+        telemetry.
+\end{itemize}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c c X}
+    \toprule
+    \textbf{Capability} & \textbf{urllib} & \textbf{requests} & \textbf{httpx} & \textbf{Notes} \\
+    \midrule
+    Stdlib (no deps)      & Yes & No  & No  & urllib wins constrained environments \\
+    Session / pooling     & Manual & Yes & Yes & keep-alive default in both libraries \\
+    Async support         & No  & No  & Yes & httpx: asyncio and trio \\
+    HTTP/2                & No  & No  & Opt-in & requires \texttt{h2} extra \\
+    Timeout dimensions    & 1   & 2   & 4   & httpx adds write + pool \\
+    Mock transport        & No  & Adapter-based & First-class & MockTransport runs the full stack \\
+    Type hints            & Partial & Partial & Full & httpx ships \texttt{py.typed} \\
+    \bottomrule
+  \end{tabularx}
+  \caption{HTTP client support matrix for Python 3.11+ consumers.}
+  \label{tab:ch02-client-matrix}
+\end{table}
+
+\textbf{Selection heuristic.} Use \texttt{urllib} only when third-party
+dependencies are forbidden and the call count is tiny. Use \texttt{requests}
+when the codebase is synchronous, HTTP/1.1 suffices, and the dependency
+already exists. Use \texttt{httpx} for anything new: async workloads, HTTP/2
+upstreams, or any system where hermetic testing matters --- which is to say,
+any system. The remainder of this chapter standardizes on \texttt{httpx}.
+
+\subsection{Anatomy of a Robust Client}
+\label{sec:ch02-anatomy}
+
+A well-built client is a pipeline, not a function call.
+Figure~\ref{fig:ch02-lifecycle} shows the stages every request traverses in
+the production client we build in Section~\ref{sec:ch02-code}.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    stage/.style={rectangle, draw=darkblue, fill=blue!8, thick,
+                  minimum width=2.05cm, minimum height=1.0cm, align=center},
+    sidebox/.style={rectangle, draw=packtgray, fill=lightgray, thick,
+                    minimum width=2.05cm, minimum height=0.9cm, align=center},
+    flow/.style={->, thick, >=stealth},
+    retryflow/.style={->, thick, >=stealth, dashed, draw=packtorange}
+]
+  % Main pipeline
+  \node[stage] (build) {Build\\request};
+  \node[stage, right=0.55cm of build] (auth) {Inject auth\\\& headers};
+  \node[stage, right=0.55cm of auth] (pool) {Acquire pooled\\connection};
+  \node[stage, right=0.55cm of pool] (tls) {TLS handshake\\(if cold)};
+  \node[stage, right=0.55cm of tls] (send) {Send \&\\await response};
+  \node[stage, right=0.55cm of send] (parse) {Status check\\\& typed parse};
+
+  \draw[flow] (build) -- (auth);
+  \draw[flow] (auth) -- (pool);
+  \draw[flow] (pool) -- (tls);
+  \draw[flow] (tls) -- (send);
+  \draw[flow] (send) -- (parse);
+
+  % Retry loop
+  \node[sidebox, below=1.15cm of send] (retry) {Retry?\\budget / jitter /\\idempotency gate};
+  \draw[retryflow] (send.south) -- node[right, align=left, xshift=2pt]
+       {\footnotesize retryable failure} (retry.north);
+  \draw[retryflow] (retry.west) -| node[pos=0.25, above, align=center]
+       {\footnotesize backoff sleep} ($(pool.south)!0.5!(tls.south)$);
+
+  % Timeout brace above
+  \draw[decorate, decoration={brace, amplitude=6pt}, thick, draw=packtgray]
+    ($(pool.north west)+(0,0.18)$) -- ($(send.north east)+(0,0.18)$)
+    node[midway, above=8pt, align=center] {\footnotesize timeouts bound every phase};
+
+  % Observability side box
+  \node[sidebox, below=1.15cm of pool] (obs) {Telemetry hooks\\(logging, timing)};
+  \draw[flow, draw=packtgray] (obs.north) -- (pool.south);
+  \draw[flow, draw=packtgray] (obs.east) -| (parse.south);
+\end{tikzpicture}
+\caption{Client request lifecycle pipeline. Every phase between pool
+acquisition and response receipt is bounded by an explicit timeout; failures
+route through a retry gate that enforces budget, jitter, and idempotency;
+telemetry hooks observe every stage.}
+\label{fig:ch02-lifecycle}
+\end{figure}
+
+The pipeline's constituent responsibilities:
+
+\begin{description}
+  \item[Base URL handling.] Store the base URL once; join paths with a
+        \texttt{httpx.URL} (or \texttt{urljoin} semantics) rather than string
+        concatenation. Trailing-slash bugs (\texttt{api.example.com/v1} +
+        \texttt{/parts}) are the single most common client configuration
+        defect. \texttt{httpx.Client(base\_url=...)} implements the correct
+        merge semantics.
+  \item[Header management.] Set protocol headers (\texttt{Accept},
+        \texttt{Accept-Encoding}, \texttt{User-Agent}) at client construction.
+        A descriptive \texttt{User-Agent} (product, version, contact) is
+        professional courtesy --- and often a provider requirement --- so
+        your traffic is identifiable when you are accidentally the source of
+        an incident.
+  \item[Authentication injection.] Credentials live in exactly one place: an
+        \texttt{auth} callable or a constructor-level header. Never sprinkle
+        \texttt{headers=\{"Authorization": ...\}} across call sites, and
+        never log the \texttt{Authorization} header (see
+        Section~\ref{sec:ch02-pitfalls}).
+  \item[Hooks / middleware.] \texttt{httpx} event hooks
+        (\texttt{request}, \texttt{response}) are the seam for telemetry,
+        trace-context propagation, and cross-cutting policy --- without
+        polluting business logic.
+\end{description}
+
+\subsection{Timeout Taxonomy: Bounding Every Wait}
+\label{sec:ch02-timeouts}
+
+\begin{definition}[Timeout]
+A \emph{timeout} is an upper bound on the wall-clock time a specific phase of
+an operation may consume before the operation is aborted and the phase's
+resources are reclaimed. A timeout is a correctness property, not a
+performance tuning knob: it converts an unbounded wait (a hang) into a bounded
+failure (an exception).
+\end{definition}
+
+A request without a timeout is a thread (or task) that can be held
+\emph{forever}. Nygard documents the canonical failure mode
+\cite{nygard2018releaseit}: a dependency degrades until responses slow to a
+crawl; every worker in the calling service blocks awaiting sockets that will
+never answer; the caller's pool exhausts; the caller stops serving its own
+traffic; the outage propagates upstream. The dependency's partial failure
+becomes the consumer's total failure --- a cascading failure enabled entirely
+by the missing timeout. Hence the industry adage we elevate to law:
+
+\begin{warningbox}
+\textbf{There is no safe default of ``no timeout.''} \texttt{urllib}'s global
+default is \emph{infinite}; \texttt{requests} defaults to \emph{infinite};
+\texttt{httpx} defaults to 5~seconds and must be explicitly disabled to
+remove. Any code review that finds a bare \texttt{requests.get(url)} or
+\texttt{urlopen(url)} with no timeout has found a latent severity-1 incident.
+``It has never hung'' is a statement about the past, not a property of the
+system.
+\end{warningbox}
+
+\subsubsection{The four timeout dimensions}
+
+\texttt{httpx.Timeout} exposes the complete taxonomy
+\cite{httpxdocs}:
+
+\begin{description}
+  \item[connect] --- time to establish the connection: DNS resolution, TCP
+        handshake, and TLS negotiation. Bounds a dead or firewalled host.
+        Typical: 1--5~s. Connects to a healthy host on a healthy network
+        complete in tens of milliseconds; a 5~s connect timeout is already
+        generous.
+  \item[read] --- maximum gap while awaiting bytes from the peer: time to
+        first byte \emph{and} inter-chunk gaps while streaming a body. Bounds
+        a hung application behind a healthy load balancer --- the failure mode
+        TCP cannot see, because the connection is fine and the peer simply
+        never sends. This is the timeout whose absence causes the war story in
+        Section~\ref{sec:ch02-warstory}. Typical: 5--30~s, aligned to the
+        endpoint's documented p99.
+  \item[write] --- maximum gap while sending the request body. Matters for
+        uploads and large POST bodies; bounds a peer that stops reading.
+        Typical: 5--30~s.
+  \item[pool] --- time to wait for a connection from a saturated pool. Bounds
+        queueing delay when concurrency exceeds pool size, turning silent
+        queueing (head-of-line blocking that looks like a hang) into a loud,
+        actionable \texttt{PoolTimeout}. Typical: 1--5~s.
+\end{description}
+
+\textbf{Per-call vs.\ client defaults.} Set a conservative default on the
+client (e.g., connect 2~s, read 10~s, write 10~s, pool 2~s) and tighten or
+loosen per call where the endpoint contract justifies it --- a report-generation
+endpoint may legitimately need a 120~s read timeout, but that exception must
+be explicit at the call site, not global. A default of ``whatever the library
+ships'' is an abdication; a default of ``infinite'' is a defect.
+
+\subsection{Connection Pooling, Keep-Alive, and the Cost of Churn}
+\label{sec:ch02-pooling}
+
+Establishing a fresh HTTPS connection costs: one DNS lookup (typically
+cached, 1--50~ms when not), one TCP handshake (1 RTT), and one TLS~1.3
+handshake (1 RTT more, plus certificate validation and CPU for asymmetric
+cryptography). On a cross-country path at 60~ms RTT, a cold connection adds
+$\sim$120--200~ms before the first request byte flows --- and the full
+handshake's key-exchange cost is paid again for every request. HTTP keep-alive
+amortizes all of it: the pool holds idle connections open and hands them to
+subsequent requests, reducing per-request overhead to the request/response
+exchange itself.
+
+\texttt{httpx.Limits} exposes the two sizing levers
+\cite{httpxdocs}:
+
+\begin{description}
+  \item[max\_connections] --- total connections the pool will hold. Size it to
+        the peak concurrent requests your process will issue to \emph{all}
+        hosts. Default: 100.
+  \item[max\_keepalive\_connections] --- connections retained idle for reuse.
+        Size it to your steady-state concurrency against this client.
+        Default: 20. A value too small causes \emph{churn}: connections are
+        closed on response completion and rebuilt on the next request,
+        re-paying handshake costs under load.
+\end{description}
+
+Three subtleties separate a correctly tuned pool from a cargo-culted one:
+
+\begin{enumerate}
+  \item \textbf{DNS caching.} The OS resolver cache is outside Python's
+        control; long-lived pools naturally avoid re-resolution because
+        keep-alive connections skip DNS entirely. For short-lived
+        connections, resolution happens per connection, and a flaky resolver
+        becomes a latency multiplier.
+  \item \textbf{TLS session reuse.} TLS~1.3 session tickets allow
+        \emph{resumed} handshakes (0-RTT/1-RTT reduction) on new connections
+        to the same host; libraries built on the stdlib \texttt{ssl} module
+        benefit when a shared \texttt{SSLContext} is used. Keep-alive still
+        dominates: the cheapest handshake is the one you never perform.
+  \item \textbf{One client per base URL, long-lived.} Create the
+        \texttt{Client} once (module scope or dependency-injected), reuse it
+        for the process lifetime, and close it deterministically (context
+        manager or shutdown hook). Creating a client per request discards the
+        pool --- the single most common httpx misuse --- while never closing
+        clients leaks sockets until the OS reclaims them.
+\end{enumerate}
+
+\subsection{Retry Engineering: Backoff, Jitter, Budgets, Idempotency}
+\label{sec:ch02-retries}
+
+Retries exist because a large class of failures is \emph{transient}: packet
+loss, a restarting pod, a load balancer draining a node, a brief 502 from a
+proxy mid-deploy. Retrying converts transient failure into success. Retrying
+\emph{wrong} converts a partial outage into a total one --- the retry storm of
+Section~\ref{sec:ch02-warstory}.
+
+\subsubsection{Exponential backoff and full jitter: the math}
+
+Let attempts be numbered $n = 1, 2, \dots, N$ after the initial call, with
+base delay $b$ and cap $c$. Uncapped exponential backoff waits
+\begin{equation}
+  W_n = b \cdot 2^{\,n-1},
+\end{equation}
+so with $b = 1\,\text{s}$ the schedule is $1, 2, 4, 8, 16, \dots$ seconds.
+Exponential spacing buys the server recovery time, but it has a fatal flaw
+under correlated failure: when an outage ends, \emph{every} queued client
+wakes on the same schedule and re-hammers the server in synchronized waves ---
+the \emph{thundering herd}.
+
+\textbf{Full jitter} (popularized by the AWS Architecture Blog, see
+Section~\ref{sec:ch02-bibliography}) draws each delay uniformly from a range:
+\begin{equation}
+  W_n \;\sim\; \mathrm{Uniform}\bigl(0,\; \min(c,\; b \cdot 2^{\,n-1})\bigr).
+\end{equation}
+Because a uniform variable on $[0, m]$ has mean $m/2$, the expected per-attempt
+delay while the cap is inactive is
+\begin{equation}
+  \mathbb{E}[W_n] \;=\; \frac{b \cdot 2^{\,n-1}}{2},
+  \qquad
+  \mathbb{E}\!\left[\sum_{n=1}^{N} W_n\right]
+  \;=\; \frac{b}{2}\left(2^{N} - 1\right),
+  \label{eq:ch02-jitter-total}
+\end{equation}
+exactly half the deterministic schedule, with the same exponential growth
+profile. Jitter sacrifices no meaningful aggressiveness while decorrelating
+clients: collision probability across $k$ concurrent retriers drops from
+$\sim$1 (deterministic) to $\sim$1/(range width). A variant,
+\emph{decorrelated jitter}, samples $W_n \sim \mathrm{Uniform}(b,\,
+3 W_{n-1}) \wedge c$, coupling consecutive waits instead of attempt indices;
+it spreads load comparably and converges faster after short blips. Both are
+vastly superior to unjittered or ``equal jitter'' schedules; full jitter is
+the simplest to reason about and is what we implement.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.86\textwidth, height=6.2cm,
+    xlabel={Retry attempt $n$},
+    ylabel={Delay (seconds)},
+    xmin=0.5, xmax=6.5, ymin=0, ymax=33,
+    xtick={1,2,3,4,5,6},
+    legend style={at={(0.02,0.97)}, anchor=north west, font=\footnotesize},
+    grid=both, grid style={gray!25},
+]
+  % Deterministic exponential: b=1 -> 1,2,4,8,16,32
+  \addplot[mark=*, thick, color=darkblue] coordinates
+    {(1,1) (2,2) (3,4) (4,8) (5,16) (6,32)};
+  \addlegendentry{Deterministic: $W_n = 2^{n-1}$}
+  % Full-jitter expectation: b/2 * 2^{n-1}
+  \addplot[mark=square*, thick, color=packtorange] coordinates
+    {(1,0.5) (2,1) (3,2) (4,4) (5,8) (6,16)};
+  \addlegendentry{Full jitter expectation: $\mathbb{E}[W_n] = 2^{n-2}$}
+  % One seeded full-jitter sample realization (seed 42, illustrative)
+  \addplot[mark=triangle*, dashed, thick, color=packtgray] coordinates
+    {(1,0.64) (2,0.28) (3,3.15) (4,3.88) (5,11.6) (6,2.79)};
+  \addlegendentry{Full jitter, one seeded realization}
+\end{axis}
+\end{tikzpicture}
+\caption{Backoff schedules for $b = 1\,\text{s}$. Deterministic backoff grows
+exponentially but synchronizes clients; full jitter halves the expected delay
+and, crucially, decorrelates concurrent retriers (one seeded realization
+shown). Production policy caps both at $c$ (here 30~s).}
+\label{fig:ch02-backoff-curve}
+\end{figure}
+
+Figure~\ref{fig:ch02-retry-timeline} shows the same policy as a timeline for a
+single request's life.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    attempt/.style={rectangle, draw=darkblue, fill=blue!10, thick,
+                    minimum height=0.8cm, align=center},
+    sleep/.style={rectangle, draw=packtorange, fill=orange!12, thick,
+                  minimum height=0.8cm, align=center},
+    outcome/.style={circle, draw=packtgray, fill=green!12, thick,
+                    inner sep=1.5pt, align=center}
+]
+  \node[attempt, minimum width=1.5cm] (a0) at (0,0) {Attempt 0\\\footnotesize 500};
+  \node[sleep,   minimum width=1.1cm, right=0.35cm of a0] (s1) {jit\\\footnotesize 0.4s};
+  \node[attempt, minimum width=1.5cm, right=0.35cm of s1] (a1) {Attempt 1\\\footnotesize 500};
+  \node[sleep,   minimum width=1.7cm, right=0.35cm of a1] (s2) {jitter\\\footnotesize 1.7s};
+  \node[attempt, minimum width=1.5cm, right=0.35cm of s2] (a2) {Attempt 2\\\footnotesize 429};
+  \node[sleep,   minimum width=2.3cm, right=0.35cm of a2] (s3) {Retry-After\\\footnotesize 5.0s};
+  \node[attempt, minimum width=1.5cm, fill=green!15, right=0.35cm of s3] (a3) {Attempt 3\\\footnotesize 200 OK};
+  \node[outcome, right=0.45cm of a3] (ok) {\checkmark};
+
+  \foreach \x/\y in {a0/s1, s1/a1, a1/s2, s2/a2, a2/s3, s3/a3, a3/ok}
+    \draw[->, thick, >=stealth] (\x) -- (\y);
+
+  \draw[decorate, decoration={brace, mirror, amplitude=6pt}, thick, draw=packtgray]
+    ($(a0.south west)+(0,-0.12)$) -- ($(ok.south east)+(0,-0.12)$)
+    node[midway, below=8pt, align=center]
+    {\footnotesize retry budget: total time \& attempts bounded; 429 defers to server-advertised delay};
+\end{tikzpicture}
+\caption{Retry timeline for one request. Transient \texttt{500}s consume
+full-jitter backoff slots; a \texttt{429} overrides the schedule with the
+server's \texttt{Retry-After}; the budget caps total attempts and elapsed
+time.}
+\label{fig:ch02-retry-timeline}
+\end{figure}
+
+\subsubsection{Retry budgets}
+
+Per-request caps ($N \le 3$--$5$ attempts, a total-time ceiling) bound the
+blast radius of one call. They do not bound the \emph{fleet}: if 30\% of all
+calls are failing, a retry-everything policy multiplies offered load by up to
+$N$ and finishes the server off. A \textbf{retry budget} rate-limits retries
+themselves --- e.g., ``no more than 10\% of issued requests per minute may be
+retries'' --- typically implemented as a shared token bucket. When the budget
+is empty, fail fast and let the circuit breaker (Chapter~15) take over; the
+two patterns compose: retries handle transient blips, the breaker handles
+sustained failure, the budget prevents retries from feeding the fire.
+
+\subsubsection{Retry-After and which statuses merit retry}
+
+RFC~9110 \cite{rfc9110} defines \texttt{Retry-After} (on \texttt{429} and
+\texttt{503}) as the server's explicit request for a delay, in seconds or
+HTTP-date. A server that tells you when to come back is giving you better
+information than any locally computed backoff; \textbf{always honor it}
+(clamped to a sane ceiling) when present. Retry policy by status class:
+
+\begin{itemize}
+  \item \textbf{Retry:} \texttt{408}, \texttt{425}, \texttt{429}, and
+        \texttt{5xx} (with skepticism for \texttt{501}/\texttt{505}), plus
+        transport errors (connect failures, connection resets, read
+        timeouts).
+  \item \textbf{Never retry (as-is):} \texttt{400}, \texttt{401},
+        \texttt{403}, \texttt{404}, \texttt{409}, \texttt{422} --- these are
+        deterministic; the identical request will fail identically.
+\end{itemize}
+
+\subsubsection{The idempotency gate}
+
+A retry replays a request. Replaying is safe only when replay cannot change
+the outcome: per RFC~9110 \cite{rfc9110}, \texttt{GET}, \texttt{HEAD},
+\texttt{PUT}, \texttt{DELETE}, and \texttt{OPTIONS} are idempotent by method
+semantics. \texttt{POST} is not --- a retried \texttt{POST /orders} may create
+two orders, and a read timeout is the treacherous case: the server may have
+processed the request \emph{and then} the response was lost, so the client's
+``failure'' is the server's ``success.'' The professional escape hatches, in
+order of preference:
+
+\begin{enumerate}
+  \item \textbf{Idempotency keys:} the API accepts a client-generated
+        \texttt{Idempotency-Key} header and deduplicates replays server-side
+        (Chapter~10 covers the provider side). With a key, retrying a
+        \texttt{POST} becomes safe.
+  \item \textbf{Natural idempotency:} the operation is semantically
+        repeatable (``set status to X''), verifiable from the endpoint
+        contract.
+  \item \textbf{No retry:} when neither holds, propagate the failure and let
+        a human or a reconciliation job decide. A client that guesses wrong
+        here causes data corruption, the worst failure class there is.
+\end{enumerate}
+
+\subsection{Rate-Limit-Aware Consumption}
+\label{sec:ch02-ratelimit}
+
+Server-side rate limiting (Chapter~14) protects the provider; client-side
+throttling is the consumer's half of the contract. A well-behaved client:
+
+\begin{enumerate}
+  \item \textbf{Proactively paces itself} below the published limit with a
+        token bucket: a bucket of capacity $B$ refills at rate $r$ tokens/s;
+        each request consumes one token; an empty bucket blocks until a token
+        accrues. Sustained throughput converges to $r$ with burst tolerance
+        $B$.
+  \item \textbf{Reacts to signals:} on \texttt{429}, read \texttt{Retry-After}
+        and the \texttt{RateLimit-*} header family (limit, remaining, reset),
+        back the bucket off, and retry only after the advertised window.
+  \item \textbf{Never compensates for a 429 by raising parallelism} --- the
+        queue is not shorter because you knocked louder.
+\end{enumerate}
+
+Composing the two layers (proactive bucket, reactive retry policy) yields a
+client that stays under the limit in steady state and recovers gracefully when
+it mis-estimates.
+
+\subsection{Pagination and Streaming}
+\label{sec:ch02-pagination}
+
+APIs paginate to bound response size; consumers must abstract the mechanics
+behind a lazy iterator so call sites write \texttt{for part in
+client.parts():} and nothing more. The three dominant patterns
+(Chapter~8 designs them; here we consume them):
+
+\begin{description}
+  \item[Offset/limit] --- \texttt{?offset=100\&limit=50}. Simple, stateless,
+        but unstable under concurrent writes (rows shift between pages) and
+        increasingly expensive for deep offsets. Termination: a short page or
+        an empty one.
+  \item[Cursor] --- \texttt{?cursor=eyJpZCI6...}. Opaque, stable, cheap at
+        depth. The cursor must be treated as an opaque token --- never parsed,
+        never fabricated. Termination: absent \texttt{next\_cursor}.
+  \item[RFC 8288 Link headers] ---
+        \texttt{Link: <...?page=3>; rel="next"}. Self-describing and
+        cache-friendly; termination is the absence of \texttt{rel="next"}.
+\end{description}
+
+For large single payloads (catalog exports, firmware images), do not buffer:
+\texttt{client.stream(...)} plus \texttt{response.iter\_bytes()} yields chunks
+as they arrive, keeping memory $O(\text{chunk size})$ instead of
+$O(\text{payload size})$. Three production details: (1) \texttt{httpx}
+transparently negotiates and applies \texttt{gzip}/\texttt{br} decompression
+when the codecs are installed --- verify \texttt{Content-Encoding} handling
+rather than assuming it; (2) progress reporting must be driven by bytes
+received against \texttt{Content-Length}, tolerating its absence
+(chunked responses have none); (3) cancellation must propagate --- closing
+the stream or cancelling the task must release the connection promptly.
+
+\subsection{An Error Taxonomy for Consumers}
+\label{sec:ch02-errors}
+
+``The API call failed'' is not an error message; it is a shrug. Actionable
+consumers classify failure along three orthogonal layers, because each layer
+has a different owner and a different remedy:
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    \textbf{Layer} & \textbf{Examples} & \textbf{Meaning} & \textbf{Action} \\
+    \midrule
+    Transport & ConnectTimeout, ReadTimeout, ConnectError, pool exhaustion &
+    Request never completed, or response never arrived & Retry (if
+    idempotent); check network, DNS, TLS; alert on sustained rate \\
+    Status (HTTP) & 4xx, 5xx after a complete exchange &
+    Server answered and refused/failed & 4xx: fix the request (deterministic).
+    5xx/429: retry per policy; page if sustained \\
+    Contract / parse & JSON decode failure, schema violation, missing field &
+    200 OK but the payload broke the contract & Never retry. Raise loudly;
+    version skew or a provider defect --- treat as a bug \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Consumer error taxonomy. Each layer maps to a distinct exception
+  type and remediation path.}
+  \label{tab:ch02-error-taxonomy}
+\end{table}
+
+We therefore define a small exception hierarchy --- \texttt{ApiClientError}
+at the root with \texttt{ApiTransportError}, \texttt{ApiStatusError}
+(subclassed as \texttt{ApiClientError4xx}, \texttt{ApiServerError5xx},
+\texttt{ApiRateLimited} carrying \texttt{retry\_after}), and
+\texttt{ApiContractError} --- so callers can \texttt{except} precisely the
+category they can act on. Kleppmann's systems lens
+\cite{kleppmann2017ddia} generalizes the point: at a network boundary,
+distinguish ``the request failed,'' ``the request succeeded,'' and
+\emph{``we cannot know''} --- and design each path explicitly.
+
+%% ---------------------------------------------------------------------------
+%% 4. Production-Ready Code Implementation
+%% ---------------------------------------------------------------------------
+
+\section{Production-Ready Code Implementation}
+\label{sec:ch02-code}
+
+All listings target Python 3.11+, are fully type-annotated, and run offline.
+The demonstration server is the local stub in
+Listing~\ref{lst:ch02-stub}; every test uses \texttt{httpx.MockTransport}.
+Run them with \texttt{python} (listings) and \texttt{pytest -q} (test suite)
+from a virtual environment configured per
+Section~\ref{sec:ch02-dependencies}.
+
+\subsection{Baseline: A stdlib urllib Consumer}
+\label{sec:ch02-urllib}
+
+Listing~\ref{lst:ch02-urllib} is the deliberate ``before'' picture: correct,
+dependency-free, and studded with the sharp edges catalogued in
+Section~\ref{sec:ch02-evolution}. Read it and enumerate what production would
+demand that it lacks.
+
+\begin{examplebox}
+\textbf{Reading the baseline.} As you read Listing~\ref{lst:ch02-urllib},
+annotate: Where are the timeout dimensions? Where is keep-alive? What happens
+on a 429? Where would authentication live? What is logged? The gaps you find
+are the design brief for the httpx client that follows.
+\end{examplebox}
+
+\begin{minted}[caption={\texttt{ch02\_urllib\_baseline.py} --- stdlib baseline.},label={lst:ch02-urllib}]{python}
+"""ch02_urllib_baseline.py -- stdlib urllib consumer (baseline, with sharp edges).
+
+Run against the local stub:  python ch02_stub_server.py   (in another shell)
+Then:                        python ch02_urllib_baseline.py
+"""
+from __future__ import annotations
+
+import json
+import logging
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
+
+logger = logging.getLogger("ch02.urllib_baseline")
+
+BASE_URL = "http://127.0.0.1:8765"  # local stub only -- never the internet
+
+
+@dataclass(frozen=True)
+class Part:
+    part_id: str
+    name: str
+    unit_price_cents: int
+
+
+def fetch_part(part_id: str, timeout_s: float = 5.0) -> Part:
+    """Fetch one part with urllib. NOTE the single, flat timeout.
+
+    Sharp edges on display:
+      * one timeout covers DNS+connect+read; no write/pool dimension;
+      * no session -> no keep-alive: DNS/TCP/TLS are re-paid per call;
+      * HTTPError is raised for 4xx/5xx AND doubles as a response object;
+      * JSON, status classification, and retry are all manual.
+    """
+    url = f"{BASE_URL}/parts/{part_id}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            status: int = resp.status
+            raw: bytes = resp.read()  # unbounded: a hostile peer can exhaust RAM
+    except urllib.error.HTTPError as exc:
+        # HTTPError is simultaneously the exception and the response.
+        logger.error("HTTP %s for %s", exc.code, url)
+        raise RuntimeError(f"status {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        # Transport failure (DNS, refused connection, timeout -> socket.timeout
+        # wrapped inside .reason). Nothing distinguishes the sub-causes here.
+        logger.error("transport failure for %s: %s", url, exc.reason)
+        raise RuntimeError(f"transport: {exc.reason}") from exc
+
+    if status != 200:
+        raise RuntimeError(f"unexpected status {status}")
+    payload: dict[str, Any] = json.loads(raw.decode("utf-8"))
+    return Part(
+        part_id=str(payload["part_id"]),
+        name=str(payload["name"]),
+        unit_price_cents=int(payload["unit_price_cents"]),
+    )
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    part = fetch_part("NR-1001")
+    logger.info("got part: %s", part)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{A Production-Grade httpx Client}
+\label{sec:ch02-httpxclient}
+
+Listing~\ref{lst:ch02-httpx} implements the pipeline of
+Figure~\ref{fig:ch02-lifecycle}: four-dimension timeouts, bounded pooling,
+single-point auth injection, event-hook telemetry, the error taxonomy of
+Table~\ref{tab:ch02-error-taxonomy}, and transport injection so the identical
+object runs against production URLs or an in-memory mock.
+
+\begin{minted}[caption={\texttt{ch02\_httpx\_client.py} --- production client core.},label={lst:ch02-httpx}]{python}
+"""ch02_httpx_client.py -- production-grade httpx client for the
+Northwind Robotics Parts API.
+
+Design contract:
+  * explicit 4-dimension timeouts (connect/read/write/pool); nothing infinite;
+  * bounded connection pool with keep-alive; one long-lived client instance;
+  * auth injected in exactly one place, never logged;
+  * typed error taxonomy: transport vs status vs contract;
+  * telemetry via event hooks (latency + status, header-safe logging);
+  * transport injection (httpx.MockTransport) for hermetic offline tests.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+import httpx
+
+logger = logging.getLogger("ch02.httpx_client")
+
+RETRYABLE_STATUSES: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+# ---- Error taxonomy ---------------------------------------------------------
+
+class ApiClientError(Exception):
+    """Root of all errors raised by this client."""
+
+
+class ApiTransportError(ApiClientError):
+    """The request never completed: DNS, TCP, TLS, timeout, pool exhaustion."""
+
+
+class ApiStatusError(ApiClientError):
+    """The server answered with a non-2xx status."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class ApiClientError4xx(ApiStatusError):
+    """Deterministic caller fault; retrying as-is is futile."""
+
+
+class ApiServerError5xx(ApiStatusError):
+    """Transient server fault; a candidate for retry per policy."""
+
+
+class ApiRateLimited(ApiStatusError):
+    """429: carries the server-advertised delay when present."""
+
+    def __init__(self, message: str, *, status_code: int, retry_after: float | None) -> None:
+        super().__init__(message, status_code=status_code)
+        self.retry_after = retry_after
+
+
+class ApiContractError(ApiClientError):
+    """2xx received, but the payload violates the expected contract."""
+
+
+# ---- Telemetry hooks ---------------------------------------------------------
+
+def _log_request(request: httpx.Request) -> None:
+    # NEVER log request.headers: Authorization lives there.
+    logger.info("request %s %s", request.method, request.url.path)
+
+
+def _log_response(response: httpx.Response) -> None:
+    # Latency is timed in _request() with time.monotonic(): response.elapsed
+    # is only populated after the body is read, which a hook must not force
+    # (it would buffer streaming responses).
+    logger.info(
+        "response %s %s -> %d",
+        response.request.method, response.request.url.path, response.status_code,
+    )
+
+
+# ---- The client ---------------------------------------------------------------
+
+class NorthwindPartsClient:
+    """Typed, resilient consumer for the Northwind Robotics Parts API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        transport: httpx.BaseTransport | None = None,  # inject MockTransport in tests
+        timeout: httpx.Timeout | None = None,
+        limits: httpx.Limits | None = None,
+    ) -> None:
+        if not base_url:
+            raise ValueError("base_url must be non-empty")
+        if not api_key:
+            raise ValueError("api_key must be non-empty")
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            # Auth lives HERE and nowhere else.
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": "northwind-parts-sdk/1.0 (ops@northwind-robotics.example)",
+            },
+            timeout=timeout or httpx.Timeout(
+                connect=2.0, read=10.0, write=10.0, pool=2.0
+            ),
+            limits=limits or httpx.Limits(
+                max_connections=20, max_keepalive_connections=10,
+                keepalive_expiry=30.0,
+            ),
+            event_hooks={"request": [_log_request], "response": [_log_response]},
+            transport=transport,
+        )
+
+    # Context-manager protocol: deterministic socket lifecycle.
+    def __enter__(self) -> "NorthwindPartsClient":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._client.close()
+
+    # Core request path ------------------------------------------------------
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        started = time.monotonic()
+        try:
+            response = self._client.request(method, path, **kwargs)
+        except httpx.TimeoutException as exc:
+            kind = type(exc).__name__  # ConnectTimeout / ReadTimeout / PoolTimeout / ...
+            logger.warning("timeout (%s) on %s %s", kind, method, path)
+            raise ApiTransportError(f"{kind} on {method} {path}") from exc
+        except httpx.TransportError as exc:
+            logger.warning("transport error on %s %s: %s", method, path, exc)
+            raise ApiTransportError(f"transport error on {method} {path}: {exc}") from exc
+        finally:
+            logger.debug(
+                "call %s %s took %.1fms",
+                method, path, (time.monotonic() - started) * 1000.0,
+            )
+        self._raise_for_status(response)
+        return response
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        code = response.status_code
+        if code < 400:
+            return
+        message = f"{response.request.method} {response.request.url.path} -> {code}"
+        if code == 429:
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            raise ApiRateLimited(message, status_code=code, retry_after=retry_after)
+        if code >= 500:
+            raise ApiServerError5xx(message, status_code=code)
+        raise ApiClientError4xx(message, status_code=code)
+
+    # Public API --------------------------------------------------------------
+
+    def get_json(self, path: str, **kwargs: Any) -> dict[str, Any]:
+        response = self._request("GET", path, **kwargs)
+        try:
+            payload = response.json()
+        except ValueError as exc:  # 200 OK but not JSON: contract breach.
+            raise ApiContractError(f"{path}: invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise ApiContractError(f"{path}: expected JSON object, got {type(payload).__name__}")
+        return payload
+
+    def get_part(self, part_id: str) -> dict[str, Any]:
+        if not part_id:
+            raise ValueError("part_id must be non-empty")
+        return self.get_json(f"/parts/{part_id}")
+
+
+def _parse_retry_after(value: str | None, *, ceiling_s: float = 60.0) -> float | None:
+    """Parse a delta-seconds Retry-After header, clamped to a ceiling."""
+    if value is None:
+        return None
+    try:
+        seconds = float(value)  # delta-seconds form; HTTP-date form omitted for brevity
+    except ValueError:
+        return None
+    return max(0.0, min(seconds, ceiling_s))
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # The demo key is synthetic; the stub accepts any non-empty bearer token.
+    with NorthwindPartsClient("http://127.0.0.1:8765", api_key="demo-key-nr-001") as client:
+        part = client.get_part("NR-1001")
+        logger.info("part: %s", part)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Retry Engineering with tenacity}
+\label{sec:ch02-retry-code}
+
+Listing~\ref{lst:ch02-retry} layers retry policy onto the client using
+\texttt{tenacity}. The policy encodes exactly the rules of
+Section~\ref{sec:ch02-retries}: full jitter via
+\texttt{wait\_random\_exponential} (mean $b/2$ doubling to the cap, matching
+Equation~\ref{eq:ch02-jitter-total}), \texttt{Retry-After} honored and clamped
+when a 429 advertises it, a combined attempt-plus-elapsed budget, and an
+idempotency gate that refuses to replay non-idempotent methods lacking an
+idempotency key. Determinism for tests is achieved by injecting the random
+source and a no-op sleep.
+
+\begin{minted}[caption={\texttt{ch02\_retry.py} --- jitter, Retry-After, idempotency gate.},label={lst:ch02-retry}]{python}
+"""ch02_retry.py -- retry wrapper: full jitter + Retry-After + idempotency gate.
+
+Policy (matches Section 3.5):
+  * retry on ApiTransportError, ApiServerError5xx, ApiRateLimited;
+  * full jitter: wait ~ Uniform(0, min(cap, base * 2**(n-1))), base=0.5s, cap=8s;
+  * on 429 with Retry-After, the server-advertised delay OVERRIDES the jitter;
+  * budget: at most 4 attempts AND at most 20s total elapsed;
+  * idempotency gate: non-idempotent methods retry only with an
+    Idempotency-Key header;
+  * deterministic tests: inject `rng` and `sleep`.
+"""
+from __future__ import annotations
+
+import logging
+import random
+from collections.abc import Callable
+
+import httpx
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    stop_after_delay,
+)
+
+from ch02_httpx_client import (
+    ApiRateLimited,
+    ApiServerError5xx,
+    ApiTransportError,
+    NorthwindPartsClient,
+)
+
+logger = logging.getLogger("ch02.retry")
+
+BASE_DELAY_S = 0.5
+CAP_DELAY_S = 8.0
+MAX_ATTEMPTS = 4
+MAX_ELAPSED_S = 20.0
+
+SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+RETRYABLE = (ApiTransportError, ApiServerError5xx, ApiRateLimited)
+
+
+def wait_policy(state: RetryCallState, *, rng: random.Random) -> float:
+    """Retry-After from a 429 wins; otherwise full jitter on exponential backoff.
+
+    tenacity calls this between attempts with the just-failed attempt's state,
+    so the server-advertised delay is read straight off the raised exception.
+    """
+    exc = state.outcome.exception() if state.outcome is not None else None
+    if isinstance(exc, ApiRateLimited) and exc.retry_after is not None:
+        logger.info("429 received: honoring Retry-After of %.1fs", exc.retry_after)
+        return exc.retry_after
+    upper = min(CAP_DELAY_S, BASE_DELAY_S * (2 ** (state.attempt_number - 1)))
+    delay = rng.uniform(0.0, upper)
+    logger.info("attempt %d failed; full-jitter backoff %.2fs",
+                state.attempt_number, delay)
+    return delay
+
+
+class ResilientPartsClient:
+    """NorthwindPartsClient + retry policy. Retryable failures only."""
+
+    def __init__(
+        self,
+        inner: NorthwindPartsClient,
+        *,
+        rng: random.Random | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
+        self._inner = inner
+        # Seeded RNG and injectable sleep keep tests deterministic & instant.
+        self._rng = rng or random.Random(1337)
+        self._sleep = sleep  # None -> tenacity's real sleep (production)
+
+    def request_with_retry(
+        self,
+        method: str,
+        path: str,
+        *,
+        idempotency_key: str | None = None,
+        **kwargs: object,
+    ) -> httpx.Response:
+        method = method.upper()
+        if method not in SAFE_METHODS and not idempotency_key:
+            raise ValueError(
+                f"refusing to auto-retry non-idempotent {method} without "
+                "an idempotency key"
+            )
+        if idempotency_key:
+            headers = dict(kwargs.pop("headers", {}) or {})
+            headers["Idempotency-Key"] = idempotency_key
+            kwargs["headers"] = headers
+
+        retrying = Retrying(
+            retry=retry_if_exception_type(RETRYABLE),
+            wait=lambda state: wait_policy(state, rng=self._rng),
+            stop=stop_after_attempt(MAX_ATTEMPTS) | stop_after_delay(MAX_ELAPSED_S),
+            sleep=self._sleep if self._sleep is not None else _real_sleep,
+            reraise=True,
+        )
+        return retrying(self._inner._request, method, path, **kwargs)
+
+
+def _real_sleep(seconds: float) -> None:
+    import time
+
+    time.sleep(seconds)
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    inner = NorthwindPartsClient("http://127.0.0.1:8765", api_key="demo-key-nr-001")
+    resilient = ResilientPartsClient(inner)
+    try:
+        response = resilient.request_with_retry("GET", "/parts/NR-1001")
+        logger.info("status=%d body=%s", response.status_code, response.text[:80])
+    finally:
+        inner.close()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Pagination Iterators and a Streaming Downloader}
+\label{sec:ch02-pagination-code}
+
+Listing~\ref{lst:ch02-pagination} hides pagination mechanics behind lazy
+typed iterators (cursor and link-header variants) and adds a streaming
+downloader with byte-level progress and prompt cancellation.
+
+\begin{minted}[caption={\texttt{ch02\_pagination\_stream.py} --- iterators and streaming.},label={lst:ch02-pagination}]{python}
+"""ch02_pagination_stream.py -- typed pagination iterators + streaming download.
+
+Cursor iterator: follows opaque `next_cursor` tokens; never parses them.
+Link iterator: follows RFC 8288 `Link: <url>; rel="next"` headers.
+Downloader:    streams via iter_bytes (bounded memory), reports progress,
+               and honours cancellation by closing the response promptly.
+"""
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from ch02_httpx_client import ApiContractError, NorthwindPartsClient
+
+logger = logging.getLogger("ch02.pagination")
+
+CHUNK_SIZE = 64 * 1024  # 64 KiB: memory stays O(chunk), never O(payload)
+
+
+def iter_parts_cursor(
+    client: NorthwindPartsClient,
+    *,
+    page_size: int = 50,
+    max_pages: int = 1000,  # runaway-guard: a broken server must not loop us forever
+) -> Iterator[dict[str, Any]]:
+    """Yield every part from a cursor-paginated /parts endpoint."""
+    cursor: str | None = None
+    for _ in range(max_pages):
+        params: dict[str, Any] = {"limit": page_size}
+        if cursor is not None:
+            params["cursor"] = cursor  # opaque token: pass through, never parse
+        page = client.get_json("/parts", params=params)
+        items = page.get("items")
+        if not isinstance(items, list):
+            raise ApiContractError("/parts: 'items' must be a list")
+        yield from items
+        cursor = page.get("next_cursor")
+        if not cursor:  # termination: absent next_cursor
+            return
+    raise ApiContractError(f"/parts: exceeded {max_pages} pages (server bug?)")
+
+
+def iter_parts_link_header(
+    client: NorthwindPartsClient, *, max_pages: int = 1000
+) -> Iterator[dict[str, Any]]:
+    """Yield every part by following RFC 8288 Link: rel="next" headers."""
+    response = client._request("GET", "/parts-link")
+    for _ in range(max_pages):
+        try:
+            page: dict[str, Any] = response.json()
+        except ValueError as exc:
+            raise ApiContractError("/parts-link: invalid JSON body") from exc
+        items = page.get("items")
+        if not isinstance(items, list):
+            raise ApiContractError("/parts-link: 'items' must be a list")
+        yield from items
+        next_url = _parse_link_next(response.headers.get("Link"))
+        if next_url is None:  # termination: no rel="next"
+            return
+        response = client._request("GET", next_url)
+    raise ApiContractError(f"/parts-link: exceeded {max_pages} pages")
+
+
+def _parse_link_next(header: str | None) -> str | None:
+    """Extract the rel="next" target from an RFC 8288 Link header."""
+    if not header:
+        return None
+    for segment in header.split(","):
+        parts = segment.split(";")
+        if len(parts) == 2 and parts[1].strip() == 'rel="next"':
+            return parts[0].strip().strip("<>")
+    return None
+
+
+def stream_download(
+    client: NorthwindPartsClient,
+    path: str,
+    destination: Path,
+    *,
+    on_progress: Callable[[int, int | None], None] | None = None,
+    cancel: Callable[[], bool] = lambda: False,
+) -> int:
+    """Stream `path` to `destination`; return bytes written.
+
+    Memory stays O(CHUNK_SIZE). Cancellation is cooperative: when cancel()
+    returns True we abort, close the stream, and delete the partial file so
+    no corrupt artifact survives.
+    """
+    received = 0
+    tmp = destination.with_suffix(destination.suffix + ".part")
+    try:
+        with client._client.stream("GET", path) as response:
+            client._raise_for_status(response)
+            total_header = response.headers.get("Content-Length")
+            total = int(total_header) if total_header else None
+            with tmp.open("wb") as fh:
+                for chunk in response.iter_bytes(CHUNK_SIZE):
+                    if cancel():
+                        raise InterruptedError("download cancelled by caller")
+                    fh.write(chunk)
+                    received += len(chunk)
+                    if on_progress:
+                        on_progress(received, total)
+        tmp.replace(destination)  # atomic rename: all-or-nothing artifact
+        return received
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # never leave a partial file behind
+        raise
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    with NorthwindPartsClient("http://127.0.0.1:8765", api_key="demo-key-nr-001") as client:
+        count = sum(1 for _ in iter_parts_cursor(client, page_size=2))
+        logger.info("cursor-paginated parts: %d", count)
+        written = stream_download(
+            client, "/catalog/export",
+            Path("catalog_export.jsonl"),
+            on_progress=lambda done, total: logger.info("progress: %d/%s bytes", done, total),
+        )
+        logger.info("downloaded %d bytes", written)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Hermetic Offline Tests with httpx.MockTransport}
+\label{sec:ch02-tests}
+
+The final listing is the discipline that makes everything above trustworthy:
+a fault-matrix suite that exercises the full client stack --- timeouts,
+pooling, hooks, retry policy, taxonomy --- with zero sockets, zero wall-clock
+dependence, and seeded randomness. \texttt{MockTransport} routes requests to
+an in-process handler while preserving the entire \texttt{httpx} pipeline
+\cite{httpxdocs}; the injected \texttt{sleep} records delays instead of
+consuming real time.
+
+\begin{minted}[caption={\texttt{test\_ch02\_client.py} --- offline fault-matrix test suite.},label={lst:ch02-tests}]{python}
+"""test_ch02_client.py -- hermetic tests: no network, no wall clock, seeded RNG.
+
+Run:  pytest -q
+Simulates: 500s then success, 429 with Retry-After, deterministic 4xx,
+transport timeouts, slow responses (mocked), contract breaches, and the
+idempotency gate.
+"""
+from __future__ import annotations
+
+import random
+
+import httpx
+import pytest
+
+from ch02_httpx_client import (
+    ApiClientError4xx,
+    ApiContractError,
+    ApiRateLimited,
+    ApiServerError5xx,
+    ApiTransportError,
+    NorthwindPartsClient,
+)
+from ch02_retry import ResilientPartsClient
+
+BASE_URL = "http://stub.local"  # never resolves: MockTransport intercepts
+
+
+def make_client(handler, **kwargs) -> NorthwindPartsClient:
+    return NorthwindPartsClient(
+        BASE_URL, api_key="test-key",
+        transport=httpx.MockTransport(handler), **kwargs,
+    )
+
+
+# --- Status handling & taxonomy ---------------------------------------------
+
+def test_get_part_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer test-key"
+        return httpx.Response(200, json={"part_id": "NR-1001", "name": "Servo"})
+    with make_client(handler) as client:
+        assert client.get_part("NR-1001")["name"] == "Servo"
+
+
+def test_404_maps_to_typed_client_error() -> None:
+    with make_client(lambda r: httpx.Response(404, json={"error": "no such part"})) as c:
+        with pytest.raises(ApiClientError4xx) as exc_info:
+            c.get_part("NOPE-1")
+        assert exc_info.value.status_code == 404
+
+
+def test_500_maps_to_server_error() -> None:
+    with make_client(lambda r: httpx.Response(503)) as c:
+        with pytest.raises(ApiServerError5xx):
+            c.get_part("NR-1001")
+
+
+def test_429_carries_retry_after() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "7"})
+    with make_client(handler) as c:
+        with pytest.raises(ApiRateLimited) as exc_info:
+            c.get_part("NR-1001")
+        assert exc_info.value.retry_after == 7.0
+
+
+def test_transport_timeout_maps_to_transport_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated hung peer", request=request)
+    with make_client(handler) as c:
+        with pytest.raises(ApiTransportError):
+            c.get_part("NR-1001")
+
+
+def test_200_with_broken_body_is_contract_error() -> None:
+    with make_client(lambda r: httpx.Response(200, content=b"<html>oops</html>")) as c:
+        with pytest.raises(ApiContractError):
+            c.get_part("NR-1001")
+
+
+# --- Retry policy --------------------------------------------------------------
+
+def test_retry_recovers_from_transient_500s() -> None:
+    calls = {"n": 0}
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"part_id": "NR-1001"})
+    inner = make_client(handler)
+    sleeps: list[float] = []
+    resilient = ResilientPartsClient(
+        inner, rng=random.Random(42), sleep=sleeps.append
+    )
+    response = resilient.request_with_retry("GET", "/parts/NR-1001")
+    assert response.status_code == 200
+    assert calls["n"] == 3
+    assert len(sleeps) == 2  # two retries, two jittered sleeps, zero wall time
+
+
+def test_retry_honors_retry_after_over_jitter() -> None:
+    calls = {"n": 0}
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "5"})
+        return httpx.Response(200, json={"ok": True})
+    inner = make_client(handler)
+    sleeps: list[float] = []
+    resilient = ResilientPartsClient(
+        inner, rng=random.Random(42), sleep=sleeps.append
+    )
+    resilient.request_with_retry("GET", "/parts/NR-1001")
+    assert sleeps == [5.0]  # server-advertised delay, not jitter
+
+
+def test_4xx_is_never_retried() -> None:
+    calls = {"n": 0}
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(422, json={"detail": "invalid"})
+    inner = make_client(handler)
+    resilient = ResilientPartsClient(inner, rng=random.Random(42),
+                                     sleep=lambda s: None)
+    with pytest.raises(ApiClientError4xx):
+        resilient.request_with_retry("GET", "/parts/NR-1001")
+    assert calls["n"] == 1
+
+
+def test_post_without_idempotency_key_is_refused() -> None:
+    inner = make_client(lambda r: httpx.Response(200, json={}))
+    resilient = ResilientPartsClient(inner)
+    with pytest.raises(ValueError, match="idempotency"):
+        resilient.request_with_retry("POST", "/orders", json={"qty": 1})
+
+
+def test_post_with_idempotency_key_retries_and_sends_header() -> None:
+    seen: list[str | None] = []
+    calls = {"n": 0}
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Idempotency-Key"))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503)
+        return httpx.Response(201, json={"order_id": "ORD-9"})
+    inner = make_client(handler)
+    resilient = ResilientPartsClient(inner, rng=random.Random(42),
+                                     sleep=lambda s: None)
+    response = resilient.request_with_retry(
+        "POST", "/orders", idempotency_key="key-abc-123", json={"qty": 1}
+    )
+    assert response.status_code == 201
+    assert seen == ["key-abc-123", "key-abc-123"]  # key stable across replays
+\end{minted}
+
+Note what the suite does \emph{not} do: open a socket, sleep in real time,
+assert on wall-clock, or depend on test ordering. Those four absences are the
+definition of a deterministic, offline-first consumer test suite.
+
+%% ---------------------------------------------------------------------------
+%% 5. Common Pitfalls & Anti-Patterns
+%% ---------------------------------------------------------------------------
+
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch02-pitfalls}
+
+Each anti-pattern below is a real production failure mode, stated with its
+mechanism and its fix.
+
+\subsection{Missing Timeouts}
+
+\textbf{Anti-pattern:} \texttt{requests.get(url)} --- infinite wait by
+default. \textbf{Mechanism:} a hung peer holds a worker forever; under load
+the pool exhausts and the healthy caller falls over (the cascading failure of
+Section~\ref{sec:ch02-warstory}). \textbf{Fix:} explicit four-dimension
+timeouts on the client, tighter or looser per call only with justification.
+Treat any timeout-free call found in review as a defect, full stop.
+
+\subsection{Retry Storms}
+
+\textbf{Anti-pattern:} unbounded \texttt{while True: try again immediately},
+or fixed-interval retries with no cap, no jitter, no budget.
+\textbf{Mechanism:} when the dependency degrades, every client retries in
+lockstep; offered load multiplies exactly when capacity shrinks; the outage
+deepens and self-sustains. \textbf{Fix:} capped attempts \emph{plus} elapsed
+budget, full jitter, \texttt{Retry-After} honored, and a retry budget
+(Section~\ref{sec:ch02-retries}); circuit breaking for sustained failure
+(Chapter~15).
+
+\subsection{Swallowing Exceptions}
+
+\textbf{Anti-pattern:} \texttt{except Exception: pass}, or logging and
+returning \texttt{None} from a function whose contract promises a resource.
+\textbf{Mechanism:} failures become silent data corruption --- a ``missing
+part'' that was really a \texttt{503}; downstream code manufactures defaults;
+the root cause is invisible to operators. \textbf{Fix:} catch specific types
+(the taxonomy of Section~\ref{sec:ch02-errors}), add context, re-raise; let
+only code that can \emph{act} on a failure catch it.
+
+\subsection{Parsing Before the Status Check}
+
+\textbf{Anti-pattern:} \texttt{resp.json()} unconditionally.
+\textbf{Mechanism:} a \texttt{503} with an HTML body from a proxy surfaces as
+\texttt{JSONDecodeError}, three frames from the truth; on-call engineers debug
+serialization when the real story is capacity. \textbf{Fix:} classify the
+status first (our \texttt{\_raise\_for\_status}), then parse; a 2xx with an
+unparseable body is a distinct \texttt{ApiContractError}.
+
+\subsection{Leaking Credentials into Logs}
+
+\textbf{Anti-pattern:} logging \texttt{request.headers}, full URLs with query
+tokens, or response bodies on the error path. \textbf{Mechanism:} bearer
+tokens and API keys land in log aggregators with broad read access and long
+retention --- a credential-leak incident from a debugging convenience.
+\textbf{Fix:} log method, path, status, latency; never headers, bodies, or
+auth material (see \texttt{\_log\_request} in Listing~\ref{lst:ch02-httpx}).
+The twelve-factor config discipline \cite{twelvefactor} applies: credentials
+arrive via environment, never via source, and never leave via logs.
+
+\subsection{Unbounded Decompression and Body Reads}
+
+\textbf{Anti-pattern:} \texttt{response.read()} / \texttt{response.text} on
+untrusted or unbounded endpoints; accepting \texttt{gzip}/\texttt{br} without
+size discipline. \textbf{Mechanism:} a 2~MB gzip bomb expands to gigabytes in
+memory; a streaming endpoint with no \texttt{Content-Length} reads until RAM
+is gone. \textbf{Fix:} stream with \texttt{iter\_bytes}
+(Listing~\ref{lst:ch02-pagination}) for anything large or untrusted; enforce a
+maximum decompressed size; write partial downloads to a \texttt{.part} file
+and rename atomically on success.
+
+\begin{warningbox}
+\textbf{The compound anti-pattern.} These failures compose: no timeout +
+aggressive retry + swallowed exception is a client that hangs forever, retries
+forever, and reports nothing. Review consumers as systems, not as lines.
+\end{warningbox}
+
+%% ---------------------------------------------------------------------------
+%% 6. Hands-On Production Lab & Real-World Case Study
+%% ---------------------------------------------------------------------------
+
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch02-lab}
+
+\subsection{Lab Setup: The Northwind Robotics Parts API Stub}
+
+The lab consumes a fictional supplier API --- the \emph{Northwind Robotics
+Parts API} --- served entirely by a local stub on \texttt{127.0.0.1:8765}.
+The stub (Listing~\ref{lst:ch02-stub}) uses only the standard library and
+implements five behaviors: a part lookup, cursor pagination over a small
+synthetic catalog, a \texttt{429 + Retry-After} fault for the retry demo, a
+flaky endpoint that fails twice before succeeding, and a streaming catalog
+export.
+
+\begin{minted}[caption={\texttt{ch02\_stub\_server.py} --- local stub for the Northwind Robotics Parts API.},label={lst:ch02-stub}]{python}
+"""ch02_stub_server.py -- offline stub for the Northwind Robotics Parts API.
+
+Stdlib only. Deterministic. Listens on 127.0.0.1:8765 (localhost only).
+
+Endpoints:
+  GET /parts/{id}        -> 200 JSON part, or 404
+  GET /parts?limit&cursor-> cursor-paginated catalog (5 synthetic parts)
+  GET /parts-link        -> RFC 8288 Link-header pagination (2 pages)
+  GET /rate-limited      -> 429 with Retry-After: 2 (always)
+  GET /flaky             -> 500, 500, then 200 (per-process state)
+  GET /catalog/export    -> streamed JSONL catalog
+
+Run:  python ch02_stub_server.py
+"""
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+logger = logging.getLogger("ch02.stub")
+
+# Synthetic Northwind Robotics catalog: fictional parts, fictional prices.
+CATALOG: list[dict[str, object]] = [
+    {"part_id": "NR-1001", "name": "Servo Motor SG-90", "unit_price_cents": 450},
+    {"part_id": "NR-1002", "name": "LiDAR Unit LR-2", "unit_price_cents": 8999},
+    {"part_id": "NR-1003", "name": "Chassis Plate AL-7075", "unit_price_cents": 3200},
+    {"part_id": "NR-1004", "name": "Wheel Encoder WE-512", "unit_price_cents": 1250},
+    {"part_id": "NR-1005", "name": "Battery Pack BP-4S", "unit_price_cents": 5400},
+]
+
+_flaky_calls = {"n": 0}
+_state_lock = threading.Lock()
+
+
+class StubHandler(BaseHTTPRequestHandler):
+    server_version = "NorthwindStub/1.0"
+
+    def _send_json(self, status: int, payload: dict[str, object],
+                   extra_headers: dict[str, str] | None = None) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+        parsed = urlparse(self.path)
+        route, query = parsed.path, parse_qs(parsed.query)
+
+        if route.startswith("/parts/"):
+            part_id = route.rsplit("/", 1)[-1]
+            part = next((p for p in CATALOG if p["part_id"] == part_id), None)
+            if part is None:
+                self._send_json(404, {"error": f"no such part: {part_id}"})
+            else:
+                self._send_json(200, part)
+            return
+
+        if route == "/parts":
+            limit = int(query.get("limit", ["50"])[0])
+            cursor = query.get("cursor", [None])[0]
+            start = int(cursor) if cursor is not None else 0  # stub: cursor = index
+            items = CATALOG[start:start + limit]
+            next_index = start + limit
+            payload: dict[str, object] = {"items": items}
+            if next_index < len(CATALOG):
+                payload["next_cursor"] = str(next_index)
+            self._send_json(200, payload)
+            return
+
+        if route == "/parts-link":
+            if query.get("page") == ["2"]:
+                # Final page: no Link header -> iterator terminates.
+                self._send_json(200, {"items": CATALOG[3:]})
+            else:
+                self._send_json(
+                    200, {"items": CATALOG[:3]},
+                    extra_headers={"Link": '</parts-link?page=2>; rel="next"'},
+                )
+            return
+
+        if route == "/rate-limited":
+            self._send_json(429, {"error": "slow down"},
+                            extra_headers={"Retry-After": "2"})
+            return
+
+        if route == "/flaky":
+            with _state_lock:
+                _flaky_calls["n"] += 1
+                n = _flaky_calls["n"]
+            if n < 3:
+                self._send_json(500, {"error": "transient blip"})
+            else:
+                self._send_json(200, {"part_id": "NR-1001", "ok": True})
+            return
+
+        if route == "/catalog/export":
+            lines = "".join(json.dumps(p) + "\n" for p in CATALOG).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Content-Length", str(len(lines)))
+            self.end_headers()
+            self.wfile.write(lines)
+            return
+
+        self._send_json(404, {"error": f"unknown route: {route}"})
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        logger.info("stub: " + fmt, *args)
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    server = ThreadingHTTPServer(("127.0.0.1", 8765), StubHandler)
+    logger.info("Northwind stub listening on http://127.0.0.1:8765 (Ctrl+C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Lab Steps}
+
+Work from a project folder, e.g.\ \texttt{C:\textbackslash Training\textbackslash ch02\_lab},
+containing the five listing files. All commands are PowerShell.
+
+\begin{enumerate}
+  \item \textbf{Environment.} Create and activate the virtual environment,
+        then install the pinned dependencies:
+\begin{minted}{bash}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+  \item \textbf{Start the stub} in a first terminal:
+        \texttt{python ch02\_stub\_server.py}. Confirm it answers:
+        \texttt{curl.exe http://127.0.0.1:8765/parts/NR-1001}.
+  \item \textbf{Baseline.} In a second terminal run
+        \texttt{python ch02\_urllib\_baseline.py}. Note in the stub's log
+        that every request is a fresh connection (\texttt{Connection: close}
+        semantics) --- the churn of Section~\ref{sec:ch02-pooling} made
+        visible.
+  \item \textbf{Production client.} Run \texttt{python ch02\_httpx\_client.py}.
+        Observe the telemetry hooks emitting per-request latency lines.
+  \item \textbf{Retry demo.} Point the demo at the flaky endpoint (edit
+        \texttt{main()} to call \texttt{/flaky}), run
+        \texttt{python ch02\_retry.py}, and watch two jittered retries
+        precede success. Then call \texttt{/rate-limited} and confirm the
+        client waits the server-advertised 2~seconds.
+  \item \textbf{Pagination and streaming.} Run
+        \texttt{python ch02\_pagination\_stream.py}; verify the iterator
+        yields all five parts across three pages and that
+        \texttt{catalog\_export.jsonl} contains five NDJSON lines.
+  \item \textbf{Offline fault matrix.} Stop the stub and run
+        \texttt{pytest -q}. All tests must pass with the stub down --- proof
+        the suite is hermetic.
+  \item \textbf{Break it on purpose.} Set the client's read timeout to
+        \texttt{0.05} against the stub's \texttt{/flaky} endpoint, observe
+        \texttt{ApiTransportError}, then restore. Change the stub's 429 to
+        omit \texttt{Retry-After} and confirm the client falls back to full
+        jitter.
+\end{enumerate}
+
+\begin{keyconceptbox}
+\textbf{Exit criteria.} The lab is complete when: (1) the retry demo shows
+server-advertised waits overriding jitter; (2) the pagination iterator
+terminates without a \texttt{max\_pages} tripwire firing; (3) the pytest suite
+passes with the network stack provably unused.
+\end{keyconceptbox}
+
+\subsection{War Story: The Missing Read Timeout and the Retry Storm}
+\label{sec:ch02-warstory}
+
+A fulfillment service (names fictionalized, physics real) called a warehouse
+inventory API on every order. The call was a one-liner:
+\texttt{requests.get(url)}. No timeout --- \texttt{requests} defaults to
+infinite. A hand-rolled retry loop sat above it: \texttt{for attempt in
+range(20): try: ...; time.sleep(1)}.
+
+At 14:07 on a Tuesday, a bad deploy left the inventory service's worker
+threads deadlocked on a database lock. The load balancer kept passing health
+checks (the \texttt{/healthz} handler was a separate thread), so traffic kept
+flowing into a process that accepted connections and then \emph{said nothing,
+forever}. TCP was healthy; HTTP was catatonic. Only a read timeout can see
+this failure --- and there was none.
+
+The cascade ran exactly as Nygard's playbook predicts
+\cite{nygard2018releaseit}. By 14:12 every fulfillment worker held a socket
+awaiting bytes that would never come. By 14:15 the retry loops --- one-second
+fixed interval, no jitter, twenty attempts --- had multiplied offered load on
+the inventory service by roughly 20$\times$, ensuring that even when the lock
+was manually killed at 14:22, the service drowned instantly in synchronized
+retries: a self-inflicted retry storm. The circuit breaker that would have
+shed the load did not exist. Checkout error rates peaked at 94\%; full
+recovery took another 40 minutes after the root cause was fixed, because the
+storm outlived its trigger.
+
+The remediation diff was embarrassingly small: a four-dimension timeout
+(connect 2~s, read 5~s, write 5~s, pool 1~s), three jittered retries with an
+elapsed-time budget, \texttt{Retry-After} honored, and a fleet-wide retry
+budget feeding a circuit breaker (Chapter~15). The lesson this chapter
+encodes: \textbf{the cheap resilience work is done in the client, before the
+incident, or it is done in the incident review, after.}
+
+%% ---------------------------------------------------------------------------
+%% 7. Self-Assessment Exercises & Deep-Dive Questions
+%% ---------------------------------------------------------------------------
+
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+
+\subsection{Exercises}
+
+\begin{enumerate}
+  \item \textbf{Timeout audit.} Grep a codebase you know for
+        \texttt{requests.get(}, \texttt{requests.post(}, and
+        \texttt{urlopen(} lacking a \texttt{timeout=} argument. For each hit,
+        state which of the four timeout dimensions is unbounded and what
+        failure it permits.
+  \item \textbf{Jitter analysis.} With $b = 0.5\,\text{s}$ and $N = 4$
+        retries, compute (a) the deterministic exponential total wait,
+        (b) the expected total wait under full jitter, and (c) the worst-case
+        total wait under full jitter with cap $c = 8\,\text{s}$.
+  \item \textbf{Idempotency triage.} For each operation, state whether a
+        blind retry after a read timeout is safe, and why:
+        \texttt{GET /parts/NR-1001}; \texttt{POST /orders};
+        \texttt{PUT /parts/NR-1001/status} with body
+        \texttt{\{"status": "reserved"\}}; \texttt{POST /payments} with an
+        \texttt{Idempotency-Key} header.
+  \item \textbf{Pool sizing.} A service runs 32 worker threads; each order
+        makes at most 2 concurrent calls to one upstream. Propose
+        \texttt{max\_connections} and \texttt{max\_keepalive\_connections}
+        and justify both.
+  \item \textbf{Extend the taxonomy.} Add \texttt{ApiAuthError} (401/403) to
+        Listing~\ref{lst:ch02-httpx}, wire it into
+        \texttt{\_raise\_for\_status}, and add a MockTransport test proving
+        it is raised and never retried.
+  \item \textbf{Offset walker.} The iterators in
+        Listing~\ref{lst:ch02-pagination} cover cursor and link-header
+        pagination. Implement \texttt{iter\_parts\_offset(client, limit)}
+        for an offset/limit endpoint, with correct termination and a
+        \texttt{max\_pages} tripwire, and test it against MockTransport.
+\end{enumerate}
+
+\subsection{Deep-Dive Questions}
+
+\begin{enumerate}
+  \item Why does a pool timeout exist separately from the read timeout? What
+        distinct failure does each bound, and what does \texttt{PoolTimeout}
+        tell you about your configuration that \texttt{ReadTimeout} never
+        could?
+  \item Full jitter halves expected total wait relative to deterministic
+        backoff (Equation~\ref{eq:ch02-jitter-total}). Is that a latency cost
+        or a latency saving for the caller, and why is it a fleet-level win
+        regardless?
+  \item A server sends \texttt{Retry-After: 120} but your retry budget caps
+        elapsed time at 20~s. Reconcile the two policies. Which wins, and
+        what should the client do when they conflict irreconcilably?
+  \item Explain why \texttt{requests} cannot support HTTP/2 without a rewrite
+        of its connection core, and what architectural property of
+        \texttt{httpx} made HTTP/2 an \emph{option} rather than a fork.
+  \item Under what conditions is cursor pagination strictly more correct than
+        offset pagination for a catalog that changes while you read it?
+        Construct the interleaving that corrupts an offset walk.
+  \item Your MockTransport suite passes and production fails on TLS. What
+        layer did the mock legitimately exclude, and what is the minimum
+        additional test that covers it without internet access?
+\end{enumerate}
+
+%% ---------------------------------------------------------------------------
+%% 8. Interview Q&A Vault
+%% ---------------------------------------------------------------------------
+
+\section{Interview Q\&A Vault}
+\label{sec:ch02-interview}
+
+Thirty-two questions ordered junior $\rightarrow$ staff. Answers are
+deliberately compressed to what a strong candidate says out loud.
+
+\subsection{Junior}
+
+\begin{enumerate}
+  \item \textbf{Q: What does an HTTP client library actually do for you?}\\
+        \textit{A:} Manages the socket lifecycle (DNS, TCP, TLS), formats the
+        request on the wire, parses the response, and --- in session-based
+        libraries --- pools connections for reuse. Without it you are writing
+        a state machine over sockets by hand.
+
+  \item \textbf{Q: \texttt{urllib} vs.\ \texttt{requests} --- why does anyone
+        still use \texttt{urllib}?}\\
+        \textit{A:} Zero dependencies: it is always present in the stdlib, so
+        installers, bootstrap scripts, and frozen single-file tools use it.
+        For anything sustained, its flat timeout, missing session/pool, and
+        manual JSON make \texttt{requests} or \texttt{httpx} the right call.
+
+  \item \textbf{Q: What is keep-alive and why does it matter?}\\
+        \textit{A:} Reusing one TCP/TLS connection across requests instead of
+        reopening per request. It eliminates repeated handshake latency
+        ($\sim$2 RTTs) and crypto CPU on every call --- often the single
+        biggest client-side latency win.
+
+  \item \textbf{Q: What is the default timeout of \texttt{requests.get()}?}\\
+        \textit{A:} None --- it waits forever. That is a trap: the library's
+        ergonomic default is a production hazard, which is why timeouts must
+        always be explicit.
+
+  \item \textbf{Q: A call returns status 500. What do you do?}\\
+        \textit{A:} Classify it as a transient server fault: retry per policy
+        (bounded, jittered, idempotency-aware). Never parse the body as if it
+        were a success payload.
+
+  \item \textbf{Q: A call returns 404. Retry it?}\\
+        \textit{A:} No. 4xx is deterministic --- the same request fails
+        identically. Fix the request (the URL, the ID, the payload), not the
+        plumbing.
+
+  \item \textbf{Q: What is JSON deserialization doing at the client
+        boundary?}\\
+        \textit{A:} Converting the response body bytes into Python objects.
+        It belongs \emph{after} the status check, and its failure on a 2xx is
+        a contract error, not a transport error.
+
+  \item \textbf{Q: Why should a client send a \texttt{User-Agent}?}\\
+        \textit{A:} Identifiability. When your traffic misbehaves, the
+        provider can reach you instead of blocking an entire IP range --- and
+        many providers contractually require it.
+\end{enumerate}
+
+\subsection{Mid-Level}
+
+\begin{enumerate}
+  \setcounter{enumi}{8}
+  \item \textbf{Q: Why is a missing timeout a severity-1 risk?}\\
+        \textit{A:} Because it converts a dependency's partial failure into
+        your total failure: every worker blocks on a socket that never
+        answers, the pool exhausts, and your healthy service stops serving.
+        Unbounded waits are unbounded resource holds --- the textbook
+        cascading failure \cite{nygard2018releaseit}.
+
+  \item \textbf{Q: Name the four httpx timeout dimensions and what each
+        bounds.}\\
+        \textit{A:} connect (DNS/TCP/TLS establishment), read (waiting for
+        response bytes, including mid-stream gaps), write (sending the
+        request body), pool (waiting for a free connection in a saturated
+        pool). Each bounds a distinct hang a single flat timeout cannot
+        express.
+
+  \item \textbf{Q: Connect timeout vs.\ read timeout --- which failure does
+        each catch?}\\
+        \textit{A:} Connect catches a dead, firewalled, or TLS-broken host.
+        Read catches a live connection with a hung application behind it ---
+        the failure TCP keepalive cannot see.
+
+  \item \textbf{Q: What does \texttt{PoolTimeout} tell you?}\\
+        \textit{A:} Your concurrency exceeds your pool: requests are queueing
+        for connections. The fix is sizing (\texttt{max\_connections}) or
+        concurrency control --- not a longer pool timeout, which just makes
+        the queue quieter.
+
+  \item \textbf{Q: Explain exponential backoff with full jitter.}\\
+        \textit{A:} On attempt $n$, wait a \emph{random} value drawn
+        uniformly from $[0, \min(c, b \cdot 2^{n-1})]$. Expected wait is
+        $b \cdot 2^{n-2}$: exponential growth for server recovery, randomized
+        phase so correlated clients stop colliding.
+
+  \item \textbf{Q: Why decorrelated jitter?}\\
+        \textit{A:} It samples the next wait from $[b, 3 \times
+        \text{previous}]$ rather than the attempt index, so a client's
+        schedule adapts to its own history. Both it and full jitter break
+        lockstep; decorrelated jitter converges faster after short blips. The
+        essential property either way is randomness --- without it, fleets
+        retry in synchronized waves.
+
+  \item \textbf{Q: What is a retry storm and how do you prevent it?}\\
+        \textit{A:} Retries multiplying offered load on an already-degraded
+        dependency, deepening the outage. Prevention: capped attempts,
+        elapsed budgets, jitter, honoring \texttt{Retry-After}, a fleet-wide
+        retry budget, and a circuit breaker for sustained failure.
+
+  \item \textbf{Q: When is it safe to retry a POST?}\\
+        \textit{A:} Only when the API accepts an idempotency key
+        (server-side dedup) or the operation is naturally idempotent per its
+        contract. Otherwise a read timeout is ambiguous --- the server may
+        have succeeded --- and replaying risks duplicate side effects.
+
+  \item \textbf{Q: requests vs.\ httpx trade-offs?}\\
+        \textit{A:} \texttt{requests}: older, sync-only, HTTP/1.1-only,
+        two-dimension timeouts, huge install base. \texttt{httpx}: same API
+        shape plus sync \emph{and} async clients, optional HTTP/2,
+        four-dimension timeouts, first-class MockTransport, full type hints.
+        New code: httpx; existing sync codebases: requests is defensible.
+
+  \item \textbf{Q: What does \texttt{Retry-After} do and where does it
+        appear?}\\
+        \textit{A:} Server-advertised minimum delay before retrying, defined
+        by RFC~9110 \cite{rfc9110} for \texttt{429} and \texttt{503} as
+        delta-seconds or an HTTP-date. It outranks any client-computed
+        backoff because the server knows its own recovery timeline.
+
+  \item \textbf{Q: How do you consume a paginated endpoint cleanly?}\\
+        \textit{A:} Hide the mechanics behind a lazy iterator: the caller
+        writes one \texttt{for} loop; the walker follows cursors or
+        \texttt{Link: rel="next"} headers, treats cursors as opaque, and
+        terminates on a missing next pointer --- with a page-count tripwire
+        against server bugs.
+
+  \item \textbf{Q: Why stream downloads instead of \texttt{response.read()}?}\\
+        \textit{A:} Memory stays $O(\text{chunk})$ rather than
+        $O(\text{payload})$; you get progress reporting, cooperative
+        cancellation, and immunity to decompression bombs. Buffering is only
+        acceptable for small, trusted, size-known payloads.
+\end{enumerate}
+
+\subsection{Senior}
+
+\begin{enumerate}
+  \setcounter{enumi}{20}
+  \item \textbf{Q: Design the exception hierarchy for an SDK wrapper.}\\
+        \textit{A:} One root (\texttt{ApiClientError}); three branches
+        matching failure layers: transport (timeout/DNS/TLS --- retryable),
+        status (split 4xx deterministic from 5xx transient; 429 carries
+        \texttt{retry\_after}), and contract (2xx with a broken body ---
+        never retry, alert). Callers \texttt{except} the layer they can act
+        on.
+
+  \item \textbf{Q: How do you test retry logic without slow, flaky tests?}\\
+        \textit{A:} Inject everything time-like: \texttt{httpx.MockTransport}
+        for the wire, a seeded \texttt{random.Random} for jitter, and an
+        injected \texttt{sleep} that records durations instead of sleeping.
+        Assert on call counts and recorded delays --- zero wall-clock
+        assertions.
+
+  \item \textbf{Q: What is a retry budget and why aren't per-request caps
+        enough?}\\
+        \textit{A:} Per-request caps bound one call; a budget bounds the
+        fleet --- e.g., retries limited to 10\% of issued requests per
+        minute. When a dependency fails broadly, every request hitting its
+        per-request cap still multiplies total load; the budget converts that
+        into controlled fail-fast.
+
+  \item \textbf{Q: Your client sees \texttt{429} with \texttt{Retry-After:
+        120} but an elapsed budget of 20~s. Design the resolution.}\\
+        \textit{A:} The server delay wins within the budget; on conflict,
+        fail the operation with \texttt{ApiRateLimited} carrying the delay so
+        the \emph{caller} can requeue the work at the application layer.
+        Never silently clamp to 20~s and retry into a still-limited server.
+
+  \item \textbf{Q: How do event hooks differ from subclassing the client?}\\
+        \textit{A:} Hooks are cross-cutting seams (logging, tracing, auth
+        refresh) applied uniformly without touching the request path;
+        subclassing embeds policy in the call path and fragments across
+        overrides. Prefer composition (hooks, wrapped transports) over
+        inheritance.
+
+  \item \textbf{Q: A 2xx response contains HTML from a captive proxy. Which
+        layer failed and how should the client react?}\\
+        \textit{A:} Contract layer. \texttt{Content-Type} is wrong and JSON
+        parsing fails; raise \texttt{ApiContractError}, alert, and never
+        retry --- replaying cannot fix a middlebox interposing.
+
+  \item \textbf{Q: Why is creating a new \texttt{httpx.Client} per request an
+        anti-pattern?}\\
+        \textit{A:} It discards the connection pool: every call re-pays DNS,
+        TCP, and TLS, and sockets accumulate in \texttt{TIME\_WAIT} under
+        load. One long-lived client per base URL, closed deterministically,
+        is the correct shape.
+
+  \item \textbf{Q: What telemetry belongs on the client hot path, and what
+        must never appear in logs?}\\
+        \textit{A:} Method, path, status class, latency, retry count,
+        exception type. Never: \texttt{Authorization} headers, API keys,
+        cookies, or full bodies --- credentials in log aggregation is a
+        reportable leak.
+
+  \item \textbf{Q: HTTP/2 changes what for a client?}\\
+        \textit{A:} Multiplexing: many concurrent streams share one
+        connection, eliminating HTTP/1.1 head-of-line blocking at the
+        connection level and shrinking pool pressure. It does \emph{not}
+        change timeout, retry, or idempotency semantics --- those are
+        application-layer concerns.
+
+  \item \textbf{Q: When would you choose async consumption, and what does it
+        actually buy?}\\
+        \textit{A:} When a single process must sustain high concurrent
+        outbound calls (crawlers, fan-out aggregators). It buys massive
+        connection concurrency without thread-per-connection memory and
+        context-switch costs. It buys nothing for a sequential script ---
+        and adds correctness hazards (unbounded gather, blocking calls in the
+        loop).
+\end{enumerate}
+
+\subsection{Staff}
+
+\begin{enumerate}
+  \setcounter{enumi}{30}
+  \item \textbf{Q: Design an organization-wide HTTP client policy. What is in
+        it and how is it enforced?}\\
+        \textit{A:} Mandated: four-dimension timeouts with ceilings, jittered
+        bounded retries plus a shared retry budget, idempotency gates on
+        mutation, header-safe telemetry, hermetic MockTransport tests.
+        Enforced as a shared internal client library (policy as code), CI
+        lint rules banning bare timeout-free calls, and fault-injection tests
+        in staging. Policy documents that CI cannot check are fiction.
+
+  \item \textbf{Q: A downstream provider publishes a 100 req/s limit. Your
+        fleet of 200 pods each has a local token bucket set to 1 req/s.
+        What goes wrong and how do you architect past it?}\\
+        \textit{A:} Local buckets under-utilize (fairness is emergent, not
+        guaranteed) and can't react to provider-side repartitioning; pod
+        autoscaling silently raises aggregate rate. Architecture: make local
+        limits a function of live fleet size (or a central rate-limiting
+        sidecar), treat \texttt{429}s as control signals that back the whole
+        fleet off, and negotiate limits as an SLO with the provider rather
+        than reverse-engineering them from error rates.
+\end{enumerate}
+
+%% ---------------------------------------------------------------------------
+%% 9. External Bibliography & Further Reading
+%% ---------------------------------------------------------------------------
+
+\section{External Bibliography \& Further Reading}
+\label{sec:ch02-bibliography}
+
+\begin{itemize}
+  \item \textbf{httpx documentation} \cite{httpxdocs} --- the authoritative
+        reference for the four-dimension timeout model, \texttt{Limits}
+        pooling, event hooks, HTTP/2 opt-in, and \texttt{MockTransport}.
+        Read the ``Timeouts'' and ``Advanced'' pages in full.
+  \item \textbf{Requests documentation} \cite{requestsdocs} --- the Session
+        abstraction and the historical baseline every Python engineer
+        inherits; its ``Advanced Usage'' chapter remains excellent on
+        connection pooling semantics.
+  \item \textbf{RFC 9110, \emph{HTTP Semantics}} \cite{rfc9110} --- the
+        normative definitions of method idempotency (\S9.2.2), status-code
+        classes, \texttt{429}/\texttt{503}, and \texttt{Retry-After}
+        (\S15.5.4, \S10.2.3). The primary source for every retry rule in
+        this chapter.
+  \item \textbf{RFC 8288, \emph{Web Linking}} --- the \texttt{Link} header
+        and \texttt{rel="next"} consumed in
+        Listing~\ref{lst:ch02-pagination}.
+  \item \textbf{Michael T. Nygard, \emph{Release It!}, 2nd ed.}
+        \cite{nygard2018releaseit} --- the canonical treatment of cascading
+        failure, timeouts, and circuit breakers. Chapter 4 (``Stability
+        Antipatterns'') is the war story's playbook.
+  \item \textbf{Marc Brooker, AWS Architecture Blog, \emph{``Exponential
+        Backoff and Jitter''} and \emph{``Timeouts, retries, and backoff
+        with jitter''}} --- the industry-standard derivations of full jitter
+        and decorrelated jitter that Section~\ref{sec:ch02-retries}
+        formalizes. \url{https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/}
+  \item \textbf{Tenacity documentation} --- the retry library used in
+        Listing~\ref{lst:ch02-retry}: composable stop/wait/retry strategies.
+        \url{https://tenacity.readthedocs.io/}
+  \item \textbf{pydantic documentation} \cite{pydanticdocs} --- typed
+        response models and validation for the SDK-wrapper pattern; Chapter~4
+        develops contract-first serialization in depth.
+  \item \textbf{The Twelve-Factor App} \cite{twelvefactor} --- factor III
+        (config in the environment) underpins the credential-handling rules
+        of Section~\ref{sec:ch02-pitfalls}.
+  \item \textbf{Martin Kleppmann, \emph{Designing Data-Intensive
+        Applications}} \cite{kleppmann2017ddia} --- Chapter 8's treatment of
+        partial failure and ``we cannot know'' outcomes at network
+        boundaries; the theoretical frame for our error taxonomy.
+\end{itemize}
+
+%% ---------------------------------------------------------------------------
+%% 10. Capstone Projects
+%% ---------------------------------------------------------------------------
+
+\section{Capstone Projects}
+\label{sec:ch02-capstones}
+
+Five progressive projects. All run offline against the Northwind stub
+(Listing~\ref{lst:ch02-stub}) or \texttt{httpx.MockTransport}; all require a
+passing pytest suite; all follow the workspace conventions (typed Python
+3.11+, PowerShell docs, synthetic data only).
+
+\subsection{Capstone 2.1 [junior] --- Robust CLI Downloader}
+
+\textbf{Objective.} Build \texttt{nrget}: a PowerShell-friendly CLI that
+downloads a part's datasheet (\texttt{/catalog/export}) from the stub to a
+local file, correctly and observably.
+
+\textbf{Inputs/Datasets.} The local stub's \texttt{/catalog/export} endpoint
+(synthetic Northwind catalog, NDJSON).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Wrap \texttt{httpx.Client} with explicit four-dimension timeouts and
+        a typed error taxonomy (reuse Listing~\ref{lst:ch02-httpx} patterns).
+  \item Stream the body with \texttt{iter\_bytes}, a \texttt{.part} temp
+        file, and atomic rename on success.
+  \item Print byte-level progress to the console; support a
+        \texttt{--max-bytes} guard.
+  \item Exit codes: 0 success, 2 client error, 3 server/transient error
+        after bounded retries.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] No call lacks an explicit timeout (verified by code
+        inspection and a test asserting the client's \texttt{timeout} fields).
+  \item[$\square$] A killed download leaves no partial artifact.
+  \item[$\square$] MockTransport tests cover 200, 404, 500-then-200, and
+        malformed-body paths; suite passes with the stub stopped.
+  \item[$\square$] Logs contain method/path/status/latency and no headers.
+\end{itemize}
+
+\textbf{Stretch Goals.} Resume support via \texttt{Range} requests; a
+\texttt{--dry-run} mode that prints the request plan without sending.
+
+\subsection{Capstone 2.2 [mid] --- Rate-Limit-Aware Catalog Crawler}
+
+\textbf{Objective.} Crawl the entire paginated catalog of an instrumented
+stub that enforces a published limit of 5 req/s and answers
+\texttt{429 + Retry-After} when exceeded --- without ever being throttled in
+steady state.
+
+\textbf{Inputs/Datasets.} Extended stub: cursor-paginated \texttt{/parts}
+over a 500-part synthetic catalog, a token-bucket limiter, and
+\texttt{RateLimit-Policy}/\texttt{Retry-After} headers.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement a client-side token bucket ($r = 4$ tokens/s, $B = 4$)
+        gating every request.
+  \item Wrap calls in the retry policy of Listing~\ref{lst:ch02-retry};
+        \texttt{Retry-After} overrides jitter.
+  \item Consume pages through the cursor iterator of
+        Listing~\ref{lst:ch02-pagination}.
+  \item Record per-request timestamps to a CSV; compute achieved rate.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Full crawl completes; zero \texttt{429}s in the steady
+        state (allow one cold-start burst violation, documented).
+  \item[$\square$] Achieved sustained rate $\le$ 5 req/s, evidenced from the
+        timestamp CSV (not wall-clock test assertions).
+  \item[$\square$] A forced-\texttt{429} MockTransport test proves
+        \texttt{Retry-After} overrides jitter exactly.
+  \item[$\square$] Deterministic suite: seeded RNG, injected sleep, no
+        network.
+\end{itemize}
+
+\textbf{Stretch Goals.} Adaptive bucket that lowers $r$ on 429 and recovers
+slowly (additive-increase); parallel crawlers sharing one process-wide
+bucket.
+
+\subsection{Capstone 2.3 [mid] --- Typed SDK Wrapper with Full Test Matrix}
+
+\textbf{Objective.} Publish (locally) a \texttt{northwind-parts-sdk} package:
+typed \texttt{pydantic} response models, the resilient client, pagination
+iterators, and a complete offline fault matrix.
+
+\textbf{Inputs/Datasets.} The Northwind stub endpoints; a hand-written JSON
+Schema for the \texttt{Part} resource used to generate/validate the
+\texttt{pydantic} model.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Model \texttt{Part}, \texttt{PartPage}, and \texttt{ApiError} as
+        \texttt{pydantic} models with strict types \cite{pydanticdocs}.
+  \item Parse responses into models; map validation failures to
+        \texttt{ApiContractError} with field-level context.
+  \item Compose timeouts, pooling, auth injection, hooks, and the tenacity
+        retry wrapper behind a clean public API.
+  \item Build the MockTransport matrix: every status class, transport
+        timeouts, mid-stream reset, truncated JSON, wrong
+        \texttt{Content-Type}, oversized page count.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Public API is fully typed; \texttt{mypy}-clean (or
+        equivalent checked annotations) on the package.
+  \item[$\square$] Fault matrix covers $\ge$ 15 scenarios including every
+        taxonomy branch; all deterministic and offline.
+  \item[$\square$] Contract errors are never retried; transient errors retry
+        within budget; idempotency gate enforced on mutations.
+  \item[$\square$] README (PowerShell-only instructions) documents install,
+        usage, and error semantics.
+\end{itemize}
+
+\textbf{Stretch Goals.} Generate the model from the JSON Schema at build
+time; add an async facade reusing the same core via
+\texttt{httpx.AsyncClient}.
+
+\subsection{Capstone 2.4 [senior] --- Chaos-Client Harness}
+
+\textbf{Objective.} Build a fault-injection transport that sits between your
+resilient client and the stub and proves, empirically, that the resilience
+policy works: the client survives a gauntlet of injected faults with
+predictable behavior.
+
+\textbf{Inputs/Datasets.} A \texttt{ChaosTransport} wrapping
+\texttt{httpx.MockTransport} with a scripted fault schedule: connect resets,
+read stalls, truncation, 500 bursts, 429s with/without \texttt{Retry-After},
+gigantic \texttt{Content-Length} lies, and gzip bombs (synthetic, capped).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement \texttt{ChaosTransport(BaseTransport)} reading a YAML/JSON
+        fault schedule; deterministic via seeded RNG.
+  \item Define the expected behavior per fault (recover, fail-fast with
+        typed error, abort with bounded time) as an executable contract.
+  \item Run the full SDK against each schedule; assert both outcome
+        \emph{and} bounds: total attempts, total sleep, bytes buffered.
+  \item Produce a coverage report mapping faults $\rightarrow$ observed
+        client behavior.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] $\ge$ 8 distinct fault classes, each with an executable
+        expectation.
+  \item[$\square$] Every run is reproducible from its seed; no wall-clock
+        dependence.
+  \item[$\square$] At least one fault deliberately exceeds the retry budget
+        and the client demonstrably fails fast with the correct typed error.
+  \item[$\square$] Decompression-bomb test proves the streaming path's size
+        guard engages.
+\end{itemize}
+
+\textbf{Stretch Goals.} Latency distributions (injected p99 spikes) with a
+fake clock; chaos \emph{schedules} replayed from recorded production incident
+timelines (synthetic).
+
+\subsection{Capstone 2.5 [staff] --- Async Concurrent Fetcher with Bounded Concurrency}
+
+\textbf{Objective.} Design and validate an \texttt{httpx.AsyncClient}-based
+fetcher that drains a 10{,}000-item work queue from the stub at maximum
+throughput \emph{without} tripping the provider's rate limit, exhausting the
+pool, or losing backpressure --- and write the design memo defending every
+knob.
+
+\textbf{Inputs/Datasets.} Instrumented stub with a 200-part synthetic
+catalog, per-IP token bucket at 50 req/s, and injected latency jitter
+(5--200~ms, seeded).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Bounded concurrency via \texttt{asyncio.Semaphore} (not unbounded
+        \texttt{gather}); pool limits aligned to the semaphore.
+  \item Process-wide token bucket below the published limit; \texttt{429}
+        handling that backs off the \emph{whole} fetcher, not one task.
+  \item Retry policy per Listing~\ref{lst:ch02-retry} semantics, adapted for
+        async sleep; elapsed and attempt budgets enforced.
+  \item Cancellation: a single Ctrl+C (or task cancel) drains in-flight
+        work, closes streams, and exits cleanly with a partial-results
+        manifest.
+  \item The memo: Little's-law sizing of concurrency vs.\ rate limit; pool
+        vs.\ semaphore alignment; failure-mode table.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Full queue drains with zero unhandled exceptions and zero
+        pool timeouts at the chosen settings.
+  \item[$\square$] Sustained rate $\le$ 50 req/s evidenced from stub-side
+        logs; 429 rate $<$ 0.1\% after warm-up.
+  \item[$\square$] Deterministic tests via \texttt{MockTransport} + injected
+        async sleep; no wall-clock assertions.
+  \item[$\square$] Cancellation test proves no orphan tasks and no partial
+        artifacts.
+  \item[$\square$] Design memo quantifies every knob; trade-offs and
+        rejected alternatives documented.
+\end{itemize}
+
+\textbf{Stretch Goals.} Adaptive concurrency controller (AIMD on 429/latency
+signals); fairness across multiple upstream hosts with per-host buckets.
+
+%% ---------------------------------------------------------------------------
+%% 11. Python Dependencies Appendix
+%% ---------------------------------------------------------------------------
+
+\section{Python Dependencies Appendix}
+\label{sec:ch02-dependencies}
+
+The chapter's code pins four third-party packages. Python 3.11+ is required
+throughout. Install on Windows/PowerShell:
+
+\begin{minted}{bash}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\begin{minted}[caption={\texttt{requirements.txt} for Chapter 2.},label={lst:ch02-requirements}]{text}
+httpx>=0.27,<1.0
+tenacity>=8.3
+pydantic>=2.7,<3.0
+pytest>=8.0
+\end{minted}
+
+\subsection{httpx ($\geq$ 0.27)}
+
+\textbf{Description.} A fully typed HTTP client offering a
+\texttt{requests}-compatible API with synchronous and asynchronous clients,
+optional HTTP/2, four-dimension timeouts, connection pooling via
+\texttt{Limits}, event hooks, and \texttt{MockTransport} for hermetic tests
+\cite{httpxdocs}.
+
+\textbf{Why included.} It is the chapter's foundation: the only mainstream
+Python client that unifies sync/async, expresses the full timeout taxonomy of
+Section~\ref{sec:ch02-timeouts}, and makes offline testing a first-class
+feature rather than a monkey-patch.
+
+\textbf{Alternatives.} \texttt{requests} \cite{requestsdocs} (sync-only,
+HTTP/1.1-only, two-dimension timeouts); \texttt{aiohttp} (async-only, its own
+API shape); stdlib \texttt{urllib} (dependency-free but austere, see
+Section~\ref{sec:ch02-evolution}).
+
+\textbf{Installation.} \texttt{pip install "httpx>=0.27,<1.0"} --- pin the
+upper bound while the library remains pre-1.0.
+
+\subsection{tenacity ($\geq$ 8.3)}
+
+\textbf{Description.} A general-purpose retrying library: composable
+\texttt{stop}, \texttt{wait}, and \texttt{retry} strategies, with support for
+coroutines, statistics, and custom sleep injection.
+
+\textbf{Why included.} Correct retry loops are subtle (budget arithmetic,
+exception filtering, jitter distribution, sleep abstraction). Tenacity makes
+the policy declarative and --- decisive for this book --- accepts an
+injected \texttt{sleep}, enabling the deterministic fault-matrix tests of
+Section~\ref{sec:ch02-tests}.
+
+\textbf{Alternatives.} \texttt{backoff} (decorator-oriented, less
+composable); \texttt{urllib3.util.Retry} (only within requests/urllib3, and
+its \texttt{respect\_retry\_after\_header} defaults helpfully apply there);
+hand-rolled loops (acceptable for one-off scripts, error-prone at scale).
+
+\textbf{Installation.} \texttt{pip install "tenacity>=8.3"}.
+
+\subsection{pydantic ($\geq$ 2.7)}
+
+\textbf{Description.} Data-validation library using Python type annotations:
+declares typed models, validates and coerces inbound data, and produces
+structured errors with field-level paths \cite{pydanticdocs}.
+
+\textbf{Why included.} The SDK-wrapper pattern (Capstone 2.3) needs a
+contract layer that turns ``200 OK with a surprising body'' into a precise,
+actionable \texttt{ApiContractError}. pydantic v2's Rust core makes
+validation cheap enough for the hot path.
+
+\textbf{Alternatives.} \texttt{dataclasses} + manual checks (stdlib, no
+validation); \texttt{msgspec} (faster, smaller ecosystem); \texttt{attrs} +
+\texttt{cattrs} (mature, more assembly required).
+
+\textbf{Installation.} \texttt{pip install "pydantic>=2.7,<3.0"}.
+
+\subsection{pytest ($\geq$ 8.0)}
+
+\textbf{Description.} The standard Python test framework: fixtures,
+parameterization, rich assertion introspection, and a plugin ecosystem.
+
+\textbf{Why included.} Every listing in this chapter is validated by the
+fault-matrix suite (Listing~\ref{lst:ch02-tests}); pytest's
+\texttt{raises} introspection and fixtures make exception-taxonomy tests
+terse and readable.
+
+\textbf{Alternatives.} \texttt{unittest} (stdlib, more boilerplate);
+\texttt{nose2} (smaller ecosystem). For async tests add
+\texttt{pytest-asyncio} --- deliberately excluded here to keep the chapter's
+suite purely synchronous and deterministic.
+
+\textbf{Installation.} \texttt{pip install "pytest>=8.0"}.
+
+%% ---------------------------------------------------------------------------
+%% Chapter Summary & Key Takeaways
+%% ---------------------------------------------------------------------------
+
+\section{Chapter Summary \& Key Takeaways}
+
+\begin{itemize}
+  \item \textbf{Client choice is architectural.} \texttt{urllib} for
+        zero-dependency bootstrap code; \texttt{requests} for legacy
+        synchronous HTTP/1.1 estates; \texttt{httpx} for everything new ---
+        async, HTTP/2, four-dimension timeouts, and MockTransport testability
+        \cite{httpxdocs,requestsdocs}.
+  \item \textbf{Every wait is bounded or it is a bug.} Connect, read, write,
+        and pool timeouts bound four distinct hangs; ``no timeout'' is the
+        enabling defect of cascading failure \cite{nygard2018releaseit}.
+  \item \textbf{Pools are capacity.} One long-lived client per base URL;
+        size \texttt{max\_connections} to peak concurrency and
+        \texttt{max\_keepalive\_connections} to steady state; churn re-pays
+        DNS/TCP/TLS per request.
+  \item \textbf{Retries are load.} Cap attempts \emph{and} elapsed time,
+        jitter fully (expected total wait $\frac{b}{2}(2^N - 1)$), honor
+        \texttt{Retry-After}, budget the fleet, and gate non-idempotent
+        methods behind idempotency keys \cite{rfc9110}.
+  \item \textbf{Consume pagination lazily and payloads as streams.}
+        Iterators hide offset/cursor/link-header mechanics;
+        \texttt{iter\_bytes} keeps memory $O(\text{chunk})$; cancellation
+        and atomic rename keep artifacts clean.
+  \item \textbf{Classify before you react.} Transport, status, and contract
+        failures have different owners and remedies; parse only after the
+        status check; never retry deterministic failures.
+  \item \textbf{Test hermetically.} \texttt{MockTransport}, seeded
+        randomness, and injected sleep yield a deterministic, offline fault
+        matrix --- the only kind of test suite a consumer library deserves.
+\end{itemize}
+
+%% ---------------------------------------------------------------------------
+%% Quick-Reference Card
+%% ---------------------------------------------------------------------------
+
+\section{Quick-Reference Card}
+\label{sec:ch02-quickref}
+
+\subsection{Timeout Cheat-Sheet}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X l}
+    \toprule
+    \textbf{Timeout} & \textbf{Bounds} & \textbf{Failure it catches} & \textbf{Starting value} \\
+    \midrule
+    connect & DNS + TCP + TLS setup & dead/firewalled host, TLS misconfig & 2~s \\
+    read    & waiting for response bytes & hung app behind healthy LB; stalled stream & 10~s (align to endpoint p99) \\
+    write   & sending request body & peer that stopped reading (uploads) & 10~s \\
+    pool    & waiting for a free connection & concurrency $>$ pool size (queueing) & 2~s \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Timeout dimensions: always set all four; never leave any infinite.}
+  \label{tab:ch02-timeout-cheatsheet}
+\end{table}
+
+\subsection{Retry Decision Table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Signal} & \textbf{Retry?} & \textbf{Conditions} \\
+    \midrule
+    Connect/Read timeout, connection reset & Yes & idempotent method or idempotency key; jittered backoff \\
+    408, 425 & Yes & same as above \\
+    429 & Yes & after \texttt{Retry-After} (clamped); back off the bucket \\
+    500, 502, 503, 504 & Yes & bounded attempts + elapsed budget; 503 may carry \texttt{Retry-After} \cite{rfc9110} \\
+    400, 401, 403, 404, 409, 422 & No & deterministic: fix the request, rotate credentials, or reconcile state \\
+    2xx with unparseable/invalid body & No & \texttt{ApiContractError}: provider bug or version skew --- alert \\
+    POST/PUT-side-effect without idempotency key & No & replay may duplicate effects; escalate to caller \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Retry decisions by failure signal.}
+  \label{tab:ch02-retry-decisions}
+\end{table}
+
+\subsection{Status-Class Handling Table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Class} & \textbf{Meaning} & \textbf{Consumer action} \\
+    \midrule
+    1xx & Interim & handled by the transport; never surfaced to callers \\
+    2xx & Success & then (and only then) parse; validate against the contract \\
+    3xx & Redirect & follow per client policy; preserve method semantics; cap hops \\
+    4xx & Caller fault & typed \texttt{ApiClientError4xx}; fix request; never retry as-is \\
+    5xx & Server fault & typed \texttt{ApiServerError5xx}; retry per policy; alert on sustained rate \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Status-class handling for consumers (RFC 9110 \cite{rfc9110}).}
+  \label{tab:ch02-status-classes}
+\end{table}
+
+\input{chapters/_standard_addendum}
+

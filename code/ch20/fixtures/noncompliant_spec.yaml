@@ -1,0 +1,54 @@
+openapi: 3.1.0
+info:
+  title: Northwind Robotics Warehouse Legacy API
+  version: v2-final   # NOT semver: violates semver-info-version
+  description: Legacy warehouse endpoints kept alive for one partner.
+  # no contact block: violates info-contact-required
+paths:
+  /RobotParts:        # PascalCase segment: violates path-segment-kebab-case
+    get:
+      operationId: list_parts   # snake_case: violates operation-id-camel-case
+      summary: List all parts without pagination
+      responses:
+        '200':
+          description: Every part in one giant payload
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Part'
+        '500':
+          description: Boom, plain text
+          content:
+            text/plain:
+              schema:
+                type: string
+  /robot-parts/{partId}:
+    delete:
+      operationId: deletePart
+      summary: Delete a part
+      parameters:
+        - name: partId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found, bare JSON
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  schemas:
+    Part:
+      type: object
+      properties:
+        sku:
+          type: string
+        bin:
+          type: string

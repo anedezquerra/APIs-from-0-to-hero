@@ -1,0 +1,13 @@
+{
+  "name": "orders.created",
+  "description": "A new order was placed (valid signature).",
+  "scheme": "HMAC-SHA256 over '<timestamp>.<body>'; header X-Northwind-Signature: t=<ts>,v1=<hex>",
+  "signing_key_file": "TEST-ONLY_signing_key.txt",
+  "timestamp": 1772064000,
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Northwind-Signature": "t=1772064000,v1=48260d2b5afb6d7d49432f61df5de937bbbb916242211a35c3ecf793721c8e11"
+  },
+  "body": "{\"id\":\"evt_01JNRWT0001SYNTHETIC000001\",\"type\":\"orders.created\",\"created\":\"2026-02-26T00:00:00Z\",\"data\":{\"order_id\":\"O-100042\",\"customer_id\":\"C-0017\",\"status\":\"pending\",\"total_cents\":184500,\"currency\":\"USD\",\"region\":\"NA\"}}",
+  "expected_verification": "pass"
+}

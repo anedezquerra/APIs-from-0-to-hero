@@ -1,0 +1,3094 @@
+%% ============================================================================
+%% Chapter 14: Rate Limiting, Throttling & Quota Systems
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Rate Limiting, Throttling \& Quota Systems}
+\label{ch:rate_limiting}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Every API has a capacity, whether or not anyone has measured it. A service
+that cannot say \emph{no} does not have unlimited generosity; it has an
+unpriced contract with catastrophe, and the invoice arrives as a latency
+spike, a connection-pool exhaustion, or a 3~a.m.\ page. Rate limiting is the
+discipline of saying no \emph{early, cheaply, predictably, and
+informatively} --- before the expensive parts of your stack have done work
+they will have to abandon. This chapter treats it as what it is: a control
+system with mathematics, a distributed-systems problem with race conditions,
+and a client-facing contract with wire semantics. All three must be right,
+and the third is the one most often forgotten.
+
+We begin by separating five ideas that casual usage conflates:
+\emph{rate limiting} (short-window admission control per identity),
+\emph{throttling} (shaping the flow, usually by delaying rather than
+rejecting), \emph{quotas} (long-window budgets that bill or ration usage
+over hours, days, or billing periods), \emph{concurrency limits} (how many
+requests may be \emph{in flight}, not how many may start), and \emph{load
+shedding} (the system protecting \emph{itself}, dropping work by priority
+when capacity is exceeded regardless of who sent it). Each answers a
+different question, and mature platforms run all five simultaneously.
+
+The algorithmic core is derived, not just stated. We prove that the fixed
+window counter admits up to $2N$ requests inside a window-length interval
+(Theorem~\ref{thm:ch14-fixed-window-2x}) and that this bound is tight; we
+derive the sliding window counter's weighted estimator and bound its error
+strictly by the previous window's count
+(Proposition~\ref{prop:ch14-swc-error}); we prove the token bucket's
+burst-plus-rate envelope $A(\Delta t) \le B + r\,\Delta t$
+(Proposition~\ref{prop:ch14-tb-envelope}); and we derive GCRA --- the Generic
+Cell Rate Algorithm that powered ATM networks and now powers
+\texttt{nginx}, Envoy, and most serious gateways --- from its theoretical
+arrival time update rule, proving its exact equivalence to the token bucket
+(Proposition~\ref{prop:ch14-gcra-equiv}). Every claim is backed by an
+executable test: the 2x boundary burst is not an anecdote here, it is a
+passing pytest.
+
+Distribution changes everything and nothing. The algorithms survive
+replication; the \emph{state} does not. We dissect the read-modify-write
+race that makes naive multi-replica limiters over-admit, show why a Redis
+sorted set driven by a single Lua script is atomic by construction, and map
+the cell-based architectures (one global cell, regional cells, local
+limiters with gossip) onto their consistency--latency--blast-radius
+trade-offs, including the fail-open versus fail-closed decision you must
+make \emph{before} Redis dies, not during. Client-facing semantics get equal
+rigor: 429 with \texttt{Retry-After} in both its legal forms, the IETF
+\texttt{RateLimit-*} header fields draft, 503 for shedding, and quota
+endpoints --- because a limit a developer cannot observe is a limit they
+will route around~\cite{ietf_ratelimit_headers,rfc9110}. We close with
+multi-dimensional limiting: per-key, per-IP, per-endpoint, cost-weighted
+budgets, adaptive AIMD limits, and priority-aware shedding, all set in the
+Northwind Robotics fleet-telemetry universe.
+
+\begin{keyconceptbox}
+A rate limiter is a \textbf{control system}, not a gate. Its setpoint is
+capacity, its sensor is measured load, its actuator is admission, and its
+contract with clients is the headers it emits. Choose the algorithm by its
+burst and memory envelope (proved, not vibes), keep the shared-state update
+atomic (one Lua script, one cell), and never reject silently: a 429 without
+\texttt{Retry-After} is an outage with extra steps.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch14-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able
+to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Distinguish rate limiting, throttling, quotas, concurrency limits,
+        and load shedding by the question each answers, the time window each
+        governs, and the failure each prevents; identify which of the five a
+        given production incident actually required.
+  \item Derive, not just describe, the five classic admission algorithms ---
+        fixed window, sliding window log, sliding window counter, token
+        bucket, and GCRA --- including the fixed-window 2x boundary burst
+        (Theorem~\ref{thm:ch14-fixed-window-2x}), the sliding-counter error
+        bound (Proposition~\ref{prop:ch14-swc-error}), the token-bucket
+        envelope (Proposition~\ref{prop:ch14-tb-envelope}), and the GCRA
+        TAT update rule with its token-bucket equivalence
+        (Proposition~\ref{prop:ch14-gcra-equiv}).
+  \item Implement all five algorithms in typed Python~3.11 against an
+        injected virtual clock, and prove their documented behaviors with
+        deterministic, offline unit tests.
+  \item Explain why naive read-modify-write limiting races across replicas,
+        and implement an atomic distributed sliding-window limiter on Redis
+        sorted sets driven by a single Lua script, verified offline against
+        fakeredis under a thread storm.
+  \item Design the failure policy for a limiter outage: fail-open,
+        fail-closed, or degraded-local, selected per endpoint class from an
+        explicit decision matrix rather than from adrenaline.
+  \item Emit correct client-facing semantics: 429 with \texttt{Retry-After}
+        (delay-seconds or HTTP-date), the IETF \texttt{RateLimit-Limit},
+        \texttt{RateLimit-Remaining}, \texttt{RateLimit-Reset}, and
+        \texttt{RateLimit-Policy} fields, 503 for load shedding, and quota
+        introspection endpoints~\cite{ietf_ratelimit_headers,rfc9110}.
+  \item Build FastAPI middleware enforcing per-API-key limits with accurate
+        headers across window boundaries and a tested fail-open/fail-closed
+        switch~\cite{fastapidocs}.
+  \item Compose multi-dimensional limits --- per-key, per-IP, per-endpoint,
+        cost-weighted, and adaptive (AIMD) --- and prioritize critical over
+        batch traffic under pressure.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes Chapters~0--7: the HTTP request/response model and
+header semantics (Chapter~\ref{ch:http_wire}), consuming APIs and reading
+error responses in Python (Chapter~\ref{ch:consuming_python}), REST resource
+modeling (Chapter~\ref{ch:rest_style}), JSON payloads
+(Chapter~\ref{ch:serialization}), API-key authentication basics
+(Chapter~\ref{ch:client_security}), building and testing FastAPI services
+with \texttt{TestClient} (Chapter~\ref{ch:fastapi}), and structured error
+responses (Chapter~\ref{ch:problem_details}). Comfort with Big-O notation
+and elementary algebra (floor functions, geometric bounds) is assumed; every
+derivation is self-contained. The GraphQL cross-reference in the interview
+vault points forward to Chapter~\ref{ch:graphql} but is not required here.
+
+\subsection*{Setup}
+All listings run offline on Windows with Python~3.11+. One-time setup from
+PowerShell in a scratch directory:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fakeredis fastapi httpx pytest
+\end{minted}
+
+fakeredis emulates Redis (including Lua script execution) entirely
+in-process, so the ``distributed'' listings run with no server, no
+containers, and no network; Section~\ref{sec:ch14-deps} notes what changes
+when you point the same code at a real \texttt{redis>=5} deployment.
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch14-mechanics}
+
+\subsection{Why Limit at All: Four Distinct Failures, Five Distinct Tools}
+\label{subsec:ch14-why}
+
+Rate limiting is not one technique but a family, and most production
+incidents involving ``rate limits'' are actually failures to distinguish its
+members. Four pressures make admission control non-optional:
+
+\begin{enumerate}
+  \item \textbf{Capacity protection.} Every downstream --- connection pool,
+        worker count, database, a partner API --- has a knee beyond which
+        throughput \emph{falls} as offered load rises (retry storms
+        amplify this). Rejecting cheaply at the edge preserves the
+        expensive interior for requests that will complete.
+  \item \textbf{Fairness.} Tenants share capacity. Without per-identity
+        accounting, one runaway client becomes everyone's outage; the
+        noisy-neighbor problem is a limiting problem.
+  \item \textbf{Cost control.} Egress, LLM tokens, metered third-party
+        calls, and report renders all have marginal cost. An unpriced API
+        is a subsidy for whoever automates against it first.
+  \item \textbf{Abuse prevention.} Credential stuffing, scraping, and
+        inventory hoarding are economic attacks; raising the attacker's
+        cost per attempt is the defense of first resort
+        (Chapter~\ref{ch:api_security}).
+\end{enumerate}
+
+The five tools map onto five different questions:
+
+\begin{definition}[Rate limit]
+A per-identity admission rule over a \emph{short} window (seconds to
+minutes): \emph{``how fast may this caller start requests right now?''}
+Enforced statefully per key; rejection is routine, cheap, and expected to be
+retried by well-behaved clients.
+\end{definition}
+
+\begin{definition}[Throttling]
+\emph{Shaping} rather than rejecting: delaying, dequeuing, or degrading
+admitted work so the system's \emph{processing} rate stays at target. A
+leaky bucket \emph{as a queue} throttles; a 429 \emph{limits}. Throttling
+costs latency; limiting costs a rejection.
+\end{definition}
+
+\begin{definition}[Quota]
+A \emph{long-window} budget (hour, day, billing month) that rations
+aggregate consumption: \emph{``how much may this customer use in total?''}
+Quotas are business constructs --- they encode plans, tiers, and cost ---
+whereas rate limits are protection constructs. A client can be inside its
+monthly quota and still be rate-limited this second.
+\end{definition}
+
+\begin{definition}[Concurrency limit]
+A bound on requests \emph{in flight}, not requests started per unit time.
+Ten requests that each hold a thread for 30 seconds stress a service more
+than a hundred 5-millisecond requests; only a concurrency limiter (or bulkhead,
+Chapter~\ref{ch:microservices}) sees the difference. Little's law connects
+them: concurrency $=$ throughput $\times$ latency.
+\end{definition}
+
+\begin{definition}[Load shedding]
+Self-protection independent of identity: when the system is saturated,
+decline work --- by priority class, by cheapness to serve, or at random ---
+to keep the admitted majority healthy. Shedding answers \emph{``which work
+do we drop when we cannot do it all?''}; the honest response is 503 with
+\texttt{Retry-After}~\cite{rfc9110}.
+\end{definition}
+
+\begin{warningbox}
+Teams routinely deploy \emph{one} of the five and believe they have the
+other four. A per-key rate limit does nothing against a legitimate,
+in-limit client whose requests each take 45~seconds (need: concurrency
+limit); a monthly quota does nothing against a 30-second burst that melts
+the connection pool (need: rate limit); neither protects you from a
+thundering herd of anonymous traffic (need: shedding). The audit question
+is never ``do we have rate limiting?'' but ``which of the five questions
+can this system currently answer?''
+\end{warningbox}
+
+\subsection{Fixed Window Counter --- and Its Provable 2x Flaw}
+\label{subsec:ch14-fixed-window}
+
+The fixed window counter is the limiter everyone writes first: partition
+time into windows of length $W$ anchored at $t = 0$, keep one integer
+counter per key per window index $\lfloor t/W \rfloor$, and admit while the
+counter is below the limit $N$. It is $O(1)$ memory, trivially shardable,
+and its \texttt{RateLimit-Reset} semantics are crisp (the window boundary).
+It is also wrong at the edges, and the wrongness is a theorem, not a
+folklore warning.
+
+\begin{theorem}[Fixed-window boundary burst]
+\label{thm:ch14-fixed-window-2x}
+A fixed-window limiter configured for $N$ requests per window $W$ can admit
+$2N$ requests inside a single real-time interval of length at most $W$ ---
+indeed, inside an interval of length $2\varepsilon$ for any
+$\varepsilon \in (0, W/2]$ --- and $2N$ is tight.
+\end{theorem}
+
+\begin{proof}
+Let $kW$ be any window boundary. Fire $N$ requests at time
+$t_0 = kW - \varepsilon$: all fall in window $k-1$, counter reaches $N$,
+all admitted. Fire $N$ more at $t_1 = kW + \varepsilon$: window index has
+rolled to $k$, the counter reset to zero, and all $N$ are admitted. The
+$2N$ admissions all lie in $[t_0, t_1]$, an interval of length
+$2\varepsilon \le W$. For tightness: any interval of length $W$ intersects
+at most two fixed windows, and each contributes at most $N$ admissions, so
+no such interval can contain more than $2N$.
+\end{proof}
+
+The practical reading: a client --- or a synchronized fleet of mobile
+clients retrying after a connectivity blip, which is how this fires in real
+life --- can double its nominal rate \emph{every} window, forever, by
+straddling boundaries. Worse, the burst can be concentrated in an
+arbitrarily small $\varepsilon$, so the instantaneous rate is unbounded:
+$2N$ requests can arrive within milliseconds of each other. If your limit
+exists to protect a connection pool or a partner API with a per-second
+cap, the fixed window does not enforce the thing you think it enforces.
+Listing~\ref{lst:ch14-tests} proves Theorem~\ref{thm:ch14-fixed-window-2x}
+as an executable test (20 admissions in a 2-millisecond interval under a
+``10 per second'' limit).
+
+\subsection{Sliding Window Log: Exactness at $O(N)$ Memory}
+\label{subsec:ch14-sliding-log}
+
+The sliding window log removes the boundary entirely: store the timestamp
+of every admitted request for the key, and on each arrival at time $t$
+evict timestamps $\le t - W$; admit if fewer than $N$ remain. The window
+now \emph{slides with the caller}, so no boundary exists to straddle, and
+the invariant is exact:
+
+\begin{proposition}[Sliding-log exactness]
+\label{prop:ch14-swl-exact}
+The sliding window log admits a request at $t$ if and only if strictly
+fewer than $N$ previously admitted requests lie in $(t-W, t]$. Consequently
+no interval of length $W$ ever contains more than $N$ admissions: the
+$(i{+}N)$-th admission is always strictly more than $W$ after the $i$-th.
+\end{proposition}
+
+The cost is memory: $O(N)$ per key, per window. At $N = 10{,}000$ per
+minute across a million API keys, the log is the state. This is why the
+exact algorithm is rare at platform scale and why the next two algorithms
+exist: they trade exactness for $O(1)$ state. A second, subtler cost is
+that \texttt{Retry-After} becomes the time until the \emph{oldest} in-window
+request expires --- perfectly computable, but it means your reset hint
+varies with the client's own history rather than aligning to a wall-clock
+boundary (Section~\ref{subsec:ch14-headers}).
+
+\subsection{Sliding Window Counter: The Weighted Approximation}
+\label{subsec:ch14-sliding-counter}
+
+The sliding window counter keeps only two integers per key: the current
+fixed window's count $c$ and the previous window's count $p$. At time $t$,
+a fraction $f = (t - \lfloor t/W \rfloor W)/W$ of the current window has
+elapsed, so a fraction $1-f$ of the previous window still overlaps the
+true sliding window $[t-W, t]$. \emph{Assuming} the previous window's $p$
+requests were spread uniformly across it, the overlapping portion is
+estimated as $p(1-f)$, giving the estimator
+\begin{equation}
+  \hat{c}(t) \;=\; c(t) \;+\; p\,(1-f).
+  \label{eq:ch14-swc}
+\end{equation}
+Admit when $\hat{c} < N$. This is the algorithm Cloudflare famously
+analyzed at scale, finding sub-0.01\% disagreement with the exact log on
+real traffic --- but their traffic is smooth, and the estimator's quality
+is a bound, not a vibe:
+
+\begin{proposition}[Sliding-counter error bound]
+\label{prop:ch14-swc-error}
+Let $o$ be the true number of previous-window requests inside $[t-W, t]$.
+Then $|\hat{c} - c_{\mathrm{true}}| = |p(1-f) - o| \le p \cdot \max(f, 1-f)
+< p \le N$.
+\end{proposition}
+
+\begin{proof}
+$0 \le o \le p$ by definition, and the overlap region has length $(1-f)W$.
+The error $|\,p(1-f) - o\,|$ is maximized at the extremes of $o$: if all
+$p$ requests landed in the non-overlapping part of the previous window
+($o=0$), the estimator \emph{overcounts} by $p(1-f)$; if all $p$ landed in
+the overlap ($o=p$), it \emph{undercounts} by $p - p(1-f) = pf$. The larger
+of the two is $p\max(f, 1-f) < p$, and $p \le N$ because the limiter was
+enforcing during the previous window.
+\end{proof}
+
+Proposition~\ref{prop:ch14-swc-error} tells you exactly when to distrust
+this algorithm: error scales with $p$, so the estimate is worst precisely
+after a window that was saturated --- i.e., precisely when limiting
+mattered. The adversarial case (all of last window's traffic bunched at its
+end, as a retry fleet produces) makes the counter \emph{over-admit} early in
+the next window; Listing~\ref{lst:ch14-tests} exhibits exactly that
+over-admission as a test.
+
+\subsection{Token Bucket: Burst Capacity as a Conserved Quantity}
+\label{subsec:ch14-token-bucket}
+
+The token bucket reparameterizes the problem from \emph{counting} to
+\emph{budgeting}. A bucket holds at most $B$ tokens and refills
+continuously at $r$ tokens per second; a request that finds $\ge 1$ token
+consumes one and is admitted, else rejected. State per key is two scalars
+(token level, last-refill timestamp) and the update is lazy --- computed on
+arrival, no background timers:
+\begin{equation}
+  \mathrm{tokens}(t) \;=\; \min\!\bigl(B,\; \mathrm{tokens}(t_0) + r\,(t - t_0)\bigr).
+  \label{eq:ch14-tb-refill}
+\end{equation}
+
+\begin{proposition}[Token-bucket envelope]
+\label{prop:ch14-tb-envelope}
+Over any interval $[t_0, t_1]$, the number of admitted requests satisfies
+$A \le B + r\,(t_1 - t_0)$, and the bound is tight. Hence the long-run
+admitted rate is at most $r$, while instantaneous bursts up to $B$ are
+fully admitted.
+\end{proposition}
+
+\begin{proof}
+Tokens are conserved: every admission removes one token, and the only
+source of tokens is refill at rate $r$ into a bucket that started the
+interval with at most $B$. Tokens available in the interval $\le B +
+r(t_1 - t_0)$, bounding admissions; the bound is attained by arriving
+exactly as tokens accumulate. Dividing by $\Delta t = t_1 - t_0$ gives
+average rate $\le r + B/\Delta t \to r$ as $\Delta t \to \infty$.
+\end{proof}
+
+Proposition~\ref{prop:ch14-tb-envelope} is why the token bucket is the
+default answer in interviews and in gateways: one parameter pair $(r, B)$
+independently controls the \emph{sustained} rate and the \emph{burst}
+tolerance, and the envelope is the tightest possible for any limiter with
+those two properties (any limiter that admits a burst of $B$ and sustains
+$r$ must admit at least this envelope). Figure~\ref{fig:ch14-token-bucket}
+shows the mechanics.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % ---- left: bucket schematic ----
+  \draw[thick] (0,0) -- (0,2.6) (2.2,0) -- (2.2,2.6) (0,0) -- (2.2,0);
+  \fill[blue!18] (0.04,0.04) rectangle (2.16,1.35);
+  \foreach \x/\y in {0.35/0.3, 0.85/0.3, 1.35/0.3, 1.85/0.3,
+                     0.6/0.75, 1.1/0.75, 1.6/0.75, 0.85/1.15, 1.35/1.15}{
+    \draw[fill=darkblue!70] (\x,\y) circle (0.14);
+  }
+  \draw[decorate, decoration={brace, amplitude=5pt}, thick]
+    (2.45,0) -- (2.45,2.6) node[midway, right=7pt, align=left]
+    {capacity $B$\\ \footnotesize (burst tolerance)};
+  \draw[->, thick, darkblue] (1.1,3.6) -- (1.1,2.7)
+    node[midway, right, align=left] {refill: $r$ tokens/s};
+  \node[align=center] at (1.1,-0.7) {\footnotesize token bucket};
+  \draw[->, thick] (-2.6,1.3) -- (-0.15,1.3)
+    node[midway, above, align=center] {requests};
+  \draw[->, thick, packtorange] (2.35,0.5) -- (3.9,0.5)
+    node[right, align=left] {admit: $-1$ token};
+  \draw[->, thick, packtorange, dashed] (-0.15,2.2) -- (-1.3,2.9)
+    node[left, align=right] {reject: 429};
+  % ---- right: token level timeline ----
+  \begin{scope}[shift={(6.4,0)}]
+    \draw[->] (0,0) -- (5.6,0) node[below left] {\footnotesize $t$ (s)};
+    \draw[->] (0,0) -- (0,3.0) node[above] {\footnotesize tokens};
+    \draw[dashed, gray] (0,2.4) -- (5.4,2.4) node[pos=0, left] {\footnotesize $B$};
+    % idle full -> burst drains -> refill at r -> cap at B -> trickle
+    \draw[very thick, darkblue] (0,2.4) -- (1.0,2.4);
+    \draw[very thick, packtorange] (1.0,2.4) -- (1.0,0.0);
+    \draw[very thick, darkblue] (1.0,0.0) -- (2.8,2.4);
+    \draw[very thick, darkblue] (2.8,2.4) -- (3.6,2.4);
+    \draw[very thick, darkblue] (3.6,2.4) -- (3.6,2.0);
+    \draw[very thick, darkblue] (3.6,2.0) -- (4.1,2.4);
+    \draw[very thick, darkblue] (4.1,2.4) -- (5.4,2.4);
+    \node[note] at (1.0,-0.35) {\footnotesize burst: $B$ at once};
+    \node[note] at (2.2,0.9) {\footnotesize refill slope $r$};
+    \node[note] at (4.9,2.05) {\footnotesize drip-fed admits};
+    \foreach \t in {1.0, 3.6}{
+      \draw[gray!60, dotted] (\t,0) -- (\t,2.4);
+    }
+  \end{scope}
+\end{tikzpicture}
+\caption{Token bucket mechanics. Left: refill at $r$ tokens/s into a bucket
+capped at $B$; admission consumes one token, empty buckets reject. Right:
+token level over time --- a full bucket absorbs a burst of $B$ instantly
+(vertical drop), refills linearly at $r$, then admits only as fast as
+tokens drip in. The area discipline of
+Proposition~\ref{prop:ch14-tb-envelope} is visible: burst height $B$,
+sustained slope $r$.}
+\label{fig:ch14-token-bucket}
+\end{figure}
+
+\subsection{Leaky Bucket: Meter versus Queue}
+\label{subsec:ch14-leaky-bucket}
+
+``Leaky bucket'' names two different machines, and conflating them in a
+design review is a reliable way to build the wrong one. \textbf{As a
+meter}, the leaky bucket is a bucket that \emph{drains} at a constant rate
+and overflows (rejects) when inflow exceeds outflow --- this is precisely
+GCRA, derived next, and it is what \texttt{nginx}'s \texttt{limit\_req}
+implements. \textbf{As a queue}, it is a FIFO buffer of capacity $Q$:
+requests enqueue, and a worker drains the queue at exactly $r$ per second.
+The two have opposite burst postures. The meter admits bursts (up to its
+tolerance) and enforces only the average; the queue \emph{destroys} bursts
+entirely, presenting a perfectly smooth $r$-per-second stream downstream at
+the cost of queueing delay up to $Q/r$ seconds --- and of tying up a
+connection or queue slot per waiting request. Use the meter to protect a
+\emph{rate}; use the queue to protect a \emph{downstream that panics at
+jitter} (a legacy mainframe interface, a partner with hard pacing). The
+queue variant is throttling in the strict sense of
+Definition~14.2: it shapes rather than rejects, until the queue itself
+fills.
+
+\subsection{GCRA: One Timestamp to Rule Them All}
+\label{subsec:ch14-gcra}
+
+The Generic Cell Rate Algorithm, standardized for ATM traffic policing and
+rediscovered by every gateway author since, reduces rate limiting to a
+single timestamp per key. Parameterize by the \emph{emission interval}
+$T = 1/r$ (the minimum spacing between conforming requests at the sustained
+rate) and a \emph{burst tolerance} $\tau$. State is the \emph{theoretical
+arrival time} $\mathrm{TAT}$: when the next request would arrive if the
+client were perfectly paced. On an arrival at $t_a$:
+\begin{equation}
+  \text{reject if } t_a < \mathrm{TAT} - \tau;
+  \qquad
+  \text{else admit and } \mathrm{TAT} \leftarrow \max(t_a, \mathrm{TAT}) + T.
+  \label{eq:ch14-gcra}
+\end{equation}
+Read it operationally. The condition says: a request may arrive up to $\tau$
+\emph{early} relative to the schedule; arriving earlier than that means the
+client has consumed more burst credit than exists. The update says: each
+admission pushes the schedule later by one emission interval, but if the
+client was idle ($t_a > \mathrm{TAT}$) the schedule first re-anchors to the
+present --- idle time does not accrue credit beyond $\tau$, because
+$\max(t_a, \mathrm{TAT})$ discards any schedule that has fully lapsed.
+Rejection yields a ready-made \texttt{Retry-After}: $\mathrm{TAT} - \tau - t_a$.
+
+\begin{proposition}[GCRA $\equiv$ token bucket]
+\label{prop:ch14-gcra-equiv}
+GCRA with emission interval $T$ and tolerance $\tau$ admits exactly the
+same request streams as a token bucket with rate $r = 1/T$ and capacity
+$B = 1 + \tau/T$.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Define the token level from GCRA state as
+$L(t) = \min\bigl(1 + \tau/T,\; 1 + (t + \tau - \mathrm{TAT})/T\bigr)$.
+The GCRA admission condition $t_a \ge \mathrm{TAT} - \tau$ is algebraically
+$L(t_a) \ge 1$. On admission, $\mathrm{TAT} \leftarrow \max(t_a,
+\mathrm{TAT}) + T$ decrements $L$ by exactly $1$ (the $\max$ clamps $L$ at
+capacity, matching the bucket's $\min(B, \cdot)$). Between arrivals,
+$\mathrm{TAT}$ is constant and $L$ grows at rate $1/T = r$, matching
+Equation~\eqref{eq:ch14-tb-refill}. Same state dynamics, same decisions;
+Listing~\ref{lst:ch14-tests} verifies the equivalence on a seeded
+adversarial stream.
+\end{proof}
+
+Why keep both? The token bucket parameterizes as humans think
+(\emph{rate} and \emph{burst size}); GCRA parameterizes as schedulers think
+(\emph{spacing} and \emph{jitter tolerance}) and stores its state as one
+timestamp that serializes trivially into a single Redis field --- no
+two-field tuple, no lazy-refill ordering hazards. Most serious gateways
+(nginx, Envoy, Kong's default) are GCRA underneath whatever their
+configuration calls it.
+
+\subsection{Choosing an Algorithm}
+\label{subsec:ch14-choosing}
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l l l X}
+    \toprule
+    \textbf{Algorithm} & \textbf{Memory/key} & \textbf{Burst behavior} &
+    \textbf{Boundary} & \textbf{Choose when} \\
+    \midrule
+    Fixed window & $O(1)$ & up to $2N$ at edges & hard, exploitable &
+      Crisp reset headers; rough protection; short windows \\
+    Sliding log & $O(N)$ & none beyond $N$ & none (exact) &
+      Correctness-critical, modest $N$ (auth attempts, payments) \\
+    Sliding counter & $O(1)$ & bounded by Prop.~\ref{prop:ch14-swc-error} &
+      smoothed & Huge key space, smooth traffic, tolerance for $\pm p$ error \\
+    Token bucket & $O(1)$ & exactly $B$, then $r$ & none &
+      General default; independent rate/burst knobs \\
+    GCRA & 1 timestamp & exactly $1 + \tau/T$ & none &
+      Single-field state; gateway parity; precise pacing \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Admission algorithm comparison. All rows enforce the same
+  nominal rate; they differ in memory, burst envelope, and boundary
+  behavior. GCRA and token bucket are provably equivalent
+  (Proposition~\ref{prop:ch14-gcra-equiv}); the choice between them is
+  operational, not behavioral.}
+  \label{tab:ch14-algorithms}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize, >=stealth, node distance=0.5cm and 0.9cm,
+  decision/.style={diamond, draw=darkblue, thick, align=center,
+    inner sep=1.2pt, text width=3.1cm},
+  term/.style={rectangle, draw, fill=gray!15, rounded corners, align=center,
+    minimum width=3.0cm, minimum height=0.85cm},
+  start/.style={rectangle, draw, rounded corners, align=center,
+    minimum width=3.0cm, minimum height=0.85cm}]
+  \node[start] (start) {Need admission control\\ for identity $k$};
+  \node[decision, right=of start] (replicas) {Multiple replicas\\ share the limit?};
+  \node[decision, right=of replicas] (exact) {Exactness required?\\ \tiny (auth, payments)};
+  \node[term, above right=0.1cm and 0.9cm of exact] (log) {Sliding window log\\ \tiny (Redis ZSET + Lua)};
+  \node[decision, below right=0.1cm and 0.9cm of exact] (bursts) {Must tolerate\\ legit bursts?};
+  \node[term, right=of bursts] (bucket) {Token bucket / GCRA\\ \tiny $B$ sized to legit burst};
+  \node[term, below=of bursts] (counter) {Sliding counter or\\ fixed window \tiny (short $W$)};
+  \node[term, above=of replicas, yshift=0.35cm] (cell) {Redis cell architecture\\ \tiny Figure~\ref{fig:ch14-distributed}};
+  \draw[->] (start) -- (replicas);
+  \draw[->] (replicas) -- node[above] {no} (exact);
+  \draw[->] (replicas) -- node[left, pos=0.35] {yes} (cell);
+  \draw[->] (cell.east) -| node[pos=0.2, above] {\tiny then pick algorithm} (log.north);
+  \draw[->] (exact) -- node[above] {yes} (log);
+  \draw[->] (exact) -- node[above] {no} (bursts);
+  \draw[->] (bursts) -- node[above] {yes} (bucket);
+  \draw[->] (bursts) -- node[above] {no} (counter);
+\end{tikzpicture}
+\caption{Algorithm selection flow. The first question is topological (shared
+state?), the second semantic (exactness?), the third behavioral (bursts?).
+``No bursts tolerated'' with $O(1)$ memory means accepting the fixed or
+sliding counter's window artifacts consciously.}
+\label{fig:ch14-decision}
+\end{figure}
+\subsection{Distribution: The Race, the Cell, and the Failure Policy}
+\label{subsec:ch14-distributed}
+
+A rate limiter's algorithm survives replication; its \emph{state} does not.
+The moment two replicas enforce one logical limit, the question stops being
+``which algorithm?'' and becomes ``where does the counter live, and who can
+see it when?''
+
+\subsubsection{The read-modify-write race}
+The naive distributed fixed window --- \texttt{GET} the counter, compare,
+\texttt{INCR} --- over-admits under any concurrency at all. With limit $N$
+and counter at $N-1$, two requests landing on two replicas both read $N-1$,
+both conclude ``admit,'' and the counter ends at $N+1$; under a retry storm
+the overshoot grows with concurrency, not with request rate. Even the
+apparently atomic \texttt{INCR}-then-compare variant (increment first,
+reject when over) is subtly broken: rejected requests still \emph{consume}
+counter increments, so an attacker (or a desperate retrying client) can
+poison a window for everyone including itself, and the counter can run to
+millions while admitting nothing. The general principle is the one
+Chapter~\ref{ch:idempotency} applied to writes and
+\cite{kleppmann2017ddia} applies to all shared state: \emph{check and
+mutate must be one indivisible step against the authoritative copy}.
+
+The standard solution is Redis plus Lua: Redis executes each Lua script
+atomically on its single command-processing thread, so a script that
+evicts, counts, conditionally inserts, and sets expiry is a compare-and-set
+of arbitrary complexity with no client-side round trips
+(Listing~\ref{lst:ch14-redis}). The sorted-set sliding log is the usual
+payload: timestamps as scores, a UUID per request as member, one
+\texttt{ZREMRANGEBYSCORE}/\texttt{ZCARD}/\texttt{ZADD}/\texttt{PEXPIRE}
+sequence per admission decision.
+
+\subsubsection{Cell architectures}
+A single global Redis (or Redis Cluster) holding all limiter state is a
+\emph{global cell}: perfectly consistent, but every admission pays a network
+round trip and the cell is a blast-radius amplifier --- when it dies, every
+replica's limiter dies simultaneously (Section~\ref{subsec:ch14-failopen}).
+The alternatives are points on a consistency--latency frontier:
+
+\begin{itemize}
+  \item \textbf{Global cell.} Strongest semantics, highest per-request
+        latency (colocate the cell with the edge tier to keep it
+        sub-millisecond), largest correlated-failure domain. Right answer
+        for low-QPS, high-stakes limits: login attempts, payment attempts,
+        password reset.
+  \item \textbf{Regional cells.} One cell per region; a key's limit is
+        enforced only within the region serving it. A roaming client gets up
+        to $R \times$ its nominal limit across $R$ regions --- usually
+        acceptable for abuse control, unacceptable for billing-grade quotas.
+        Mitigate by pinning keys to home cells via consistent hashing.
+  \item \textbf{Local in-process limiters with periodic sync.} Each replica
+        enforces $\mathrm{limit}/R$ locally (or a gossiped/share-weighted
+        fraction) and reconciles asynchronously. Lowest latency and zero
+        hot-path dependency; over-admission is bounded by the number of
+        replicas times the sync lag in units of the window. This is
+        essentially how Cloudflare's edge limiting works: approximate at the
+        edge, exact nowhere, correct \emph{enough} everywhere. The error
+        budget for this design is Proposition~\ref{prop:ch14-swc-error}
+        thinking applied to topology instead of time.
+\end{itemize}
+
+Consistent hashing ties the pieces together: route limiter state for key
+$k$ to cell $h(k) \bmod C$ so that adding or losing a cell remaps only
+$1/C$ of keys (their counters reset --- a bounded, temporary under-limit,
+which fails \emph{safe} for the system and merely generous to $1/C$ of
+clients). Figure~\ref{fig:ch14-distributed} shows the shape.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize, >=stealth, node distance=0.55cm and 1.0cm,
+  edge/.style={rectangle, draw, rounded corners, align=center,
+    minimum width=2.5cm, minimum height=0.8cm},
+  cell/.style={rectangle, draw, fill=darkblue!10, rounded corners,
+    align=center, minimum width=2.9cm, minimum height=0.9cm},
+  client/.style={rectangle, draw, fill=packtorange!15, rounded corners,
+    align=center, minimum width=2.2cm, minimum height=0.7cm}]
+  \node[client] (c1) {robot fleet\\ \tiny key nr-demo-key-001};
+  \node[client, below=of c1] (c2) {partner app\\ \tiny key nr-demo-key-002};
+  \node[edge, right=1.6cm of c1] (e1) {edge replica 1\\ \tiny in-process fallback};
+  \node[edge, below=of e1] (e2) {edge replica 2\\ \tiny in-process fallback};
+  \node[edge, below=of e2] (e3) {edge replica 3\\ \tiny in-process fallback};
+  \node[rectangle, draw, dashed, align=center, right=1.7cm of e2,
+        minimum width=3.0cm, minimum height=0.9cm] (router)
+        {consistent-hash router\\ \tiny $h(k) \bmod C$ on limiter key};
+  \node[cell, above right=0.15cm and 1.6cm of router] (cellA)
+        {Redis cell A\\ \tiny Lua: ZSET sliding log};
+  \node[cell, below right=0.15cm and 1.6cm of router] (cellB)
+        {Redis cell B\\ \tiny Lua: ZSET sliding log};
+  \draw[->] (c1) -- (e1);
+  \draw[->] (c2) -- (e3);
+  \draw[->] (e1.east) -- ++(0.5,0) |- (router.west);
+  \draw[->] (e2) -- (router);
+  \draw[->] (e3.east) -- ++(0.5,0) |- (router.west);
+  \draw[->] (router.east) -- ++(0.4,0) |- (cellA.west)
+        node[pos=0.75, above] {\tiny $h(k)$ even};
+  \draw[->] (router.east) -- ++(0.4,0) |- (cellB.west)
+        node[pos=0.75, below] {\tiny $h(k)$ odd};
+  \node[note, text=packtgray, align=center] at ($(e2.south) + (0,-0.55)$)
+    {cell down $\to$ policy switch: fail-open / fail-closed / degraded-local};
+\end{tikzpicture}
+\caption{Distributed limiter architecture. Edge replicas consult one shared
+cell per key, chosen by consistent hashing so cell loss remaps only $1/C$
+of keyspace; the Lua script makes check-and-admit atomic inside a cell. The
+dashed policy annotation is mandatory, not decorative: every replica must
+know what it does when the cell is unreachable
+(Section~\ref{subsec:ch14-failopen}).}
+\label{fig:ch14-distributed}
+\end{figure}
+
+\subsubsection{Failure modes: fail-open, fail-closed, or degrade}
+\label{subsec:ch14-failopen}
+A limiter whose state store is unreachable cannot count. What it does next
+is a \emph{business decision wearing an engineering costume}, and it must be
+made per endpoint class, in advance:
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    \textbf{Policy} & \textbf{Behavior on limiter outage} &
+    \textbf{Blast radius of the choice} & \textbf{Right for} \\
+    \midrule
+    Fail-open & Serve everything; emit no unverifiable headers &
+      Abuse window until recovery; possible cascade if the outage
+      \emph{was} load & Read-heavy public APIs, telemetry ingest \\
+    Fail-closed & Reject (503 + \texttt{Retry-After}) &
+      Total API outage for the duration; safe against abuse &
+      Login, password reset, payment authorization \\
+    Degraded-local & Fall back to per-replica limit $\mathrm{limit}/R$ &
+      Bounded over-admission ($\le R\times$), no outage &
+      The default for most multi-replica services \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Failure-policy decision matrix. Degraded-local dominates when a
+  cheap local limiter is available; the fail-open/fail-closed binary is for
+  endpoints where either abuse or availability is existentially worse.}
+  \label{tab:ch14-failmatrix}
+\end{table}
+
+\begin{warningbox}
+A fail-closed limiter with no exception is a single point of total failure:
+when Redis dies, the API dies with it --- and because health checks usually
+pass through the same middleware, your load balancer may agree that
+everything is down and refuse to help. If you fail closed, exempt the
+health endpoint, keep the failure \texttt{Retry-After} short, and alert on
+limiter-unavailable as a severity-1 condition in its own right
+\cite{nygard2018releaseit}.
+\end{warningbox}
+
+\subsection{Client-Facing Semantics: Making Limits Legible}
+\label{subsec:ch14-headers}
+
+A limit developers cannot observe will be treated as a bug --- theirs, then
+yours. The wire contract has four moving parts.
+
+\textbf{429 and Retry-After.} Rejection is status 429 \emph{Too Many
+Requests}. RFC~9110 defines \texttt{Retry-After} in two legal forms: a
+non-negative integer of \emph{delay-seconds}
+(\texttt{Retry-After: 17}) or an absolute \emph{HTTP-date}
+(\texttt{Retry-After: Thu, 03 Sep 2026 21:00:00 GMT})~\cite{rfc9110}.
+Emit delay-seconds: HTTP-date costs you clock-sync reasoning on both sides
+and buys nothing a client cannot compute from the integer. Fractional waits
+must be ceiled --- a client that retries at $0.4$s when you meant $0.44$s
+will be rejected again and will (correctly) conclude your header is noise.
+
+\textbf{The IETF RateLimit fields.} The HTTPAPI working group's draft
+standardizes four fields~\cite{ietf_ratelimit_headers}:
+\texttt{RateLimit-Limit} (the quota for the window, e.g.\ \texttt{100}),
+\texttt{RateLimit-Remaining} (budget left \emph{after} this response),
+\texttt{RateLimit-Reset} (seconds until the window's quota fully resets ---
+note: delay-seconds, \emph{not} a timestamp; several major providers shipped
+epoch-seconds variants before the draft settled, so document yours), and
+\texttt{RateLimit-Policy} (the rule itself, e.g.\ \texttt{"100;w=60"} for
+100 per 60 seconds). Emit them on \emph{successes} too: a client that can
+watch \texttt{Remaining} decay can self-throttle before ever seeing a 429,
+which is the entire point. Headers you cannot compute truthfully (during a
+fail-open episode) must be omitted, never faked --- Listing~\ref{lst:ch14-middleware}
+implements exactly this rule.
+
+\textbf{503 for shedding.} When the system sheds load for its own
+protection (not because \emph{this client} exceeded \emph{its} limit), the
+honest status is 503 \emph{Service Unavailable} with
+\texttt{Retry-After}~\cite{rfc9110}. Conflating shedding with limiting
+(``429 for everyone during the incident'') misleads well-behaved clients
+into believing they did something wrong and misroutes their backoff logic:
+a 429 says \emph{slow down, you specifically}; a 503 says \emph{come back
+later, everyone}.
+
+\textbf{Quota endpoints.} Long-window budgets deserve introspection:
+\texttt{GET /v1/usage} returning the period's consumption, cap, and reset
+timestamp turns a billing surprise into a dashboard. Stripe-style
+idempotent, header-rich, self-describing limiting is what separates a
+platform from an obstacle course.
+
+\begin{examplebox}
+Northwind Robotics publishes \texttt{RateLimit-Policy: "600;w=60"} on its
+telemetry ingest API. A fleet-management integrator watches
+\texttt{RateLimit-Remaining} cross 60 and linearly spaces its remaining
+batch across the seconds left in the window; during a regional Redis cell
+outage the middleware fails open \emph{and omits} all four headers, which
+the integrator's SDK reads as ``limiter degraded, apply local pacing.'' No
+page, no ticket, no surprise invoice. That is what legible limits buy.
+\end{examplebox}
+
+\subsection{Multi-Dimensional Limiting}
+\label{subsec:ch14-multidim}
+
+Real systems limit along several axes at once, because no single identity
+captures every abuse shape:
+
+\begin{itemize}
+  \item \textbf{Per-API-key:} the billing identity; the primary axis for
+        fairness and plan enforcement.
+  \item \textbf{Per-IP:} the pre-authentication axis (you must limit
+        \emph{before} you can know the key --- otherwise login and key
+        validation are free to attack). Behind NATs and carrier-grade NAT,
+        one IP may be a ten-thousand-person enterprise (fairness disaster
+        if the limit is tight) or one IP may be a botnet of thousands
+        (useless if the limit is loose). Per-IP limits are a coarse outer
+        net, never the only one --- the case study in
+        Section~\ref{sec:ch14-case} is precisely this failure.
+  \item \textbf{Per-endpoint:} a global request budget per route, defending
+        the route's specific scarce resource regardless of which keys
+        consume it.
+  \item \textbf{Cost-based:} charge each request a \emph{weight}
+        proportional to its true cost --- a bulk export might cost 10 units
+        against a read's 1 --- so the budget is denominated in work
+        (Listing~\ref{lst:ch14-cost}). GraphQL makes this mandatory rather
+        than optional: the \emph{query}, not the route, determines cost, so
+        limiters there score the parsed query's field weights and depth
+        (Chapter~\ref{ch:graphql}).
+  \item \textbf{Adaptive:} AIMD --- additive increase, multiplicative
+        decrease, TCP's gift to every backpressure problem. Raise a client's
+        limit additively while the service is healthy ($L \leftarrow L + a$),
+        slash it multiplicatively on overload signals --- p99 latency
+        crossing target, 5xx rate, queue depth --- ($L \leftarrow \beta L$,
+        $\beta \approx 0.5$--$0.9$). AIMD converges to the largest limit the
+        system can currently serve and backs off faster than it advances,
+        which is exactly the asymmetry safety wants. It pairs naturally with
+        adaptive \emph{concurrency} limits on the server side.
+  \item \textbf{Priority-aware shedding:} under pressure, admit critical
+        traffic (health, control plane, paying interactive reads) and shed
+        batch/analytics first. Priority must come from an authenticated
+        attribute of the request (key tier, route class), never from a
+        client-supplied header --- a \texttt{X-Priority: high} you honor is
+        a \texttt{X-Priority: high} your abusers send.
+\end{itemize}
+
+Expensive endpoints deserve explicit mention because they are where
+dimensionless limits go to die: report generation, CSV/PDF exports, bulk
+ingest, and search export endpoints can each cost $10$--$1000\times$ a
+median request. Protect them with (a) a per-endpoint cost weight, (b) a
+separate, tighter concurrency cap (two concurrent exports, queue the rest),
+and (c) where possible, an asynchronous shape instead --- accept the job,
+return 202 with a status URL, and let the \emph{job queue} apply its own
+pacing (Chapter~\ref{ch:async_apis}).
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch14-code}
+
+Everything below is typed Python~3.11, offline-first, and deterministic:
+every limiter takes an injected \texttt{Clock}, every timeline is seeded,
+and no test reads wall-clock time. The code is set in the Northwind
+Robotics universe --- a fleet-telemetry platform whose API keys all begin
+\texttt{nr-demo-} (synthetic; no real credentials appear anywhere in this
+book). Save the listings as indicated and the printed commands reproduce
+every claim in this chapter.
+
+\subsection{Listing 14.1 --- Five Algorithms, One Contract}
+\label{subsec:ch14-listing-limiters}
+
+\texttt{rate\_limiters.py} implements all five admission algorithms behind a
+single \texttt{check(at=None) -> Decision} contract, where
+\texttt{Decision} carries the three things middleware will need: admit flag,
+remaining budget, and a \texttt{Retry-After} hint. The \texttt{VirtualClock}
+is the determinism backbone: tests advance time explicitly, so behavior is
+identical on every machine, every run.
+
+\noindent\textbf{Listing 14.1 --- \texttt{rate\_limiters.py}: reference
+implementations with injected clock.}
+\label{lst:ch14-limiters}
+\begin{minted}{python}
+"""Reference implementations of the five classic rate-limiting algorithms.
+
+Every limiter takes an injected ``Clock`` so behavior is fully deterministic
+under test: no wall-clock reads anywhere. Time is in float seconds.
+
+Algorithms implemented:
+  * FixedWindowLimiter      -- counter per floor(t / window) bucket
+  * SlidingWindowLogLimiter -- exact timestamp log
+  * SlidingWindowCounterLimiter -- weighted previous/current window estimate
+  * TokenBucketLimiter      -- capacity B, refill rate r
+  * GCRALimiter             -- generic cell rate algorithm (leaky bucket as
+                               a meter), parameterized by emission interval T
+                               and burst tolerance tau
+
+All limiters expose the same ``allow(at=None) -> bool`` contract and are
+single-process reference models; Listing 14.4 lifts the sliding log to Redis.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import deque
+from typing import Deque, Optional, Protocol
+
+
+class Clock(Protocol):
+    """Anything that reports the current time in float seconds."""
+
+    def now(self) -> float: ...
+
+
+class VirtualClock:
+    """Deterministic, manually advanced clock for tests and simulations."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._t = float(start)
+
+    def now(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        if seconds < 0:
+            raise ValueError("cannot move a clock backwards")
+        self._t += seconds
+
+
+class Decision:
+    """Result of an admission check: admit flag plus header metadata."""
+
+    def __init__(self, allowed: bool, remaining: int, retry_after: float) -> None:
+        self.allowed = allowed
+        self.remaining = remaining
+        self.retry_after = max(0.0, retry_after)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"Decision(allowed={self.allowed}, remaining={self.remaining}, "
+            f"retry_after={self.retry_after:.3f})"
+        )
+
+
+class FixedWindowLimiter:
+    """Allow at most ``limit`` requests per fixed window of ``window`` seconds.
+
+    Memory: O(1). Flaw: up to ``2 * limit`` requests can be admitted inside
+    any real-time interval of length ``window`` (see Theorem 14.1).
+    """
+
+    def __init__(self, limit: int, window: float, clock: Clock) -> None:
+        if limit <= 0 or window <= 0:
+            raise ValueError("limit and window must be positive")
+        self.limit = limit
+        self.window = window
+        self.clock = clock
+        self._window_index = -1
+        self._count = 0
+
+    def check(self, at: Optional[float] = None) -> Decision:
+        t = self.clock.now() if at is None else at
+        index = math.floor(t / self.window)
+        if index != self._window_index:
+            self._window_index = index
+            self._count = 0
+        window_end = (index + 1) * self.window
+        if self._count < self.limit:
+            self._count += 1
+            return Decision(True, self.limit - self._count, 0.0)
+        return Decision(False, 0, window_end - t)
+
+
+class SlidingWindowLogLimiter:
+    """Exact limiter: keep the timestamp of every admitted request.
+
+    Memory: O(limit) per key. Never admits more than ``limit`` requests in
+    any interval of length ``window`` -- the gold standard for correctness.
+    """
+
+    def __init__(self, limit: int, window: float, clock: Clock) -> None:
+        if limit <= 0 or window <= 0:
+            raise ValueError("limit and window must be positive")
+        self.limit = limit
+        self.window = window
+        self.clock = clock
+        self._log: Deque[float] = deque()
+
+    def check(self, at: Optional[float] = None) -> Decision:
+        t = self.clock.now() if at is None else at
+        cutoff = t - self.window
+        while self._log and self._log[0] <= cutoff:
+            self._log.popleft()
+        if len(self._log) < self.limit:
+            self._log.append(t)
+            return Decision(True, self.limit - len(self._log), 0.0)
+        oldest = self._log[0]
+        return Decision(False, 0, oldest + self.window - t)
+
+
+class SlidingWindowCounterLimiter:
+    """Weighted approximation of the sliding log with O(1) memory.
+
+    Estimate for the true count in [t - window, t]:
+        estimate = current + previous * (1 - elapsed_fraction)
+    where elapsed_fraction is how far ``t`` has progressed into the current
+    fixed window. The absolute error versus the exact log is strictly less
+    than the previous window's count (Proposition 14.2).
+    """
+
+    def __init__(self, limit: int, window: float, clock: Clock) -> None:
+        if limit <= 0 or window <= 0:
+            raise ValueError("limit and window must be positive")
+        self.limit = limit
+        self.window = window
+        self.clock = clock
+        self._prev_index = -1
+        self._prev_count = 0
+        self._curr_index = -1
+        self._curr_count = 0
+
+    def check(self, at: Optional[float] = None) -> Decision:
+        t = self.clock.now() if at is None else at
+        index = math.floor(t / self.window)
+        if index != self._curr_index:
+            self._prev_index = self._curr_index
+            self._prev_count = self._curr_count if self._curr_index == index - 1 else 0
+            self._curr_index = index
+            self._curr_count = 0
+        elapsed_fraction = (t - index * self.window) / self.window
+        previous = self._prev_count if self._prev_index == index - 1 else 0
+        estimate = self._curr_count + previous * (1.0 - elapsed_fraction)
+        window_end = (index + 1) * self.window
+        if estimate < self.limit:
+            self._curr_count += 1
+            return Decision(True, max(0, int(self.limit - estimate - 1)), 0.0)
+        return Decision(False, 0, window_end - t)
+
+
+class TokenBucketLimiter:
+    """Token bucket: capacity ``burst`` tokens, refilled at ``rate`` per second.
+
+    Bursts up to ``burst`` are admitted instantly; the long-run admitted rate
+    never exceeds ``rate`` (Proposition 14.3).
+    """
+
+    def __init__(self, rate: float, burst: float, clock: Clock) -> None:
+        if rate <= 0 or burst <= 0:
+            raise ValueError("rate and burst must be positive")
+        self.rate = rate
+        self.burst = burst
+        self.clock = clock
+        self._tokens = float(burst)
+        self._last = clock.now()
+
+    def _refill(self, t: float) -> None:
+        if t < self._last:
+            raise ValueError("timestamps must be non-decreasing")
+        self._tokens = min(self.burst, self._tokens + (t - self._last) * self.rate)
+        self._last = t
+
+    def check(self, at: Optional[float] = None, cost: float = 1.0) -> Decision:
+        if cost <= 0:
+            raise ValueError("cost must be positive")
+        t = self.clock.now() if at is None else at
+        self._refill(t)
+        if self._tokens >= cost:
+            self._tokens -= cost
+            return Decision(True, int(self._tokens), 0.0)
+        deficit = cost - self._tokens
+        return Decision(False, int(self._tokens), deficit / self.rate)
+
+
+class GCRALimiter:
+    """Generic Cell Rate Algorithm (leaky bucket used as a meter).
+
+    Parameters: ``rate`` requests per second sustained, ``burst`` requests
+    tolerated instantly. Emission interval T = 1 / rate; burst tolerance
+    tau = (burst - 1) * T. State is a single timestamp: the theoretical
+    arrival time (TAT) of the next conforming request.
+    """
+
+    def __init__(self, rate: float, burst: int, clock: Clock) -> None:
+        if rate <= 0 or burst <= 0:
+            raise ValueError("rate and burst must be positive")
+        self.rate = float(rate)
+        self.emission_interval = 1.0 / rate  # T
+        self.tolerance = (burst - 1) * self.emission_interval  # tau
+        self.clock = clock
+        self._tat = float("-inf")
+
+    def check(self, at: Optional[float] = None) -> Decision:
+        t = self.clock.now() if at is None else at
+        arrival_limit = self._tat - self.tolerance
+        if t < arrival_limit:
+            return Decision(False, 0, arrival_limit - t)
+        self._tat = max(t, self._tat) + self.emission_interval
+        # Remaining burst: admits still possible right now before the
+        # not-before time t >= TAT - tau would be violated.
+        headroom = t + self.tolerance - self._tat
+        remaining = 1 + int(headroom // self.emission_interval) if headroom >= 0 else 0
+        return Decision(True, remaining, 0.0)
+\end{minted}
+
+\subsection{Listing 14.2 --- The Theorems, as Executable Tests}
+\label{subsec:ch14-listing-tests}
+
+\texttt{test\_rate\_limiters.py} is the chapter's proof sheet:
+Theorem~\ref{thm:ch14-fixed-window-2x} (20 admissions in 2~ms under a
+``10/s'' limit), Proposition~\ref{prop:ch14-swl-exact} (the sliding-log
+interval invariant), Proposition~\ref{prop:ch14-swc-error} (adversarial
+bunching produces exactly the predicted over-admission),
+Proposition~\ref{prop:ch14-tb-envelope} (the envelope never violated over
+2000 steps), and Proposition~\ref{prop:ch14-gcra-equiv} (GCRA and token
+bucket agree on a 500-event seeded adversarial stream).
+
+\noindent\textbf{Listing 14.2 --- \texttt{test\_rate\_limiters.py}:
+deterministic proofs of documented behavior.}
+\label{lst:ch14-tests}
+\begin{minted}{python}
+"""Deterministic unit tests for the five reference limiters.
+
+Every test injects a VirtualClock; nothing here reads wall time. The
+fixed-window double-burst flaw and the GCRA/token-bucket equivalence are
+proven as executable tests, mirroring the chapter's theorems.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from rate_limiters import (
+    FixedWindowLimiter,
+    GCRALimiter,
+    SlidingWindowCounterLimiter,
+    SlidingWindowLogLimiter,
+    TokenBucketLimiter,
+    VirtualClock,
+)
+
+
+def run_burst(limiter, n: int, at: float) -> int:
+    """Fire n requests at the same instant; return how many were admitted."""
+    return sum(1 for _ in range(n) if limiter.check(at=at).allowed)
+
+
+class TestFixedWindow:
+    def test_admits_up_to_limit_per_window(self) -> None:
+        clock = VirtualClock()
+        limiter = FixedWindowLimiter(limit=3, window=10.0, clock=clock)
+        assert run_burst(limiter, 3, at=1.0) == 3
+        assert not limiter.check(at=2.0).allowed
+        assert not limiter.check(at=9.9).allowed
+        # A fresh window restores the full quota.
+        assert limiter.check(at=10.0).allowed
+
+    def test_double_burst_at_boundary(self) -> None:
+        """Executable proof of Theorem 14.1: a fixed-window limiter configured
+        for N per W admits up to 2N requests inside a single real-time
+        interval of length W that straddles a boundary."""
+        clock = VirtualClock()
+        limiter = FixedWindowLimiter(limit=10, window=1.0, clock=clock)
+        admitted = 0
+        # 10 requests at the very end of window 0 ...
+        admitted += run_burst(limiter, 10, at=0.999)
+        # ... and 10 more at the very start of window 1. Both windows admit
+        # their full quota, yet all 20 requests fall inside [0.999, 1.001],
+        # a real interval of 2 ms -- far shorter than the nominal window.
+        admitted += run_burst(limiter, 10, at=1.001)
+        assert admitted == 20  # 2x the nominal limit
+        assert 1.001 - 0.999 < 1.0
+
+
+class TestSlidingWindowLog:
+    def test_exactness(self) -> None:
+        clock = VirtualClock()
+        limiter = SlidingWindowLogLimiter(limit=3, window=10.0, clock=clock)
+        # Three requests mid-window saturate it; crossing the fixed
+        # boundary at t=10 does NOT restore quota, because the window
+        # slides with the caller.
+        assert run_burst(limiter, 5, at=5.0) == 3
+        assert run_burst(limiter, 5, at=10.0) == 0
+        assert run_burst(limiter, 5, at=14.999) == 0
+        # At t=15.0 the first request has fully aged out.
+        assert limiter.check(at=15.0).allowed
+
+    def test_no_interval_exceeds_limit(self) -> None:
+        """For any request pattern, the admitted set never contains more
+        than ``limit`` events inside any half-open interval of length
+        ``window``: the (i + limit)-th admission is always strictly more
+        than ``window`` after the i-th."""
+        clock = VirtualClock()
+        limiter = SlidingWindowLogLimiter(limit=4, window=2.0, clock=clock)
+        admitted: list[float] = []
+        t = 0.0
+        for _ in range(400):
+            t += 0.05
+            if limiter.check(at=t).allowed:
+                admitted.append(t)
+        for i in range(len(admitted) - 4):
+            assert admitted[i + 4] - admitted[i] > 2.0 - 1e-9
+
+    def test_retry_after_points_at_oldest_expiry(self) -> None:
+        clock = VirtualClock()
+        limiter = SlidingWindowLogLimiter(limit=2, window=10.0, clock=clock)
+        limiter.check(at=1.0)
+        limiter.check(at=3.0)
+        decision = limiter.check(at=4.0)
+        assert not decision.allowed
+        assert decision.retry_after == pytest.approx(7.0)  # 1.0 + 10.0 - 4.0
+
+
+class TestSlidingWindowCounter:
+    def test_matches_exact_when_previous_window_empty(self) -> None:
+        clock = VirtualClock()
+        limiter = SlidingWindowCounterLimiter(limit=3, window=10.0, clock=clock)
+        assert run_burst(limiter, 5, at=15.0) == 3
+
+    def test_weights_previous_window_by_elapsed_fraction(self) -> None:
+        clock = VirtualClock()
+        limiter = SlidingWindowCounterLimiter(limit=10, window=1.0, clock=clock)
+        # Saturate window 0 entirely at its start.
+        assert run_burst(limiter, 10, at=0.01) == 10
+        # Halfway through window 1 the estimate is 0 + 10 * (1 - 0.5) = 5,
+        # so exactly 5 more requests are admitted before t = 1.5.
+        assert run_burst(limiter, 10, at=1.5) == 5
+
+    def test_error_bound_holds(self) -> None:
+        """Executable check of Proposition 14.2: the absolute error of the
+        weighted estimate is strictly less than the previous window count."""
+        clock = VirtualClock()
+        counter = SlidingWindowCounterLimiter(limit=8, window=1.0, clock=clock)
+        exact = SlidingWindowLogLimiter(limit=8, window=1.0, clock=clock)
+        # Adversarial: all of window 0's traffic bunched at its very end.
+        run_burst(counter, 8, at=0.99)
+        run_burst(exact, 8, at=0.99)
+        admitted_counter = run_burst(counter, 20, at=1.01)
+        admitted_exact = run_burst(exact, 20, at=1.01)
+        # The exact log admits 0 here (all 8 requests still inside the
+        # sliding window); the counter over-admits 1 because it assumes
+        # window-0 traffic was spread uniformly. Error 1 < previous
+        # window count 8, as the bound predicts.
+        assert admitted_exact == 0
+        assert admitted_counter == 1
+        assert abs(admitted_counter - admitted_exact) < 8
+
+
+class TestTokenBucket:
+    def test_burst_equals_capacity(self) -> None:
+        clock = VirtualClock()
+        limiter = TokenBucketLimiter(rate=10.0, burst=10, clock=clock)
+        assert run_burst(limiter, 100, at=0.0) == 10
+        # Half a second of silence refills exactly five tokens.
+        clock.advance(0.5)
+        assert run_burst(limiter, 100, at=clock.now()) == 5
+
+    def test_long_run_rate_never_exceeds_refill(self) -> None:
+        """Executable check of Proposition 14.3: over any interval [t0, t1]
+        the admitted count is at most burst + rate * (t1 - t0)."""
+        clock = VirtualClock()
+        limiter = TokenBucketLimiter(rate=10.0, burst=10, clock=clock)
+        admitted = 0
+        t = 0.0
+        for _ in range(2000):
+            t += 0.02
+            if limiter.check(at=t).allowed:
+                admitted += 1
+        assert admitted <= 10 + 10.0 * t + 1e-9
+
+    def test_retry_after_is_deficit_over_rate(self) -> None:
+        clock = VirtualClock()
+        limiter = TokenBucketLimiter(rate=4.0, burst=2, clock=clock)
+        run_burst(limiter, 2, at=0.0)
+        decision = limiter.check(at=0.0)
+        assert not decision.allowed
+        assert decision.retry_after == pytest.approx(0.25)
+
+
+class TestGCRA:
+    def test_equivalent_to_token_bucket(self) -> None:
+        """GCRA with emission interval T and tolerance tau = (B-1)T admits
+        exactly the same streams as a token bucket with capacity B and rate
+        1/T. Proven by construction in Section 14.3 (GCRA); checked here on a
+        seeded adversarial stream."""
+        import random
+
+        rng = random.Random(14)
+        gcra = GCRALimiter(rate=10.0, burst=10, clock=VirtualClock())
+        bucket = TokenBucketLimiter(rate=10.0, burst=10, clock=VirtualClock())
+        t = 0.0
+        for _ in range(500):
+            t += rng.choice([0.0, 0.005, 0.02, 0.2, 1.0])
+            assert gcra.check(at=t).allowed == bucket.check(at=t).allowed
+
+    def test_steady_stream_at_rate_always_conforms(self) -> None:
+        clock = VirtualClock()
+        limiter = GCRALimiter(rate=5.0, burst=3, clock=clock)
+        for i in range(100):
+            assert limiter.check(at=i * 0.2).allowed
+
+    def test_retry_after_is_tat_minus_tolerance_minus_now(self) -> None:
+        clock = VirtualClock()
+        limiter = GCRALimiter(rate=10.0, burst=2, clock=clock)  # T=0.1, tau=0.1
+        assert limiter.check(at=0.0).allowed   # TAT: 0.1
+        assert limiter.check(at=0.0).allowed   # TAT: 0.2
+        decision = limiter.check(at=0.0)       # arrival limit = 0.2 - 0.1
+        assert not decision.allowed
+        assert decision.retry_after == pytest.approx(0.1)
+\end{minted}
+
+Run it:
+
+\begin{minted}{text}
+pytest test_rate_limiters.py -q
+# 14 passed
+\end{minted}
+
+\subsection{Listing 14.3 --- Simulation Harness: One Timeline, Five Verdicts}
+\label{subsec:ch14-listing-sim}
+
+Claims about burst behavior should be measured, not asserted.
+\texttt{burst\_simulation.py} replays one seeded synthetic timeline --- a
+25-request synchronized-retry burst straddling the $t{=}1.0$ fixed-window
+boundary, followed by a steady 8~rps stream --- through all five limiters
+configured at the same nominal 10~requests/second, and prints the
+per-250~ms admission counts that produce Figure~\ref{fig:ch14-burst-chart}.
+
+\noindent\textbf{Listing 14.3 --- \texttt{burst\_simulation.py}: seeded
+replay harness feeding the comparison chart.}
+\label{lst:ch14-sim}
+\begin{minted}{python}
+"""Simulation harness: replay one synthetic request timeline through every
+reference limiter and print per-bucket admission counts.
+
+The timeline is fully seeded and deterministic; re-running always prints the
+same numbers. The printed coordinates are exactly the data series plotted in
+Figure 14.4 (burst behavior comparison).
+
+Scenario (Northwind Robotics telemetry ingest API, nominal plan:
+10 requests/second per API key):
+  * t in [0.90, 1.10]: a 25-request burst straddling the t=1.0 fixed-window
+    boundary (a mobile fleet retrying in sync after a connectivity blip),
+  * t in [1.50, 4.00]: a steady stream of 8 requests/second with seeded
+    jitter -- well below the nominal rate, so a correct limiter should admit
+    all of it after the burst penalty is paid.
+"""
+
+from __future__ import annotations
+
+import random
+from typing import Callable, Dict, List, Tuple
+
+from rate_limiters import (
+    FixedWindowLimiter,
+    GCRALimiter,
+    SlidingWindowCounterLimiter,
+    SlidingWindowLogLimiter,
+    TokenBucketLimiter,
+    VirtualClock,
+)
+
+NOMINAL_RATE = 10  # requests per second per API key
+WINDOW = 1.0
+BUCKET_WIDTH = 0.25  # chart resolution
+
+
+def build_timeline(seed: int = 14) -> List[float]:
+    """Deterministic synthetic request timeline (arrival times, seconds)."""
+    rng = random.Random(seed)
+    arrivals: List[float] = []
+    # Synchronized retry burst: 25 requests spread across the t=1.0 boundary.
+    for i in range(25):
+        arrivals.append(0.90 + i * 0.008 + rng.uniform(0.0, 0.002))
+    # Steady-state traffic at 8 rps with jitter, from t=1.5 to t=4.0.
+    t = 1.5
+    while t <= 4.0:
+        arrivals.append(t)
+        t += 1.0 / 8.0 + rng.uniform(-0.03, 0.03)
+    arrivals.sort()
+    return arrivals
+
+
+def simulate(arrivals: List[float],
+             make_limiter: Callable[[VirtualClock], object]) -> Dict[float, int]:
+    """Replay arrivals; return {bucket_start: admitted_count}."""
+    clock = VirtualClock()
+    limiter = make_limiter(clock)
+    buckets: Dict[float, int] = {}
+    for t in arrivals:
+        decision = limiter.check(at=t)  # type: ignore[attr-defined]
+        if decision.allowed:
+            bucket = round(int(t / BUCKET_WIDTH) * BUCKET_WIDTH, 2)
+            buckets[bucket] = buckets.get(bucket, 0) + 1
+    return buckets
+
+
+def main() -> None:
+    arrivals = build_timeline()
+    factories: List[Tuple[str, Callable[[VirtualClock], object]]] = [
+        ("fixed window", lambda c: FixedWindowLimiter(NOMINAL_RATE, WINDOW, c)),
+        ("sliding log", lambda c: SlidingWindowLogLimiter(NOMINAL_RATE, WINDOW, c)),
+        ("sliding counter", lambda c: SlidingWindowCounterLimiter(NOMINAL_RATE, WINDOW, c)),
+        ("token bucket", lambda c: TokenBucketLimiter(NOMINAL_RATE, NOMINAL_RATE, c)),
+        ("GCRA", lambda c: GCRALimiter(NOMINAL_RATE, NOMINAL_RATE, c)),
+    ]
+    print(f"timeline: {len(arrivals)} arrivals, "
+          f"t={arrivals[0]:.3f}..{arrivals[-1]:.3f}")
+    all_starts = [round(i * BUCKET_WIDTH, 2) for i in range(int(4.0 / BUCKET_WIDTH) + 1)]
+    for name, factory in factories:
+        buckets = simulate(arrivals, factory)
+        total = sum(buckets.values())
+        coords = " ".join(f"({s:.2f}, {buckets.get(s, 0)})" for s in all_starts)
+        print(f"\n{name}: admitted {total}/{len(arrivals)}")
+        print(coords)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+        width=0.9\textwidth,
+        height=7.6cm,
+        xlabel={Time (s)},
+        ylabel={Admitted requests per 250 ms bucket},
+        xmin=0.5, xmax=4.1,
+        ymin=0, ymax=21,
+        legend pos=north east,
+        legend style={font=\footnotesize},
+        grid=major,
+        grid style={gray!20},
+      ]
+      \addplot[only marks, mark=*, color=packtorange, mark size=1.6pt] coordinates {
+        (0.75, 10) (1.00, 10) (1.25, 0) (1.50, 0) (1.75, 0) (2.00, 2)
+        (2.25, 1) (2.50, 2) (2.75, 2) (3.00, 2) (3.25, 2) (3.50, 3) (3.75, 2)
+      };
+      \addlegendentry{Fixed window (36 admitted)}
+      \addplot[only marks, mark=square*, color=darkblue, mark size=1.6pt] coordinates {
+        (0.75, 10) (1.00, 0) (1.25, 0) (1.50, 0) (1.75, 1) (2.00, 2)
+        (2.25, 1) (2.50, 2) (2.75, 2) (3.00, 2) (3.25, 2) (3.50, 3) (3.75, 2)
+      };
+      \addlegendentry{Sliding log (27 admitted)}
+      \addplot[only marks, mark=triangle*, color=green!50!black, mark size=1.9pt] coordinates {
+        (0.75, 10) (1.00, 1) (1.25, 0) (1.50, 3) (1.75, 2) (2.00, 2)
+        (2.25, 1) (2.50, 2) (2.75, 2) (3.00, 2) (3.25, 2) (3.50, 3) (3.75, 2)
+      };
+      \addlegendentry{Sliding counter (32 admitted)}
+      \addplot[only marks, mark=diamond*, color=purple, mark size=1.9pt] coordinates {
+        (0.75, 10) (1.00, 1) (1.25, 0) (1.50, 3) (1.75, 2) (2.00, 2)
+        (2.25, 1) (2.50, 2) (2.75, 2) (3.00, 2) (3.25, 2) (3.50, 3) (3.75, 2)
+      };
+      \addlegendentry{Token bucket = GCRA (32 admitted)}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Burst behavior at the same nominal rate (10 requests/second per
+  key), measured by Listing~\ref{lst:ch14-sim}. The fixed window admits 20
+  requests across the $t{=}1.0$ boundary --- Theorem~\ref{thm:ch14-fixed-window-2x}
+  made visible --- while the sliding log pays the burst penalty back in
+  full before resuming. The token bucket and GCRA series coincide point for
+  point, as Proposition~\ref{prop:ch14-gcra-equiv} requires; the sliding
+  counter's weighted estimate coincidentally matches them on this timeline.}
+  \label{fig:ch14-burst-chart}
+\end{figure}
+\subsection{Listing 14.4 --- Distributed Sliding Window: Redis + Lua}
+\label{subsec:ch14-listing-redis}
+
+The distributed limiter lifts the sliding log of
+Section~\ref{subsec:ch14-sliding-log} into Redis sorted sets, with the
+entire evict--count--admit--expire sequence inside one Lua script so it is
+atomic by construction (Section~\ref{subsec:ch14-distributed}). The script
+first, because it is the load-bearing artifact:
+
+\noindent\textbf{Listing 14.4a --- \texttt{sliding\_window.lua}: atomic
+check-and-admit (evict, count, conditionally insert, expire; returns
+admission, remaining budget, and retry-after in milliseconds).}
+\label{lst:ch14-redis-lua}
+\begin{minted}{lua}
+local key     = KEYS[1]
+local now     = tonumber(ARGV[1])
+local window  = tonumber(ARGV[2])
+local limit   = tonumber(ARGV[3])
+local member  = ARGV[4]
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+local count = redis.call('ZCARD', key)
+
+if count < limit then
+  redis.call('ZADD', key, now, member)
+  redis.call('PEXPIRE', key, math.ceil(window * 1000))
+  return {1, limit - count - 1, 0}
+else
+  -- ZRANGE + ZSCORE (not WITHSCORES): the WITHSCORES return shape inside
+  -- Lua differs between Redis and emulators; two calls are portable.
+  local oldest = redis.call('ZRANGE', key, 0, 0)
+  local retry_after_ms = 0
+  if #oldest >= 1 then
+    local score = tonumber(redis.call('ZSCORE', key, oldest[1]))
+    retry_after_ms = math.ceil((score + window - now) * 1000)
+  end
+  return {0, 0, retry_after_ms}
+end
+\end{minted}
+
+Two script details earn their comments. First, Lua return values cross back
+into RESP as \emph{integers}, so sub-second \texttt{Retry-After} precision
+must travel as milliseconds and be divided down client-side. Second, the
+member must be unique per request --- \texttt{ZADD} upserts by member, so
+two requests sharing a member would silently undercount. The Python wrapper
+guarantees uniqueness with a lock-guarded sequence counter.
+
+\noindent\textbf{Listing 14.4b --- \texttt{redis\_limiter.py}: the wrapper,
+plus an offline fakeredis factory.}
+\label{lst:ch14-redis}
+\begin{minted}{python}
+"""Distributed sliding-window limiter: Redis sorted set + Lua script.
+
+State lives in Redis so any number of API replicas enforce one shared limit
+per key. The whole check-and-admit operation is a single Lua script, so it
+executes atomically on the Redis server: no read-modify-write race can split
+it, no matter how many replicas call concurrently.
+
+Offline-first: tests run against ``fakeredis.FakeRedis``, which emulates
+RESP and executes Lua scripts atomically inside the process, so the same
+code paths are exercised without a server. For a real deployment swap in
+``redis.Redis`` (redis>=5) -- the script and calling convention are
+identical.
+"""
+
+from __future__ import annotations
+
+import itertools
+import threading
+from typing import Optional, Protocol
+
+from rate_limiters import Clock, Decision, VirtualClock
+
+
+class RedisLike(Protocol):
+    """The subset of the redis-py API this limiter needs."""
+
+    def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object: ...
+
+
+# Sliding-window log as one atomic Lua script (also printed standalone as
+# Listing 14.4a; it lives inline here so this file is complete and runnable).
+SLIDING_WINDOW_LUA = """
+local key     = KEYS[1]
+local now     = tonumber(ARGV[1])
+local window  = tonumber(ARGV[2])
+local limit   = tonumber(ARGV[3])
+local member  = ARGV[4]
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+local count = redis.call('ZCARD', key)
+
+if count < limit then
+  redis.call('ZADD', key, now, member)
+  redis.call('PEXPIRE', key, math.ceil(window * 1000))
+  return {1, limit - count - 1, 0}
+else
+  -- ZRANGE + ZSCORE (not WITHSCORES): the WITHSCORES return shape inside
+  -- Lua differs between Redis and emulators; two calls are portable.
+  local oldest = redis.call('ZRANGE', key, 0, 0)
+  local retry_after_ms = 0
+  if #oldest >= 1 then
+    local score = tonumber(redis.call('ZSCORE', key, oldest[1]))
+    retry_after_ms = math.ceil((score + window - now) * 1000)
+  end
+  return {0, 0, retry_after_ms}
+end
+"""
+
+
+class RedisSlidingLogLimiter:
+    """Shared sliding-window-log limiter backed by Redis sorted sets.
+
+    Semantics match ``SlidingWindowLogLimiter`` exactly: at most ``limit``
+    admissions per key inside any interval of ``window`` seconds. One Redis
+    key per (namespace, limiter key) pair; keys self-expire after ``window``
+    so idle consumers cost no memory.
+    """
+
+    def __init__(
+        self,
+        client: RedisLike,
+        namespace: str,
+        limit: int,
+        window: float,
+        clock: Clock,
+    ) -> None:
+        if limit <= 0 or window <= 0:
+            raise ValueError("limit and window must be positive")
+        if not namespace:
+            raise ValueError("namespace must be non-empty")
+        self.client = client
+        self.namespace = namespace
+        self.limit = limit
+        self.window = float(window)
+        self.clock = clock
+        self._seq = itertools.count()
+        self._seq_lock = threading.Lock()
+
+    def _member(self, t: float) -> str:
+        # ZADD upserts by member, so every admitted request needs a unique
+        # member id; identical scores are fine.
+        with self._seq_lock:
+            return f"{t:.6f}:{next(self._seq)}"
+
+    def check(self, key: str, at: Optional[float] = None) -> Decision:
+        if not key:
+            raise ValueError("limiter key must be non-empty")
+        t = self.clock.now() if at is None else at
+        redis_key = f"{self.namespace}:{key}"
+        raw = self.client.eval(
+            SLIDING_WINDOW_LUA,
+            1,
+            redis_key,
+            repr(t),
+            repr(self.window),
+            str(self.limit),
+            self._member(t),
+        )
+        allowed, remaining, retry_after_ms = (int(v) for v in raw)
+        return Decision(bool(allowed), remaining, retry_after_ms / 1000.0)
+
+
+def build_fake_limiter(
+    limit: int = 5, window: float = 10.0, clock: Optional[Clock] = None
+) -> RedisSlidingLogLimiter:
+    """Offline factory: a limiter against an in-process fakeredis server."""
+    import fakeredis
+
+    return RedisSlidingLogLimiter(
+        client=fakeredis.FakeRedis(),
+        namespace="northwind:rl",
+        limit=limit,
+        window=window,
+        clock=clock or VirtualClock(),
+    )
+\end{minted}
+
+\noindent\textbf{Listing 14.5 --- \texttt{test\_redis\_limiter.py}:
+semantics, isolation, expiry hygiene, and a 16-thread concurrency storm.}
+\label{lst:ch14-redis-tests}
+\begin{minted}{python}
+"""Tests for the Redis+Lua distributed limiter (offline, fakeredis).
+
+Atomicity note: real Redis executes each Lua script atomically on its single
+command thread, so no interleaving of ZREMRANGEBYSCORE/ZCARD/ZADD is
+possible across clients. fakeredis emulates the same contract in-process
+(scripts run to completion under its server lock), so the concurrency test
+below exercises the true atomicity semantics without a server. What fakeredis
+does NOT emulate is wall-clock key expiry timing -- which is why the limiter
+never relies on EXPIRE for correctness, only for memory hygiene.
+"""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from rate_limiters import VirtualClock
+from redis_limiter import RedisSlidingLogLimiter, build_fake_limiter
+
+
+class TestSemantics:
+    def test_admits_limit_then_rejects(self) -> None:
+        clock = VirtualClock()
+        limiter = build_fake_limiter(limit=3, window=10.0, clock=clock)
+        results = [limiter.check("robot-7", at=1.0).allowed for _ in range(5)]
+        assert results == [True, True, True, False, False]
+
+    def test_window_slides_exactly(self) -> None:
+        clock = VirtualClock()
+        limiter = build_fake_limiter(limit=2, window=10.0, clock=clock)
+        limiter.check("robot-7", at=5.0)
+        limiter.check("robot-7", at=7.0)
+        assert not limiter.check("robot-7", at=14.999).allowed
+        assert limiter.check("robot-7", at=15.0).allowed  # 5.0 has aged out
+
+    def test_keys_are_isolated(self) -> None:
+        clock = VirtualClock()
+        limiter = build_fake_limiter(limit=1, window=10.0, clock=clock)
+        assert limiter.check("robot-7", at=0.0).allowed
+        assert limiter.check("robot-8", at=0.0).allowed
+        assert not limiter.check("robot-7", at=0.0).allowed
+
+    def test_retry_after_matches_oldest_expiry(self) -> None:
+        clock = VirtualClock()
+        limiter = build_fake_limiter(limit=2, window=10.0, clock=clock)
+        limiter.check("robot-7", at=1.25)
+        limiter.check("robot-7", at=3.00)
+        decision = limiter.check("robot-7", at=4.0)
+        assert not decision.allowed
+        # Oldest (1.25) leaves the window at 11.25; ceil to milliseconds.
+        assert decision.retry_after == pytest.approx(7.25, abs=0.001)
+
+    def test_idle_keys_expire_from_redis(self) -> None:
+        import fakeredis
+
+        clock = VirtualClock()
+        client = fakeredis.FakeRedis()
+        limiter = RedisSlidingLogLimiter(client, "northwind:rl", 5, 10.0, clock)
+        limiter.check("robot-7", at=0.0)
+        ttl_ms = client.pttl("northwind:rl:robot-7")
+        assert 9_000 < ttl_ms <= 10_000
+
+
+class TestConcurrency:
+    def test_no_over_admission_under_thread_storm(self) -> None:
+        """16 threads x 25 requests against limit 100: exactly 100 admissions,
+        never 101. A non-atomic check-then-set would intermittently fail."""
+        clock = VirtualClock()
+        limiter = build_fake_limiter(limit=100, window=60.0, clock=clock)
+        admitted = 0
+        admitted_lock = threading.Lock()
+
+        def worker() -> None:
+            nonlocal admitted
+            local = 0
+            for _ in range(25):
+                if limiter.check("fleet-shared-key", at=0.0).allowed:
+                    local += 1
+            with admitted_lock:
+                admitted += local
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert admitted == 100
+\end{minted}
+
+\subsection{Listing 14.6 --- FastAPI Middleware: Headers Are the Product}
+\label{subsec:ch14-listing-middleware}
+
+The middleware implements the full client-facing contract of
+Section~\ref{subsec:ch14-headers}: per-API-key buckets, 429 with ceiled
+delay-seconds \texttt{Retry-After}, the four IETF \texttt{RateLimit-*}
+fields on successes \emph{and} rejections, 401 for missing keys (distinct
+from 429 --- an unauthenticated caller has no bucket to exceed), and a
+fail-open/fail-closed policy switch for limiter outages. It is written as
+raw ASGI middleware rather than \texttt{BaseHTTPMiddleware} so that rejected
+requests are answered without ever instantiating the downstream
+application's request handling.
+
+\noindent\textbf{Listing 14.6 --- \texttt{middleware\_app.py}: rate-limit
+middleware with accurate headers and a tested failure policy.}
+\label{lst:ch14-middleware}
+\begin{minted}{python}
+"""FastAPI middleware wiring a rate limiter to client-facing HTTP semantics.
+
+Semantics implemented (Section 14.3, "Client-Facing Semantics"):
+  * per-API-key buckets, keyed on the ``X-API-Key`` header,
+  * 429 Too Many Requests with ``Retry-After`` (delay-seconds form) on
+    rejection,
+  * IETF RateLimit header fields on every limited response:
+    ``RateLimit-Limit``, ``RateLimit-Remaining``, ``RateLimit-Reset``,
+    ``RateLimit-Policy`` (e.g. ``5;w=60``),
+  * a fail-open / fail-closed policy switch for limiter outages.
+
+The limiter is injected behind the ``KeyedLimiter`` protocol, so the same
+middleware runs against the in-process fixed-window limiter here, or the
+Redis limiter of Listing 14.4 in a multi-replica deployment. The clock is
+injected, so tests are deterministic.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Dict, Literal, Optional, Protocol
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+
+from rate_limiters import Clock, Decision, VirtualClock
+
+FailurePolicy = Literal["fail_open", "fail_closed"]
+
+VALID_API_KEYS = {"nr-demo-key-001", "nr-demo-key-002"}  # synthetic only
+
+
+class KeyedLimiter(Protocol):
+    """Anything that can admit or reject for a key and report reset time."""
+
+    def check(self, key: str) -> Decision: ...
+
+    def reset_after(self, key: str) -> float:
+        """Seconds until the key's window fully resets (0 if idle)."""
+        ...
+
+
+class InProcessFixedWindowLimiter:
+    """Per-key fixed-window counters with an injected clock.
+
+    Correct O(1)-memory semantics for a single replica; subject to the
+    2x boundary burst of Theorem 14.1, which is acceptable when the window
+    is short and the header contract (crisp RateLimit-Reset) matters more
+    than boundary strictness. Swap in RedisSlidingLogLimiter for
+    multi-replica deployments.
+    """
+
+    def __init__(self, limit: int, window: float, clock: Clock) -> None:
+        if limit <= 0 or window <= 0:
+            raise ValueError("limit and window must be positive")
+        self.limit = limit
+        self.window = window
+        self.clock = clock
+        self._buckets: Dict[str, tuple[int, int]] = {}  # key -> (index, count)
+
+    def check(self, key: str) -> Decision:
+        t = self.clock.now()
+        index = math.floor(t / self.window)
+        bucket_index, count = self._buckets.get(key, (index, 0))
+        if bucket_index != index:
+            bucket_index, count = index, 0
+        window_end = (index + 1) * self.window
+        if count < self.limit:
+            self._buckets[key] = (bucket_index, count + 1)
+            return Decision(True, self.limit - count - 1, 0.0)
+        self._buckets[key] = (bucket_index, count)
+        return Decision(False, 0, window_end - t)
+
+    def reset_after(self, key: str) -> float:
+        t = self.clock.now()
+        index = math.floor(t / self.window)
+        bucket = self._buckets.get(key)
+        if bucket is None or bucket[0] != index or bucket[1] == 0:
+            return 0.0
+        return (index + 1) * self.window - t
+
+
+class RateLimitMiddleware:
+    """ASGI middleware enforcing a per-API-key limit with full headers."""
+
+    def __init__(
+        self,
+        app: FastAPI,
+        limiter: KeyedLimiter,
+        limit: int,
+        window: float,
+        on_limiter_error: FailurePolicy = "fail_open",
+    ) -> None:
+        if on_limiter_error not in ("fail_open", "fail_closed"):
+            raise ValueError("on_limiter_error must be 'fail_open' or 'fail_closed'")
+        self.app = app
+        self.limiter = limiter
+        self.limit = limit
+        self.window = window
+        self.on_limiter_error = on_limiter_error
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
+        api_key = request.headers.get("x-api-key")
+        if api_key not in VALID_API_KEYS:
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": "missing or invalid API key"},
+            )
+            await response(scope, receive, send)
+            return
+
+        try:
+            decision = self.limiter.check(api_key)
+        except Exception:
+            if self.on_limiter_error == "fail_open":
+                # Limiter down: serve anyway, and say nothing we cannot
+                # substantiate -- no RateLimit headers we cannot compute.
+                await self.app(scope, receive, send)
+                return
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "rate limiter unavailable; failing closed"},
+                headers={"Retry-After": "5"},
+            )
+            await response(scope, receive, send)
+            return
+
+        headers = self._ratelimit_headers(api_key, decision)
+        if not decision.allowed:
+            headers["Retry-After"] = str(max(1, math.ceil(decision.retry_after)))
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": "rate limit exceeded"},
+                headers=headers,
+            )
+            await response(scope, receive, send)
+            return
+
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                extra = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+                message["headers"] = list(message.get("headers", [])) + extra
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+    def _ratelimit_headers(self, key: str, decision: Decision) -> Dict[str, str]:
+        reset = decision.retry_after if not decision.allowed else self.limiter.reset_after(key)
+        return {
+            "RateLimit-Limit": str(self.limit),
+            "RateLimit-Remaining": str(max(0, decision.remaining)),
+            "RateLimit-Reset": str(max(0, math.ceil(reset))),
+            "RateLimit-Policy": f"{self.limit};w={int(self.window)}",
+        }
+
+
+def create_app(
+    limiter: Optional[KeyedLimiter] = None,
+    clock: Optional[Clock] = None,
+    on_limiter_error: FailurePolicy = "fail_open",
+    limit: int = 5,
+    window: float = 60.0,
+) -> FastAPI:
+    """Northwind Robotics telemetry API behind the rate-limit middleware."""
+    clock = clock or VirtualClock()
+    limiter = limiter or InProcessFixedWindowLimiter(limit, window, clock)
+    app = FastAPI(title="Northwind Robotics Telemetry API")
+    app.add_middleware(
+        RateLimitMiddleware,
+        limiter=limiter,
+        limit=limit,
+        window=window,
+        on_limiter_error=on_limiter_error,
+    )
+
+    @app.get("/telemetry")
+    def telemetry() -> dict[str, str]:
+        return {"status": "ok", "fleet": "northwind-robotics"}
+
+    return app
+
+
+if __name__ == "__main__":
+    demo_clock = VirtualClock()
+    client = TestClient(create_app(clock=demo_clock))
+    for i in range(7):
+        resp = client.get("/telemetry", headers={"X-API-Key": "nr-demo-key-001"})
+        interesting = {k: v for k, v in resp.headers.items()
+                       if k.startswith(("ratelimit", "retry"))}
+        print(f"request {i + 1}: {resp.status_code} {interesting}")
+\end{minted}
+
+\noindent\textbf{Listing 14.7 --- \texttt{test\_middleware\_app.py}: header
+accuracy across window boundaries and both failure policies.}
+\label{lst:ch14-middleware-tests}
+\begin{minted}{python}
+"""TestClient tests: header accuracy across window boundaries, 429 +
+Retry-After, and the fail-open / fail-closed policy switch. All offline,
+all deterministic (injected VirtualClock).
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from middleware_app import create_app
+from rate_limiters import Decision, VirtualClock
+
+KEY = {"X-API-Key": "nr-demo-key-001"}
+OTHER_KEY = {"X-API-Key": "nr-demo-key-002"}
+
+
+@pytest.fixture()
+def rig() -> tuple[TestClient, VirtualClock]:
+    clock = VirtualClock(start=0.0)
+    app = create_app(clock=clock, limit=5, window=60.0)
+    return TestClient(app), clock
+
+
+class TestHeaderAccuracy:
+    def test_limit_remaining_and_policy_on_success(self, rig) -> None:
+        client, _ = rig
+        for expected_remaining in (4, 3, 2, 1, 0):
+            resp = client.get("/telemetry", headers=KEY)
+            assert resp.status_code == 200
+            assert resp.headers["RateLimit-Limit"] == "5"
+            assert resp.headers["RateLimit-Remaining"] == str(expected_remaining)
+            assert resp.headers["RateLimit-Policy"] == "5;w=60"
+
+    def test_reset_counts_down_to_window_end(self, rig) -> None:
+        client, clock = rig
+        resp = client.get("/telemetry", headers=KEY)
+        assert resp.headers["RateLimit-Reset"] == "60"
+        clock.advance(25.0)
+        resp = client.get("/telemetry", headers=KEY)
+        assert resp.headers["RateLimit-Reset"] == "35"  # 60 - 25
+
+    def test_429_carries_retry_after_and_zero_remaining(self, rig) -> None:
+        client, clock = rig
+        for _ in range(5):
+            assert client.get("/telemetry", headers=KEY).status_code == 200
+        clock.advance(10.5)  # 49.5s until window end
+        resp = client.get("/telemetry", headers=KEY)
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "50"  # ceil(49.5)
+        assert resp.headers["RateLimit-Remaining"] == "0"
+        assert resp.headers["RateLimit-Reset"] == "50"
+
+    def test_headers_reset_across_window_boundary(self, rig) -> None:
+        client, clock = rig
+        for _ in range(5):
+            client.get("/telemetry", headers=KEY)
+        assert client.get("/telemetry", headers=KEY).status_code == 429
+        clock.advance(60.0)  # cross the boundary at t=60
+        resp = client.get("/telemetry", headers=KEY)
+        assert resp.status_code == 200
+        assert resp.headers["RateLimit-Remaining"] == "4"
+        assert resp.headers["RateLimit-Reset"] == "60"
+
+    def test_buckets_are_per_api_key(self, rig) -> None:
+        client, _ = rig
+        for _ in range(5):
+            client.get("/telemetry", headers=KEY)
+        assert client.get("/telemetry", headers=KEY).status_code == 429
+        resp = client.get("/telemetry", headers=OTHER_KEY)
+        assert resp.status_code == 200
+        assert resp.headers["RateLimit-Remaining"] == "4"
+
+    def test_missing_key_is_401_not_429(self, rig) -> None:
+        client, _ = rig
+        resp = client.get("/telemetry")
+        assert resp.status_code == 401
+        assert "RateLimit-Limit" not in resp.headers
+
+
+class BrokenLimiter:
+    """A limiter that is down: every check raises, like a lost Redis."""
+
+    def check(self, key: str) -> Decision:
+        raise ConnectionError("redis: connection refused")
+
+    def reset_after(self, key: str) -> float:
+        raise ConnectionError("redis: connection refused")
+
+
+class TestFailurePolicy:
+    def test_fail_open_serves_without_unverifiable_headers(self) -> None:
+        app = create_app(limiter=BrokenLimiter(), on_limiter_error="fail_open")
+        client = TestClient(app)
+        resp = client.get("/telemetry", headers=KEY)
+        assert resp.status_code == 200
+        assert "RateLimit-Remaining" not in resp.headers
+
+    def test_fail_closed_returns_503_with_retry_after(self) -> None:
+        app = create_app(limiter=BrokenLimiter(), on_limiter_error="fail_closed")
+        client = TestClient(app)
+        resp = client.get("/telemetry", headers=KEY)
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "5"
+\end{minted}
+
+\subsection{Listing 14.8 --- Cost-Based Limiting: Budgeting Work, Not Requests}
+\label{subsec:ch14-listing-cost}
+
+The cost-based limiter of Section~\ref{subsec:ch14-multidim} is a token
+bucket whose \texttt{cost} parameter is looked up per endpoint: the budget
+is denominated in normalized work units (server CPU-milliseconds, from the
+observability pipeline), so an export drains it ten times faster than a
+median read, and \texttt{/health} is free because throttling a liveness
+probe is how you get load balancers to shoot healthy servers.
+
+\noindent\textbf{Listing 14.8 --- \texttt{cost\_limiter.py}: per-endpoint
+weighted token buckets.}
+\label{lst:ch14-cost}
+\begin{minted}{python}
+"""Cost-based (weighted) rate limiting: one token bucket per API key, with
+each endpoint charging a weight proportional to its true server-side cost.
+
+A flat "requests per minute" limit treats a ``GET /health`` and a
+``POST /reports/export`` as equal, but the export scans and renders a
+million-row dataset while the health check is a no-op. Weighted buckets make
+the budget denominated in *work*, not in *requests*: expensive operations
+drain the shared budget faster, free endpoints (health probes) are never
+throttled, and cheap endpoints survive exactly as long as any budget
+remains.
+
+Northwind Robotics cost table: weights are server CPU-millisecond estimates
+from the Chapter 18 observability pipeline, normalized so the median read
+endpoint costs 1.0.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Optional
+
+from rate_limiters import Clock, Decision, TokenBucketLimiter, VirtualClock
+
+# path -> token cost per call (normalized work units)
+ENDPOINT_COSTS: Dict[str, float] = {
+    "/health": 0.0,          # liveness probe: never throttle
+    "/telemetry": 1.0,       # median read
+    "/fleet/status": 1.0,    # median read
+    "/telemetry/batch": 4.0, # bulk ingest: 4x a single write
+    "/reports/export": 10.0, # full-fleet CSV render: the expensive one
+}
+DEFAULT_COST = 1.0
+
+
+class CostBasedLimiter:
+    """Per-key token buckets charged by endpoint weight.
+
+    Budget semantics: ``rate`` work-units per second sustained, ``burst``
+    work-units of instantaneous headroom. With rate=10 and burst=20, a key
+    may run 2 exports instantly (20 / 10) or 20 median reads, or any mix
+    whose total weight fits the bucket.
+    """
+
+    def __init__(self, rate: float, burst: float, clock: Clock,
+                 costs: Optional[Dict[str, float]] = None) -> None:
+        if rate <= 0 or burst <= 0:
+            raise ValueError("rate and burst must be positive")
+        self.rate = rate
+        self.burst = burst
+        self.clock = clock
+        self.costs = dict(ENDPOINT_COSTS if costs is None else costs)
+        self._buckets: Dict[str, TokenBucketLimiter] = {}
+
+    def cost_of(self, path: str) -> float:
+        return self.costs.get(path, DEFAULT_COST)
+
+    def check(self, key: str, path: str, at: Optional[float] = None) -> Decision:
+        if not key:
+            raise ValueError("limiter key must be non-empty")
+        cost = self.cost_of(path)
+        if cost == 0.0:
+            return Decision(True, self.limit_placeholder(), 0.0)
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = TokenBucketLimiter(self.rate, self.burst, self.clock)
+            self._buckets[key] = bucket
+        return bucket.check(at=at, cost=cost)
+
+    def limit_placeholder(self) -> int:
+        # Free endpoints have no meaningful "remaining"; report the burst
+        # budget so header math stays well-formed.
+        return int(self.burst)
+
+
+if __name__ == "__main__":
+    clock = VirtualClock()
+    limiter = CostBasedLimiter(rate=10.0, burst=20.0, clock=clock)
+    key = "nr-demo-key-001"
+    for path in ("/reports/export", "/reports/export", "/reports/export",
+                 "/telemetry", "/telemetry", "/health"):
+        d = limiter.check(key, path)
+        verdict = "admitted" if d.allowed else f"rejected (retry in {d.retry_after:.1f}s)"
+        print(f"{path:<18} cost={limiter.cost_of(path):>4} -> {verdict}")
+\end{minted}
+
+\noindent\textbf{Listing 14.9 --- \texttt{test\_cost\_limiter.py}: weighted
+drainage, shared budgets, and edge cases.}
+\label{lst:ch14-cost-tests}
+\begin{minted}{python}
+"""Tests for the cost-based limiter: weighted drainage, free endpoints,
+default costs, and graceful degradation of cheap endpoints under budget
+pressure. Deterministic via VirtualClock.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from cost_limiter import CostBasedLimiter
+from rate_limiters import VirtualClock
+
+KEY = "nr-demo-key-001"
+
+
+@pytest.fixture()
+def limiter() -> CostBasedLimiter:
+    return CostBasedLimiter(rate=10.0, burst=20.0, clock=VirtualClock())
+
+
+class TestWeightedDrainage:
+    def test_export_costs_ten_reads(self, limiter: CostBasedLimiter) -> None:
+        # Two exports (2 x 10 units) exactly exhaust a 20-unit bucket.
+        assert limiter.check(KEY, "/reports/export", at=0.0).allowed
+        assert limiter.check(KEY, "/reports/export", at=0.0).allowed
+        assert not limiter.check(KEY, "/reports/export", at=0.0).allowed
+
+    def test_mixed_workload_shares_one_budget(self, limiter: CostBasedLimiter) -> None:
+        assert limiter.check(KEY, "/reports/export", at=0.0).allowed  # 10
+        for _ in range(10):
+            assert limiter.check(KEY, "/telemetry", at=0.0).allowed   # 10 x 1
+        assert not limiter.check(KEY, "/telemetry", at=0.0).allowed   # 21st unit
+
+    def test_refill_is_in_work_units(self, limiter: CostBasedLimiter) -> None:
+        limiter.check(KEY, "/reports/export", at=0.0)
+        limiter.check(KEY, "/reports/export", at=0.0)
+        # 1.0s of refill = 10 work units = exactly one more export.
+        assert limiter.check(KEY, "/reports/export", at=1.0).allowed
+        assert not limiter.check(KEY, "/reports/export", at=1.0).allowed
+
+    def test_retry_after_scales_with_cost(self, limiter: CostBasedLimiter) -> None:
+        limiter.check(KEY, "/reports/export", at=0.0)
+        limiter.check(KEY, "/reports/export", at=0.0)
+        cheap = limiter.check(KEY, "/telemetry", at=0.0)
+        dear = limiter.check(KEY, "/reports/export", at=0.0)
+        assert cheap.retry_after == pytest.approx(0.1)   # 1 unit / 10 rps
+        assert dear.retry_after == pytest.approx(1.0)    # 10 units / 10 rps
+
+
+class TestEdgeCases:
+    def test_health_endpoint_is_never_throttled(self, limiter: CostBasedLimiter) -> None:
+        for _ in range(2):
+            limiter.check(KEY, "/reports/export", at=0.0)
+        for _ in range(100):
+            assert limiter.check(KEY, "/health", at=0.0).allowed
+
+    def test_unknown_path_defaults_to_unit_cost(self, limiter: CostBasedLimiter) -> None:
+        assert limiter.cost_of("/no/such/route") == 1.0
+        for i in range(20):
+            assert limiter.check(KEY, "/no/such/route", at=0.0).allowed, i
+        assert not limiter.check(KEY, "/no/such/route", at=0.0).allowed
+
+    def test_budgets_are_per_key(self, limiter: CostBasedLimiter) -> None:
+        limiter.check(KEY, "/reports/export", at=0.0)
+        limiter.check(KEY, "/reports/export", at=0.0)
+        assert not limiter.check(KEY, "/reports/export", at=0.0).allowed
+        assert limiter.check("nr-demo-key-002", "/reports/export", at=0.0).allowed
+\end{minted}
+
+The complete suite --- 35 tests across the four test listings --- runs in
+about four seconds with no network, no containers, and no wall-clock
+dependence:
+
+\begin{minted}{text}
+pytest -q
+# 35 passed
+python burst_simulation.py   # prints the Figure 14.4 coordinates
+python middleware_app.py     # 7-request demo: headers decay, then 429
+python cost_limiter.py       # weighted drainage demo
+\end{minted}
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch14-pitfalls}
+
+\begin{enumerate}
+  \item \textbf{Fixed window at scale, believed to be strict.} The 2x
+        boundary burst (Theorem~\ref{thm:ch14-fixed-window-2x}) is
+        disqualifying when the limit protects something with a hard
+        per-second ceiling (a partner API, a connection pool). If you keep
+        the fixed window for its crisp reset headers, halve the nominal
+        limit or shorten the window, and \emph{document the envelope you
+        actually enforce}.
+  \item \textbf{Per-IP as the only dimension.} Behind corporate NATs and
+        carrier-grade NAT, one source IP can be a ten-thousand-employee
+        enterprise: a tight per-IP limit punishes your best customers
+        collectively for their network topology, while a botnet of ten
+        thousand IPs gets ten thousand times the limit. Per-IP is a coarse
+        outer net for pre-authentication traffic only; identity-based
+        limits (API key, account, session) must carry the real weight ---
+        Section~\ref{sec:ch14-case} is the cautionary tale in full.
+  \item \textbf{429 without \texttt{Retry-After}.} A rejection that does not
+        say when to come back forces clients to guess, and the industry's
+        guess is immediate retry --- your limiter just built itself a retry
+        storm. Always emit \texttt{Retry-After}; prefer delay-seconds;
+        always ceil~\cite{rfc9110}.
+  \item \textbf{Non-atomic check-then-set across replicas.}
+        \texttt{GET}-compare-\texttt{INCR} over-admits under concurrency;
+        \texttt{INCR}-then-reject lets rejected traffic poison the counter.
+        One Lua script, one authoritative cell, or accept a documented
+        approximation --- there is no fourth option
+        (Section~\ref{subsec:ch14-distributed}).
+  \item \textbf{Silent throttling.} Queueing or delaying requests without
+        any observable signal (no headers, no logs the client can see, no
+        documented policy) makes your API look randomly slow and puts the
+        debugging cost on the wrong team. If you shape, say so.
+  \item \textbf{One global limit for all endpoints.} A single
+        requests-per-minute number treats \texttt{GET /health} and
+        \texttt{POST /reports/export} as identical. Attackers and sloppy
+        integrators will find your most expensive route and spend the whole
+        budget there. Weight by cost (Listing~\ref{lst:ch14-cost}) and cap
+        concurrency on the heavy routes separately.
+  \item \textbf{Fail-closed limiter with no policy when Redis dies.}
+        Deciding the failure posture \emph{during} the outage means the
+        default decides for you --- usually fail-closed-by-exception, i.e.,
+        the limiter takes the whole API down with its state store. Pick per
+        endpoint class from Table~\ref{tab:ch14-failmatrix}, exempt health
+        checks, and test both paths (Listing~\ref{lst:ch14-middleware-tests}
+        does).
+  \item \textbf{Wall-clock-dependent tests.} \texttt{time.sleep(1.1)} in a
+        test suite is a flake factory: CI runners stall, laptops sleep, and
+        the failure mode is intermittent --- the worst kind. Inject a clock;
+        advance it explicitly. Every listing in this chapter demonstrates
+        the pattern.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch14-lab}
+
+\subsection*{Lab: From Simulation to Concurrency Storm}
+
+\textbf{Goal.} Verify, on your own machine, every load-bearing claim of this
+chapter: the algorithms' burst envelopes, header accuracy under a live
+middleware, and fairness under a thread storm.
+
+\textbf{Setup.} Save Listings 14.1--14.9 into one directory, create the
+virtual environment from Section~\ref{sec:ch14-objectives}, and install
+\texttt{fakeredis}, \texttt{fastapi}, \texttt{httpx}, \texttt{pytest}.
+
+\begin{enumerate}
+  \item \textbf{Reproduce the proofs.} \texttt{pytest test\_rate\_limiters.py -q}
+        --- confirm 14 passes, then open
+        \texttt{test\_double\_burst\_at\_boundary} and change the window to
+        \texttt{2.0}: the proof still holds (20 admissions, now inside a
+        2~ms interval of a ``5/s'' limit). Explain why $2N$ did not change.
+  \item \textbf{Run the simulation.} \texttt{python burst\_simulation.py} ---
+        compare each algorithm's per-bucket admissions to
+        Figure~\ref{fig:ch14-burst-chart}. Then change the burst to land
+        \emph{entirely inside} one fixed window (\texttt{0.50 + i * 0.008})
+        and observe the fixed window's boundary advantage disappear.
+  \item \textbf{Exercise the middleware.} \texttt{python middleware\_app.py}
+        shows seven requests: \texttt{RateLimit-Remaining} decaying
+        $4 \to 0$, then 429 with \texttt{Retry-After: 60}. Now load it: run
+        \texttt{pytest test\_middleware\_app.py -q}, then write a small
+        loop that fires two interleaved API keys through the
+        \texttt{TestClient} and assert neither key's rejections delay the
+        other's admissions --- fairness, verified.
+  \item \textbf{Storm the distributed limiter.}
+        \texttt{pytest test\_redis\_limiter.py -q} runs 16 threads
+        $\times$ 25 requests against a limit of 100 and asserts exactly 100
+        admissions. Break it deliberately: replace the Lua script with
+        separate \texttt{zcard}/\texttt{zadd} calls and re-run until you
+        catch the over-admission --- the race of
+        Section~\ref{subsec:ch14-distributed}, reproduced on demand.
+  \item \textbf{Flip the policy switch.} Run both \texttt{BrokenLimiter}
+        tests, then decide for each Northwind Robotics endpoint
+        (\texttt{/telemetry}, \texttt{/reports/export}, \texttt{/health},
+        a hypothetical \texttt{/auth/login}) which failure policy belongs on
+        it, and defend the assignment using
+        Table~\ref{tab:ch14-failmatrix}.
+\end{enumerate}
+
+\subsection{Case Study: The Login Endpoint the Per-IP Limit Could Not Save}
+\label{sec:ch14-case}
+
+Northwind Robotics' fleet console had a textbook-looking defense:
+\texttt{POST /auth/login} limited to 20 requests per minute per source IP,
+fixed window, enforced at the edge. On a Tuesday, a credential-stuffing
+campaign --- roughly 400{,}000 username/password pairs harvested from an
+unrelated breach --- walked straight through it, and the postmortem found
+\emph{three} compounding design errors rather than one.
+
+\textbf{Error one: the limit dimension was the attacker's friend.} The
+campaign rotated through a residential proxy pool of ~30{,}000 exit IPs, so
+each IP made at most 13 attempts --- under the limit everywhere, forever.
+The per-IP ceiling divided the attacker's budget by the size of their
+botnet, which is to say it barely divided it at all.
+
+\textbf{Error two: the same dimension was the customers' enemy.} Weeks
+earlier, a 6{,}000-employee logistics customer behind a corporate NAT had
+been \emph{collectively} locked out every morning at 09:00 when their
+workforce logged in through two egress IPs. Support's fix --- raise the
+per-IP limit to 2{,}000/min --- made error one cheaper to exploit. Per-IP
+limits had now failed in both directions on the same endpoint.
+
+\textbf{Error three: nothing counted the thing being attacked.} The asset
+under attack was \emph{accounts}, but no counter was keyed by account.
+There was no per-username attempt limit, no global login-endpoint budget,
+and no velocity alert; the campaign's 0.7\% success rate against 400k pairs
+was discovered by a customer reporting strange session emails, not by
+telemetry.
+
+The remediation layered the dimensions of
+Section~\ref{subsec:ch14-multidim}: a per-account sliding log (5 attempts
+per 10 minutes --- exactness chosen deliberately, $N$ tiny so $O(N)$ memory
+is free) via the Redis cell of Listing~\ref{lst:ch14-redis}; a
+\emph{global} per-endpoint token bucket on \texttt{/auth/login} as a
+circuit-level budget; the per-IP limit retained but demoted to a loose
+outer net (and fail-open, because a limiter outage must never lock out all
+logins --- fail-closed is correct for the \emph{account} limiter instead);
+exponential backoff plus progressive delay on repeated per-account
+failures; and a velocity alert on global attempt rate. The follow-up
+campaign a quarter later exhausted its per-account budgets inside ninety
+seconds and the global bucket flagged the anomaly before support heard a
+word. The lesson generalizes: \emph{choose the limiter dimension to match
+the asset under attack, and assume the attacker chooses their own
+distribution.}
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch14-exercises}
+
+\begin{enumerate}[label=\textbf{E14.\arabic*.}, leftmargin=2.2cm]
+  \item \textbf{Boundary audit.} Modify Listing~\ref{lst:ch14-tests} to
+        prove that the sliding counter, unlike the fixed window, admits
+        \emph{fewer} than $2N$ requests when a burst straddles a boundary
+        --- then exhibit a timeline where it still over-admits relative to
+        the exact log. Which proposition bounds the difference?
+  \item \textbf{Equivalence hunting.} Extend
+        \texttt{test\_equivalent\_to\_token\_bucket} with 5{,}000 seeded
+        events including multi-second idle gaps. Find (by search) a
+        parameter pair $(r, B)$ where GCRA and the token bucket
+        \emph{diverge}, or strengthen the proof sketch of
+        Proposition~\ref{prop:ch14-gcra-equiv} to explain why none exists.
+  \item \textbf{Reset semantics.} The middleware computes
+        \texttt{RateLimit-Reset} from the fixed window boundary. Specify
+        (and implement) what it should report for the \emph{sliding log}
+        limiter, where ``the window'' never resets all at once. Which
+        choice keeps the header monotonic and honest?
+  \item \textbf{Clock discipline.} A teammate replaces the injected
+        \texttt{Clock} with \texttt{time.monotonic} ``to simplify the
+        API.'' List three concrete test or production failures this
+        reintroduces, referencing specific listings.
+  \item \textbf{Race reconstruction.} Instrument the broken
+        non-atomic limiter from lab step~4 to \emph{count} over-admissions
+        across 50 seeded storms, and plot (mentally or with pgfplots) how
+        overshoot scales with thread count. Why does the Lua version's
+        atomicity eliminate the entire class rather than reduce it?
+  \item \textbf{Quota design.} Northwind Robotics adds a monthly export
+        quota (100 exports) on top of the per-second cost budget. Design
+        the storage key layout, the Lua-side interaction (one script or
+        two?), and the \texttt{GET /v1/usage} response body. What happens
+        to a client at 99/100 whose per-second bucket is also empty?
+  \item \textbf{AIMD tuning.} Given additive increase $a = 5$ rps and
+        decrease $\beta = 0.5$ evaluated once per second, with a service
+        that overloads above 300 rps, simulate (on paper or in code) the
+        limit trajectory from $L_0 = 100$ rps. How many seconds to first
+        contact with capacity, and what is the steady-state oscillation
+        amplitude? Why is $\beta < 1$ the safety-critical parameter rather
+        than $a$?
+  \item \textbf{Header archaeology.} Pick a public API you use. Capture a
+        429 (or its headers near the limit) and document which of
+        \texttt{Retry-After}, \texttt{RateLimit-Limit/-Remaining/-Reset},
+        and \texttt{RateLimit-Policy} it emits, whether \texttt{Reset} is
+        delay-seconds or epoch-seconds, and one concrete way its contract
+        is better or worse than Listing~\ref{lst:ch14-middleware}'s.
+\end{enumerate}
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch14-interview}
+
+\subsection*{Junior (Q1--Q10)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{What is rate limiting, in one paragraph?}
+        Per-identity admission control over a short window: a rule like
+        ``100 requests per minute per API key,'' enforced statefully, whose
+        purpose is to protect shared capacity, keep tenants fair, control
+        cost, and raise the price of abuse. Rejection (HTTP 429) is a
+        normal, cheap, expected outcome --- not an error in the alarming
+        sense.
+  \item \textbf{Rate limiting versus throttling versus quota --- what's the
+        difference?}
+        Rate limiting \emph{rejects} excess starts in a short window;
+        throttling \emph{shapes} flow by delaying or dequeuing admitted
+        work; a quota is a long-window (hour/day/month) budget that rations
+        total consumption, usually a business/plan construct. A client can
+        be within its monthly quota and still be rate-limited this second.
+  \item \textbf{What does HTTP 429 mean, and what header must accompany it?}
+        \emph{Too Many Requests}: this caller exceeded its allowance;
+        retryable later. It must carry \texttt{Retry-After} (delay-seconds
+        or an HTTP-date) telling the client when to return; without it,
+        clients guess, and the industry's guess is an immediate retry storm
+        \cite{rfc9110}.
+  \item \textbf{How does a fixed window counter work?}
+        Partition time at $\lfloor t/W \rfloor$, keep one counter per key
+        per window, admit while the counter is below the limit. $O(1)$
+        memory, crisp reset semantics --- and the 2x boundary burst of
+        Theorem~\ref{thm:ch14-fixed-window-2x}.
+  \item \textbf{Explain the token bucket to a new hire.}
+        A bucket holds up to $B$ tokens and refills at $r$ per second; each
+        request spends one token or is rejected. $B$ is the burst you
+        tolerate, $r$ is the rate you sustain, and the two knobs are
+        independent --- that independence is the whole point.
+  \item \textbf{Why not just store counters in each app server's memory?}
+        With $R$ replicas behind a load balancer, each replica sees roughly
+        $1/R$ of a client's traffic, so the effective limit becomes
+        $R \times$ the configured one --- and it varies with routing
+        stickiness. Shared state (a Redis cell) or a deliberately
+        partitioned local budget ($\mathrm{limit}/R$) is required.
+  \item \textbf{What is a concurrency limit and how is it different?}
+        It bounds requests \emph{in flight}, not started per unit time. By
+        Little's law, concurrency $=$ throughput $\times$ latency, so slow
+        requests consume concurrency budget even when they are well within
+        any rate limit. You need both knobs.
+  \item \textbf{What information should a 429 response carry?}
+        Status 429; \texttt{Retry-After} in delay-seconds (ceiled);
+        ideally \texttt{RateLimit-Limit}, \texttt{RateLimit-Remaining: 0},
+        \texttt{RateLimit-Reset}, and \texttt{RateLimit-Policy}; and a
+        problem-details body (Chapter~\ref{ch:problem_details}) stating
+        which limit was hit and how to get more.
+  \item \textbf{Why inject a clock into a rate limiter?}
+        Determinism. Time-advancing tests instead of \texttt{sleep}-based
+        tests are fast, exact at boundaries, and never flaky on a loaded CI
+        runner; the same injection lets you replay incident timelines
+        against production code.
+  \item \textbf{What is \texttt{RateLimit-Policy: "100;w=60"}?}
+        The IETF draft field that states the rule itself: 100 requests per
+        60-second window. Paired with \texttt{RateLimit-Remaining} on
+        successes, it lets clients self-throttle before ever being
+        rejected~\cite{ietf_ratelimit_headers}.
+\end{enumerate}
+
+\subsection*{Mid (Q11--Q20)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{Prove the fixed-window 2x burst flaw.}
+        Fire $N$ requests at $kW - \varepsilon$ (window $k-1$ admits all)
+        and $N$ more at $kW + \varepsilon$ (window $k$'s counter reset,
+        admits all): $2N$ admissions inside an interval of length
+        $2\varepsilon \le W$. Tight because any $W$-length interval touches
+        at most two windows (Theorem~\ref{thm:ch14-fixed-window-2x}).
+        Consequence: instantaneous rate is unbounded --- the $2N$ can
+        arrive within milliseconds.
+  \item \textbf{Token bucket versus leaky bucket --- what's actually
+        different?}
+        ``Leaky bucket'' is two machines. As a \emph{meter} (drain at $r$,
+        overflow rejects) it is GCRA, which is provably the token bucket in
+        different coordinates (Proposition~\ref{prop:ch14-gcra-equiv}): both
+        admit bursts up to a tolerance and sustain $r$. As a \emph{queue}
+        (FIFO drained at $r$) it is the opposite of a token bucket: bursts
+        are destroyed, output is perfectly smooth, and the cost is queueing
+        delay up to $Q/r$. The interview trap is answering before asking
+        which machine the question means.
+  \item \textbf{Derive GCRA's TAT update rule and its parameters.}
+        Let $T = 1/r$ be the emission interval and $\tau$ the burst
+        tolerance; keep $\mathrm{TAT}$, the theoretical arrival time of the
+        next conforming request. On arrival $t_a$: reject if
+        $t_a < \mathrm{TAT} - \tau$ (the request is earlier than tolerated
+        jitter allows); else admit and set
+        $\mathrm{TAT} \leftarrow \max(t_a, \mathrm{TAT}) + T$ --- each
+        admission defers the schedule by one interval, and the $\max$
+        re-anchors after idle time so credit never accrues beyond $\tau$.
+        Retry-After falls out as $\mathrm{TAT} - \tau - t_a$.
+  \item \textbf{When is the sliding window log worth its memory?}
+        When exactness is the product: authentication attempts, payment
+        authorization, license seat check-in --- anywhere ``approximately 5
+        attempts'' is not a defense. Note $N$ is tiny in exactly those
+        domains, so the $O(N)$ log is cheap precisely where you need it.
+  \item \textbf{State and bound the sliding window counter's error.}
+        Estimator $\hat{c} = c + p(1-f)$, with $p$ the previous window's
+        count and $f$ the elapsed fraction. Error
+        $|\hat{c} - c_{\mathrm{true}}| \le p\max(f, 1-f) < p \le N$, worst
+        when last window's traffic was bunched at one end --- i.e., worst
+        right after the limit mattered most
+        (Proposition~\ref{prop:ch14-swc-error}).
+  \item \textbf{Why is \texttt{INCR}-then-reject in Redis still wrong?}
+        It is atomic but semantically broken: rejected requests consume
+        increments, so an attacker (or a retrying client) inflates the
+        counter and poisons the window for everyone, including itself; the
+        count also stops meaning ``admitted requests,'' breaking your
+        headers and metrics. Check-and-admit must be conditional inside one
+        script.
+  \item \textbf{Design the Redis+Lua sliding window. What commands, and why
+        one script?}
+        \texttt{ZREMRANGEBYSCORE} to evict, \texttt{ZCARD} to count,
+        conditional \texttt{ZADD} (unique member, timestamp score),
+        \texttt{PEXPIRE} for memory hygiene, all in one Lua script because
+        Redis runs scripts atomically --- the evict-count-admit sequence
+        can never interleave with another client's
+        (Listing~\ref{lst:ch14-redis-lua}). Return remaining and a
+        millisecond retry-after so the caller can emit accurate headers.
+  \item \textbf{Your limiter's Redis dies at 2~a.m. Walk me through the
+        options.}
+        Fail-open (serve everything; abuse window until recovery; right for
+        read-heavy public APIs), fail-closed (reject everything; right for
+        login/payment; must exempt health checks or the load balancer
+        buries you), or degraded-local (per-replica $\mathrm{limit}/R$
+        fallback; bounded over-admission; the default when a local limiter
+        exists). The decision belongs in a per-endpoint-class matrix made
+        before the incident (Table~\ref{tab:ch14-failmatrix}).
+  \item \textbf{How do you choose $B$ for a token bucket?}
+        From the legitimate burst shape of your best-behaved heavy client:
+        e.g., a mobile fleet that syncs 20 records on reconnect needs
+        $B \ge 20$ even if its sustained rate is 2/s. Set $r$ from
+        capacity, $B$ from legitimate burst, and reject the temptation to
+        use $B$ to absorb \emph{illegitimate} bursts --- that is what 429
+        and shedding are for.
+  \item \textbf{Per-IP limiting: when does it help and when does it hurt?}
+        Helps pre-authentication (login, key exchange) as a coarse outer
+        net. Hurts behind NAT/CGN (one IP $=$ an enterprise: collective
+        punishment) and against distributed attacks (botnets divide the
+        limit by pool size). Never the only dimension --- see the case
+        study (Section~\ref{sec:ch14-case}).
+\end{enumerate}
+
+\subsection*{Senior (Q21--Q30)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=21]
+  \item \textbf{Prove the token bucket's envelope and explain why it is
+        tight.}
+        Tokens are conserved: admissions in $[t_0, t_1]$ remove $A$ tokens,
+        supply is the initial $\le B$ plus refill $r(t_1 - t_0)$, so
+        $A \le B + r\Delta t$; attained by arriving as tokens accumulate.
+        Tightness matters: \emph{any} limiter admitting bursts of $B$ and
+        sustaining $r$ must admit at least this envelope, so the token
+        bucket is the most permissive limiter with those two guarantees ---
+        the exact frontier of the design space.
+  \item \textbf{How would you enforce one global limit across three
+        regions with no synchronous cross-region calls?}
+        Regional cells with home-cell pinning: consistent-hash each key to
+        a region, enforce there; accept that a client active in two regions
+        gets up to $2\times$ during failover windows. If the limit is
+        billing-grade, quotas must be exact: make the quota path
+        single-home (one authoritative region per key) and accept its
+        latency, while rate protection stays regional. State the
+        consistency/latency frontier explicitly in the design doc.
+  \item \textbf{Design rate limiting for a multi-tenant SaaS.}
+        Layered: (1) per-IP coarse net pre-auth; (2) per-API-key token
+        bucket for rate, sized by plan tier; (3) per-account monthly quota
+        for billing; (4) per-endpoint cost weights so exports and batch
+        jobs drain budget proportionally; (5) per-route concurrency caps on
+        expensive endpoints; (6) global shedding by priority class when the
+        system itself is hot. State in Redis cells, one Lua script per
+        decision, consistent-hashed by tenant; noisy-neighbor isolation
+        comes from (2)+(4), plan differentiation from (3), survival from
+        (5)+(6).
+  \item \textbf{How do you rate limit GraphQL by cost?}
+        The route is constant (\texttt{POST /graphql}); the \emph{query} is
+        the cost. Parse and statically score it: sum per-field weights,
+        multiply by pagination first-arguments along list edges, penalize
+        depth (or reject depth past a ceiling outright), charge
+        introspection separately, and debit the score from a per-key token
+        bucket \emph{before} execution --- ideally re-measuring after
+        execution to calibrate weights. This is the query-cost analysis of
+        Chapter~\ref{ch:graphql} wired into this chapter's admission
+        machinery; without it, one nested query walks through a
+        requests-per-minute limit shaped for REST.
+  \item \textbf{What is AIMD and where does it fit in limiting?}
+        Additive increase, multiplicative decrease: $L \leftarrow L + a$
+        while healthy, $L \leftarrow \beta L$ ($\beta < 1$) on overload
+        signals (p99 latency, 5xx, queue depth). It adapts limits to a
+        capacity you cannot measure directly, and the asymmetry ---
+        decrease faster than you increase --- is what makes it safe. Same
+        mathematics as TCP congestion control; commonly applied to
+        concurrency limits server-side and to per-tenant ceilings during
+        brownouts.
+  \item \textbf{Your \texttt{RateLimit-Remaining} says 3 but the next
+        request is rejected. List the causes.}
+        Multi-replica skew (client hit a different cell or a local
+        limiter); concurrent requests from the same key (remaining is a
+        point-in-time read, not a reservation); cost-weighted charging (the
+        next request costs more than 1); a second, stricter dimension
+        (per-endpoint or global bucket) firing; clock skew between cells;
+        or a lying middleware --- which is why
+        Listing~\ref{lst:ch14-middleware-tests} tests headers across
+        window boundaries.
+  \item \textbf{How do you size a login endpoint's defenses?}
+        Per-account exact sliding log (tiny $N$, so exactness is free),
+        per-IP loose outer net, global endpoint token bucket as a
+        circuit-level budget, progressive delay on repeated failures, and
+        velocity alerting on the global attempt rate. Fail-closed for the
+        account limiter, fail-open for the IP net, and never let any of it
+        429 the health check. Justify each layer against the case study's
+        three errors (Section~\ref{sec:ch14-case}).
+  \item \textbf{Compare load shedding and rate limiting operationally.}
+        Limiting is per-identity, steady-state, contractual: clients are
+        told their budget and 429 means ``you specifically, slow down.''
+        Shedding is identity-agnostic, incident-state, protective: 503 +
+        \texttt{Retry-After} means ``everyone, come back later.'' Shedding
+        needs a priority order decided in advance (critical $>$ interactive
+        $>$ batch), must shed cheaply (before parsing bodies), and must
+        never conflate the two statuses or clients' backoff logic misfires.
+  \item \textbf{How do you test a rate limiter?}
+        Injected clock, never sleeps; prove the documented envelope
+        (boundary burst, long-run rate, equivalence to a reference) as
+        executable tests; replay seeded adversarial timelines; thread-storm
+        the distributed path to hunt over-admission; TestClient the header
+        contract across window boundaries; and test both failure policies
+        with a limiter double that always raises. Listings
+        \ref{lst:ch14-tests}--\ref{lst:ch14-cost-tests} are the worked
+        example.
+  \item \textbf{Envoy/gateway versus in-app limiting: where should limits
+        live?}
+        Both, for different scopes. Edge/gateway limits (Envoy local or
+        global rate-limit service) stop volumetric and pre-auth abuse
+        cheaply, before your app spends anything. In-app limits enforce
+        business semantics the gateway cannot see: per-plan quotas,
+        cost-weighted budgets, per-account attempt counts. The anti-pattern
+        is either alone: gateway-only cannot price work; app-only lets
+        junk traffic consume your accept queue, TLS, and parse budget.
+\end{enumerate}
+
+\subsection*{Staff (Q31--Q36)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=31]
+  \item \textbf{Design rate limiting for a platform at $10^5$ rps across
+        five regions, with hard per-tenant fairness and a per-request
+        limiter latency budget of 1~ms. What falls out?}
+        A synchronous global cell is dead on arrival (cross-region RTT
+        alone eats the budget), so: local in-process token buckets on the
+        hot path, budgets sharded as $\mathrm{limit}/R$ with
+        gossip/cell-sync reconciliation on a 100~ms--1~s cadence, exact
+        enforcement reserved for the narrow exactness-critical surface
+        (auth, payments) routed to home cells. Fairness becomes a
+        \emph{bounded-error} claim: over-admission $\le$ replica count
+        $\times$ sync lag in window units --- publish the bound, monitor
+        against it, and reserve exactness for where the business pays for
+        it.
+  \item \textbf{A customer's retry storm is indistinguishable from a DDoS
+        at the edge. How do you tell them apart, and how does the answer
+        change what the limiter does?}
+        Intent is invisible; \emph{shape} is not: customer storms carry
+        valid auth, stable key sets, and requests that \emph{would} succeed
+        if admitted, while attack traffic fails auth or probes randomly.
+        For the customer storm, rejection must be maximally informative
+        (accurate \texttt{Retry-After}, jitter guidance) because they will
+        obey it; for attack traffic, cheapness dominates --- reject before
+        auth, before parsing, ideally at a layer you do not pay per-request
+        for. Same 429, different economics; a limiter that cannot reject
+        junk cheaply is a cost amplifier.
+  \item \textbf{Derive the over-admission bound for $R$ local limiters with
+        sync interval $\Delta$ and window $W$, and defend or attack the
+        design.}
+        Each replica enforces $N/R$ locally; between syncs a key can be
+        admitted $N/R$ on \emph{each} replica, so worst-case admissions per
+        $W$ are $N$ plus drift: replicas observe each other's consumption
+        $\Delta$ late, adding at most $R \cdot r \cdot \Delta$ where $r$ is
+        the attack rate; with adversarial split-brain routing the bound
+        degrades to $R \times N/R = N$ \emph{per unsynced window} plus the
+        drift term. Defense: the bound is honest, tunable (shrink $\Delta$,
+        over-divide $N$), and failure-safe (a dead replica's share is
+        lost, not stolen). Attack: under targeted abuse the attacker routes
+        around awareness, so exactness-critical surfaces must not use it.
+        Both are correct; that is the point of publishing the bound.
+  \item \textbf{When should limits be contractual (documented, stable,
+        versioned) versus dynamic (adaptive, opaque)? What does each cost
+        the ecosystem?}
+        Contractual limits are an API surface: SDKs codegen backoff logic
+        against them, integrators size batch jobs against them, and
+        changing them is a breaking change in the Chapter~\ref{ch:versioning}
+        sense --- announce, deprecate, migrate. Dynamic limits adapt to
+        capacity you cannot promise, but opacity pushes integrators toward
+        defensive polling and support tickets. The mature posture: contract
+        the \emph{floor} (``you will always get at least $X$''), keep the
+        headroom dynamic, and version the policy string itself so header
+        semantics never shift under a pinned integration.
+  \item \textbf{Design the migration from a broken limiting system
+        (fixed window, per-IP only, no headers) to a correct one on a live
+        public API.}
+        Expand-and-contract (Chapter~\ref{ch:versioning}): (1) emit the new
+        headers \emph{observationally} alongside the old limiter --- log
+        what the new algorithms \emph{would} have done; (2) enforce the new
+        limiter in shadow mode, comparing admit sets to bound behavioral
+        delta; (3) tighten enforcement per tenant cohort with per-cohort
+        kill switches, starting with internal keys; (4) publish the policy
+        change with a deprecation window for clients whose traffic the new
+        envelopes will newly reject; (5) retire the per-IP-only path last,
+        after auth coverage makes it redundant. At every step, the headers
+        tell clients what is coming before enforcement arrives.
+  \item \textbf{Is rate limiting a security control, a reliability control,
+        or a billing control? Argue all three, then prioritize.}
+        Reliability: it is the cheap-rejection valve that keeps offered
+        load below the capacity knee --- the primary justification.
+        Security: it raises the cost of credential stuffing, scraping, and
+        inventory abuse, but it is a \emph{friction} control, not a
+        barrier --- authentication, authorization, and detection remain the
+        barriers (Chapter~\ref{ch:api_security}). Billing: quotas encode
+        the business model, and metering-grade exactness there is a
+        different (harder, single-home) engineering problem than
+        protection-grade approximation. Prioritize reliability ---
+        a down API has no security or revenue --- but design the dimensions
+        so security and billing ride the same machinery with their own
+        exactness budgets.
+\end{enumerate}
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch14-bibliography}
+
+\begin{itemize}
+  \item IETF HTTPAPI Working Group, \emph{RateLimit Header Fields for HTTP}
+        (Internet-Draft) --- the standardizing vocabulary for
+        \texttt{RateLimit-Limit/-Remaining/-Reset} and
+        \texttt{RateLimit-Policy}; read the draft's deployment notes for
+        the epoch-versus-delay-seconds reset
+        history~\cite{ietf_ratelimit_headers}.
+  \item RFC~9110, \emph{HTTP Semantics} --- \texttt{Retry-After} (both
+        forms), 429's relationship to the 4xx family, and 503 semantics for
+        overload~\cite{rfc9110}.
+  \item RFC~6585, \emph{Additional HTTP Status Codes} --- where 429 is
+        actually registered (uncited in text; short and worth reading in
+        full).
+  \item M.~Nygard, \emph{Release It!}, 2nd ed. --- capacity knees, the
+        stability patterns (bulkheads, circuit breakers) that rate limiting
+        complements, and why unbounded queues fail
+        slowly~\cite{nygard2018releaseit}.
+  \item M.~Kleppmann, \emph{Designing Data-Intensive Applications} --- the
+        shared-state and replication background behind
+        Section~\ref{subsec:ch14-distributed}'s atomicity and cell
+        arguments~\cite{kleppmann2017ddia}.
+  \item Cloudflare, \emph{Counting things: a lot of different things}
+        (engineering blog) --- the sliding-window-counter error analysis on
+        real traffic that Proposition~\ref{prop:ch14-swc-error} formalizes.
+  \item Stripe, \emph{Rate limiters} (engineering blog) --- production
+        token-bucket fleet design, including the load-shedder priority
+        classes that inspired Section~\ref{subsec:ch14-multidim}.
+  \item Kong, \emph{How to Design a Scalable Rate Limiting Algorithm}
+        (engineering blog) --- the gateway-level view of the same
+        algorithm zoo, including the cluster-versus-local trade-off.
+  \item NGINX, \emph{Rate Limiting with NGINX and NGINX Plus} --- the
+        \texttt{limit\_req} documentation where GCRA hides in plain sight
+        (the \texttt{rate} and \texttt{burst} parameters map to $T$ and
+        $\tau$).
+  \item Redis documentation, \emph{Rate limiter patterns} --- the canonical
+        \texttt{INCR}/\texttt{EXPIRE} and sorted-set recipes, including the
+        atomicity caveats our Lua script resolves.
+  \item ITU-T I.371 / ATM Forum TM~4.0 --- the original Generic Cell Rate
+        Algorithm specification; historically illuminating for how little
+        the problem has changed.
+  \item FastAPI documentation --- middleware and \texttt{TestClient} used
+        throughout Listings 14.6--14.7~\cite{fastapidocs}.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch14-capstones}
+
+\subsection*{Capstone 14.1 --- Prove the Algorithms \hfill [junior]}
+\textbf{Objective:} Reproduce this chapter's entire proof sheet from a
+standing start, then break it on purpose.
+
+\textbf{Inputs/Datasets:} Listings 14.1--14.2; no datasets.
+
+\textbf{Steps:} (1)~Reimplement the five limiters from their mathematical
+definitions only (close the book; keep the \texttt{Decision} contract).
+(2)~Port the 14 tests of Listing~\ref{lst:ch14-tests} to your
+implementation unmodified. (3)~Introduce one deliberate bug per algorithm
+(e.g., forget the $\max$ in GCRA's TAT update) and record which test
+catches each. (4)~Write one new test: the fixed window's 2x burst with a
+\emph{non-integer} window (e.g., $W = 1.5$).
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All 14 ported tests pass against your reimplementation.
+  \item[$\square$] Every seeded bug is caught by at least one existing
+        test; you can name the mapping.
+  \item[$\square$] The new non-integer-window burst test proves 20
+        admissions in a sub-window interval.
+\end{itemize}
+
+\textbf{Stretch Goals:} Property-test the sliding log with random seeded
+timelines, asserting Proposition~\ref{prop:ch14-swl-exact}'s invariant on
+every run.
+
+\subsection*{Capstone 14.2 --- Header-Complete Middleware \hfill [mid]}
+\textbf{Objective:} Extend Listing~\ref{lst:ch14-middleware} into middleware
+you would publish as a platform library.
+
+\textbf{Inputs/Datasets:} Listings 14.1, 14.6, 14.7; the Northwind Robotics
+endpoint set (\texttt{/telemetry}, \texttt{/fleet/status},
+\texttt{/reports/export}, \texttt{/health}).
+
+\textbf{Steps:} (1)~Swap the in-process limiter for the Redis limiter of
+Listing~\ref{lst:ch14-redis} behind the \texttt{KeyedLimiter} protocol
+(add a \texttt{reset\_after} implementation). (2)~Emit an RFC~9457-style
+problem body (Chapter~\ref{ch:problem_details}) on 429, including the
+policy and a documentation link. (3)~Add an \texttt{X-NR-Limiter-Degraded:
+true} signal for fail-open episodes (headers omitted, signal present).
+(4)~Test: headers across a window boundary, problem body shape, degraded
+signal, and 401 versus 429 separation.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All Listing~\ref{lst:ch14-middleware-tests} tests pass
+        unmodified against the Redis-backed wiring.
+  \item[$\square$] 429 bodies validate against a declared problem-details
+        schema.
+  \item[$\square$] Fail-open episodes emit the degraded signal and no
+        \texttt{RateLimit-*} fields; fail-closed returns 503 +
+        \texttt{Retry-After}.
+  \item[$\square$] Full suite is deterministic and offline.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add per-plan policies (\texttt{"100;w=60"} vs.\
+\texttt{"1000;w=60"}) selected by API key tier.
+
+\subsection*{Capstone 14.3 --- Cell Architecture Simulator \hfill [mid]}
+\textbf{Objective:} Quantify, rather than assert, the over-admission of
+cell-based limiting.
+
+\textbf{Inputs/Datasets:} Listing~\ref{lst:ch14-sim}'s harness pattern; a
+seeded multi-client timeline generator you write (10 keys, Poisson-ish
+arrivals, one adversarial key).
+
+\textbf{Steps:} (1)~Implement three enforcement topologies over the same
+timeline: one global limiter (exact), $R=4$ local limiters at
+$\mathrm{limit}/R$ with no sync, and $R=4$ local limiters with a sync every
+$\Delta$ seconds (reconciliation subtracts observed remote consumption).
+(2)~Sweep $\Delta \in \{0.1, 0.5, 1.0, 5.0\}$ s and record worst-case
+per-window admissions for the adversarial key. (3)~Produce a pgfplots-ready
+table of over-admission versus $\Delta$. (4)~Verify the
+Q33-style bound: admissions $\le N + R \cdot r \cdot \Delta$.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Global topology never exceeds the limit; no-sync
+        topology's overshoot matches $R \times$ prediction.
+  \item[$\square$] Sync topology's measured overshoot respects the
+        published bound at every $\Delta$.
+  \item[$\square$] All results reproducible from one seed.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a cell-failure event mid-timeline and show the
+consistent-hash remap confines counter loss to $1/C$ of keys.
+
+\subsection*{Capstone 14.4 --- Adaptive Limits with AIMD \hfill [senior]}
+\textbf{Objective:} Build and tune an AIMD-adaptive per-tenant limiter that
+tracks a moving capacity.
+
+\textbf{Inputs/Datasets:} Listing~\ref{lst:ch14-limiters}; a synthetic
+``capacity signal'' generator you author: service capacity oscillates
+between 150 and 450 rps on a seeded schedule, and overload is reported when
+admitted rate exceeds current capacity.
+
+\textbf{Steps:} (1)~Implement the controller: per-second evaluation,
+$L \leftarrow L + a$ when healthy, $L \leftarrow \beta L$ on overload,
+floored at a contractual minimum. (2)~Sweep $(a, \beta)$ over a small grid;
+for each pair record time-to-first-contact, steady-state oscillation
+amplitude, and total rejected load. (3)~Identify the knee: the fastest
+$a$ whose $\beta$-paired oscillation never exceeds capacity by more than
+10\%. (4)~Write the tuning memo: why multiplicative decrease is the safety
+parameter and additive increase merely the efficiency parameter.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Controller never lets admitted rate exceed capacity by
+        $>10\%$ for more than one evaluation interval, for the tuned
+        $(a, \beta)$.
+  \item[$\square$] Floor is never violated even under sustained overload.
+  \item[$\square$] Grid results and the knee are reproducible from the
+        seed; memo quantifies the asymmetry argument.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add per-tenant fairness: divide recovered headroom
+proportional to recent demand rather than equally.
+
+\subsection*{Capstone 14.5 --- Rate-Limiting Architecture for Northwind at
+100k rps \hfill [staff]}
+\textbf{Objective:} Produce the complete design document for rate limiting,
+quotas, and shedding across Northwind Robotics' public API surface at
+$10^5$ rps in five regions.
+
+\textbf{Inputs/Datasets:} This chapter; a synthetic endpoint inventory you
+author (40 endpoints across read/write/export/admin classes with measured
+cost weights); a synthetic tenant registry (3 tiers, 2{,}000 tenants, one
+known-abusive actor).
+
+\textbf{Steps:} (1)~Classify every endpoint into a protection tier
+(exactness-required, approximate-fair, shedding-only) and defend each
+classification. (2)~Choose the topology per tier (global cell / regional /
+local-plus-sync) with latency budgets; justify the 1~ms hot-path budget's
+consequences. (3)~Specify the header contract, quota endpoints, and the
+policy-versioning story. (4)~Write the failure runbook: limiter-cell
+outage, abusive-tenant drill, capacity-brownout (AIMD kick-in), including
+the fail-open/fail-closed assignment per tier. (5)~Model cost: Redis cell
+sizing from key cardinality and $N$, and the egress cost of rejecting
+cheaply versus serving slowly. (6)~Red-team your own design with the
+Section~\ref{sec:ch14-case} playbook.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Every endpoint has a tier, a topology, a failure policy,
+        and a numeric limit with a derivation (not a round number from
+        nowhere).
+  \item[$\square$] Over-admission bounds are stated and monitored per
+        approximate tier.
+  \item[$\square$] Runbook covers the three named incidents with detection
+        signals and rollback steps.
+  \item[$\square$] Cost model shows limiter infrastructure $< 2\%$ of
+        serving cost at $10^5$ rps, or explains why not.
+  \item[$\square$] Red-team section names at least two residual weaknesses
+        honestly.
+\end{itemize}
+
+\textbf{Stretch Goals:} Specify the GraphQL cost-scoring integration
+(Chapter~\ref{ch:graphql}) and the gRPC interceptor analogue
+(Chapter~\ref{ch:grpc}) so all three protocol surfaces share one budget.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch14-deps}
+
+All code runs offline after a one-time install. From PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\noindent\textbf{requirements.txt:}
+\begin{minted}{text}
+fakeredis>=2.23
+fastapi>=0.110
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+For real deployments (never needed by this chapter's listings): add
+\texttt{redis>=5} and swap \texttt{fakeredis.FakeRedis()} for
+\texttt{redis.Redis(...)} --- the Lua script, calling convention, and
+\texttt{Decision} contract are identical.
+
+\subsection{fakeredis ($\geq$ 2.23)}
+\textbf{Description:} In-process emulation of the Redis server, including
+Lua script execution. \textbf{Why included:} lets the distributed limiter
+(Listings 14.4--14.5) and its thread-storm atomicity test run with zero
+infrastructure --- the same code paths, the same script, no server, no
+containers. \textbf{Alternatives:} a real Redis in Docker (faithful,
+including wall-clock expiry timing, at the price of infrastructure);
+\texttt{testcontainers}-based fixtures (CI-friendly, still heavyweight);
+mocking \texttt{eval} at the client boundary (fast but verifies nothing
+about the script). \textbf{Installation:}
+\texttt{pip install "fakeredis>=2.23"} (Lua support requires the bundled
+\texttt{lupa} dependency; the pinned distribution includes it).
+
+\subsection{fastapi ($\geq$ 0.110)}
+\textbf{Description:} The ASGI web framework hosting the middleware
+demonstrations. \textbf{Why included:} routing, dependency injection, and
+the \texttt{TestClient} that makes Listing~\ref{lst:ch14-middleware}'s
+header assertions runnable offline~\cite{fastapidocs}.
+\textbf{Alternatives:} Starlette directly (FastAPI's base; the middleware
+is raw ASGI and would work unchanged); Flask (WSGI --- the ASGI middleware
+pattern would need reworking); a gateway doing the limiting instead (Envoy
+local rate limit, Kong) for the edge layer. \textbf{Installation:}
+\texttt{pip install "fastapi>=0.110"}.
+
+\subsection{httpx ($\geq$ 0.27)}
+\textbf{Description:} Sync/async HTTP client. \textbf{Why included:} it is
+the transport under FastAPI's \texttt{TestClient}; required for the
+middleware tests to execute without a server. \textbf{Alternatives:}
+\texttt{requests} (synchronous, not ASGI-native); running a live
+\texttt{uvicorn} and a real socket (faithful but no longer offline-pure).
+\textbf{Installation:} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest ($\geq$ 8)}
+\textbf{Description:} Test framework. \textbf{Why included:} runs all 35
+chapter tests, including the executable proofs and the concurrency storm.
+\textbf{Alternatives:} \texttt{unittest} (stdlib; works, but fixtures and
+\texttt{approx} would need hand-rolling); \texttt{nose2} (unmaintained
+momentum). \textbf{Installation:} \texttt{pip install "pytest>=8"}.
+
+\subsection*{Ecosystem alternatives worth knowing}
+For application-level limiting beyond this chapter's teaching
+implementations: \texttt{limits} (mature strategy library: fixed/sliding
+algorithms over Redis/Memcached/in-memory backends), \texttt{slowapi}
+(FastAPI/Starlette integration built on \texttt{limits}),
+\texttt{django-ratelimit} (Django decorator), and Envoy's
+\emph{local rate limit} filter / global rate-limit service for the edge
+tier. Evaluate them against Section~\ref{sec:ch14-mechanics}: which
+algorithm, which atomicity story, which failure policy, which headers.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch14-summary}
+
+\begin{itemize}
+  \item Five tools, five questions: rate limiting (how fast may this caller
+        start), throttling (shape the flow), quotas (how much in total),
+        concurrency limits (how many in flight), load shedding (which work
+        do we drop). Deploying one and claiming the others is the canonical
+        maturity failure.
+  \item The fixed window's 2x boundary burst is a theorem with a tight
+        bound, not folklore (Theorem~\ref{thm:ch14-fixed-window-2x}); if
+        the limit protects something with a hard per-second ceiling, the
+        fixed window does not enforce it.
+  \item The sliding log is exact at $O(N)$ memory; the sliding counter
+        buys $O(1)$ at error $<$ previous-window count
+        (Proposition~\ref{prop:ch14-swc-error}), worst exactly after
+        saturation; the token bucket owns the tightest burst-plus-rate
+        envelope $A \le B + r\Delta t$
+        (Proposition~\ref{prop:ch14-tb-envelope}); GCRA is the token bucket
+        in one timestamp (Proposition~\ref{prop:ch14-gcra-equiv}).
+  \item Distribution moves the problem from algorithms to state: atomic
+        check-and-admit via one Lua script in one cell; consistent hashing
+        to bound remap on cell loss; local-plus-sync trades exactness for
+        latency with a publishable over-admission bound.
+  \item The failure policy is a business decision made in advance, per
+        endpoint class: fail-open, fail-closed, or degraded-local
+        (Table~\ref{tab:ch14-failmatrix}); a fail-closed limiter without a
+        health-check exemption is a self-inflicted outage.
+  \item Headers are the contract: 429 + \texttt{Retry-After}
+        (delay-seconds, ceiled), \texttt{RateLimit-Limit/-Remaining/-Reset/-Policy}
+        on successes too, 503 for shedding, quota endpoints for budgets.
+        Omit what you cannot compute truthfully; never fake it
+        \cite{ietf_ratelimit_headers,rfc9110}.
+  \item Multi-dimensional is the default at maturity: per-key for fairness,
+        per-IP as a coarse pre-auth net (never the only net ---
+        Section~\ref{sec:ch14-case}), per-endpoint and cost-weighted for
+        expensive routes, AIMD for adapting to unmeasurable capacity,
+        priority-aware shedding for survival.
+  \item Test limiters with injected clocks, seeded timelines, thread
+        storms, and a limiter double that always raises --- then both
+        failure paths are tested before the 3~a.m.\ page tests them for you.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch14-quickref}
+
+\subsection*{Algorithm Matrix (one line each)}
+Fixed window --- $O(1)$, crisp reset, $2N$ boundary burst $\bullet$
+sliding log --- exact, $O(N)$ memory, Retry-After = oldest expiry $\bullet$
+sliding counter --- $O(1)$, error $< p$, smooths boundaries $\bullet$
+token bucket --- burst $B$, sustained $r$, envelope $B + r\Delta t$
+$\bullet$ GCRA --- one timestamp, reject iff $t_a < \mathrm{TAT} - \tau$,
+$\mathrm{TAT} \leftarrow \max(t_a, \mathrm{TAT}) + T$, $B = 1 + \tau/T$.
+
+\subsection*{Header Reference}
+429 \emph{Too Many Requests} --- caller over budget; always with
+\texttt{Retry-After: <delay-seconds>} (ceiled; HTTP-date is legal, worse)
+$\bullet$ \texttt{RateLimit-Limit} --- window quota $\bullet$
+\texttt{RateLimit-Remaining} --- budget left after this response $\bullet$
+\texttt{RateLimit-Reset} --- delay-seconds to full reset $\bullet$
+\texttt{RateLimit-Policy} --- the rule, e.g.\ \texttt{"100;w=60"} $\bullet$
+503 + \texttt{Retry-After} --- system shedding, not the caller's fault
+$\bullet$ 401/403 --- no key, no bucket: never 429 an anonymous caller.
+
+\subsection*{Decision Tree (compressed)}
+Shared limit across replicas? $\to$ Redis cell, one Lua script; hash keys
+to cells $\bullet$ Exactness required? $\to$ sliding log $\bullet$ Bursts
+legitimate? $\to$ token bucket / GCRA, $B$ from client burst shape $\bullet$
+Huge smooth keyspace? $\to$ sliding counter $\bullet$ Crisp headers, rough
+protection? $\to$ fixed window, short $W$ $\bullet$ Limiter down? $\to$
+per-class policy: fail-open (reads), fail-closed (auth/payment),
+degraded-local (default) $\bullet$ Expensive route? $\to$ cost weight +
+concurrency cap + consider 202-async.
+
+\input{chapters/_standard_addendum}

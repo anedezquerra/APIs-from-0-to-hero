@@ -1,0 +1,4 @@
+pyyaml>=6.0
+jsonschema>=4.21
+pydantic>=2.7
+pytest>=8

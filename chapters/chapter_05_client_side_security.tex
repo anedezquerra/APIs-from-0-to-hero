@@ -1,0 +1,2705 @@
+%% ============================================================================
+%% Chapter 5: Client-Side Security -- API Keys, OAuth 2.0/OIDC & JWT
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Client-Side Security: API Keys, OAuth 2.0/OIDC \& JWT for Consumers}
+\label{ch:client_security}
+
+%% ----------------------------------------------------------------------------
+%% 1. Executive Summary
+%% ----------------------------------------------------------------------------
+Every credential your client application holds is a loaded weapon pointed at
+your own production environment. An API key pasted into a CI log, a bearer
+token cached one second past its expiry, a JWT verifier that trusts the
+attacker-controlled \texttt{alg} header --- each of these is a small,
+invisible defect that converts an ordinary consumer application into a breach
+vector. Chapters~1 and~2 taught you how to put requests on the wire; this
+chapter teaches you how to prove \emph{who is calling} without ever leaking
+the proof. We treat client-side security as an engineering discipline with
+specifications, failure modes, and testable invariants --- not as a set of
+cargo-culted snippets copied from a vendor quickstart.
+
+We begin with the credential taxonomy every consumer must distinguish:
+long-lived \textbf{API keys} (with real entropy requirements and the
+header-versus-query placement debate, settled by log-forensics reality),
+\textbf{HTTP Basic} (Base64 is an encoding, never an encryption),
+\textbf{Bearer tokens} per RFC~6750, and \textbf{HMAC-signed requests},
+studied through a complete anatomy of AWS Signature Version~4 --- canonical
+URI, canonical query string, canonical headers, string-to-sign, and the
+four-stage signing-key derivation chain. We then decode \textbf{OAuth~2.0}
+per RFC~6749~\cite{rfc6749}: the four roles, the authorization-code grant in
+full sequence detail, the PKCE extension per RFC~7636~\cite{rfc7636} with its
+43--128 character verifier and the S256 transform arithmetic, the
+client-credentials and device-code grants, refresh-token rotation with reuse
+detection, and a post-mortem of why the implicit grant is deprecated. The
+\textbf{OpenID Connect} layer follows: ID token versus access token,
+discovery documents, JWKS key rotation via \texttt{kid}, nonces, and the
+userinfo endpoint. We then dissect \textbf{JWT} per
+RFC~7519~\cite{rfc7519}: compact serialization, base64url, the seven
+registered claims, the non-negotiable validation order (signature first,
+claims second), the \texttt{alg=none} and RS256$\rightarrow$HS256 confusion
+attacks, \texttt{kid} injection, clock-skew leeway, why JWS is not
+encryption, and the revocation problem that haunts stateless tokens. The
+final mechanics section covers what most texts ignore: \textbf{where secrets
+live on the client} --- environment variables, OS keychains, secret managers
+--- with rotation runbooks and log-redaction discipline.
+
+Every claim in this chapter is backed by runnable, offline, stdlib-only
+Python~3.11 code: a SigV4-style signer with a verifying stub server that
+proves tamper detection, a complete PKCE flow against a local in-memory
+identity provider, a hardened JWT verifier that survives a six-token
+adversarial gauntlet, a single-flight proactive token cache with
+redaction-safe logging, and a clearly labeled educational demonstration of
+the RS256$\rightarrow$HS256 confusion attack succeeding against a naive
+verifier and dying against a hardened one.
+
+\begin{keyconceptbox}
+A credential is a \emph{liability with an expiry date}, not an asset. The
+client-side security problem decomposes into four questions you must answer
+for every credential your application touches: \textbf{entropy} (can it be
+guessed?), \textbf{placement} (where does it travel, and what records it?),
+\textbf{validation} (who checks it, in what order, against which
+allow-lists?), and \textbf{lifecycle} (how is it stored, rotated, revoked,
+and scrubbed from logs?). If any answer is ``we do not know,'' you have a
+vulnerability with a known CVE-shaped future.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch5-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Classify client credentials --- API keys, HTTP Basic, bearer tokens,
+        HMAC signatures --- by entropy, placement, replay resistance, and
+        revocation story, and defend a placement choice using the
+        log-leakage argument against query-string credentials.
+  \item Reconstruct the AWS SigV4 signing chain by hand: canonical URI and
+        query rules, canonical header normalization, string-to-sign
+        assembly, and the four-stage key derivation
+        $k_{\text{signing}} = \operatorname{HMAC}(\operatorname{HMAC}(\operatorname{HMAC}(\operatorname{HMAC}(\text{``NWR4''}+k, d), r), s), \text{``request''})$.
+  \item Explain the four OAuth~2.0 roles and implement the authorization-code
+        grant with PKCE --- generating a 43--128 character
+        \texttt{code\_verifier}, deriving
+        $\texttt{code\_challenge} = \operatorname{BASE64URL}(\operatorname{SHA256}(v))$,
+        and exchanging codes offline against a stub authorization
+        server~\cite{rfc6749,rfc7636}.
+  \item Select the correct grant (authorization code + PKCE, client
+        credentials, device code) for a given client topology, and argue
+        precisely why the implicit grant is deprecated and why
+        \texttt{client\_secret} can never protect a public client.
+  \item Implement refresh discipline: proactive refresh inside a skew window,
+        single-flight refresh under concurrency, refresh-token rotation, and
+        reuse detection with token-family revocation.
+  \item Distinguish the OIDC ID token from the OAuth access token, consume a
+        discovery document and JWKS endpoint, and follow key rotation through
+        \texttt{kid} headers without downtime.
+  \item Validate a JWT in the only safe order --- structural parse,
+        algorithm allow-list, signature verification, then temporal and
+        audience claims with bounded leeway --- and explain how
+        \texttt{alg=none}, RS256$\rightarrow$HS256 confusion, and
+        \texttt{kid} injection each defeat naive
+        verifiers~\cite{rfc7519,owaspapisecurity}.
+  \item Choose a client-side secret storage mechanism (environment variable,
+        OS keychain, secret manager) using a threat-model matrix, write a
+        rotation runbook, and install log redaction so credentials can never
+        reach an aggregator.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed:
+
+\begin{itemize}
+  \item \textbf{Chapter 0} --- Python 3.11+ environment, virtual environments,
+        and running scripts from PowerShell.
+  \item \textbf{Chapter 1} --- the HTTP wire protocol: methods, status codes,
+        header fields, and message bodies. We reuse \texttt{Authorization},
+        \texttt{Location}, and redirect semantics constantly.
+  \item \textbf{Chapter 2} --- consuming APIs from Python: \texttt{urllib}
+        and structured error handling, which every listing here extends.
+\end{itemize}
+
+You should be comfortable reading cryptographic \emph{constructions} (no
+proofs) and with the idea that a hash is one-way while an encoding is not.
+Everything runs offline against loopback stub servers; all keys are
+synthetic fixtures in the fictional \emph{Northwind Robotics} universe.
+
+\begin{warningbox}
+The attack demonstrations in this chapter (Sections
+\ref{sec:ch5-code}--\ref{sec:ch5-lab}) exist so you can recognize and kill
+these bug classes in code review. Run them only against the local stubs
+provided. Pointing adversarial tokens at systems you do not own is neither
+education nor research; it is unauthorized access.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch5-mechanics}
+
+\subsection{The Credential Taxonomy}
+\label{sec:ch5-taxonomy}
+
+\begin{definition}[Credential]
+A \emph{credential} is a byte string whose presentation to a verifier
+establishes an authentication claim. Credentials differ along five axes:
+\textbf{entropy} (bits of guessing resistance), \textbf{bearer vs.\
+proof-of-possession} (does mere possession suffice?), \textbf{lifetime}
+(seconds to years), \textbf{revocability} (can the issuer kill it before
+expiry?), and \textbf{placement} (which protocol field carries it, and what
+infrastructure records that field?).
+\end{definition}
+
+\subsubsection{API Keys: Entropy and Placement}
+
+An API key is a shared secret, typically issued out-of-band from a developer
+portal, that identifies a \emph{project} or \emph{application} --- rarely an
+end user. Two engineering questions dominate: how much entropy, and where
+does it ride on the wire?
+
+\textbf{Entropy.} A key that humans type is not a key; it is a password with
+delusions. Machine credentials must carry at least 128 bits of
+cryptographically generated entropy, conventionally rendered as 32 hex
+characters or roughly 22--26 base64url characters. The relevant quantity is
+the min-entropy of the generation process, not the length of the string:
+\texttt{aaaaaaaa-\ldots} is 36 characters and zero security. Generate with
+\texttt{secrets.token\_urlsafe(32)} (256 bits), never with
+\texttt{random}, timestamps, or UUIDv4s alone (122 bits, and only if the
+UUID generator is a CSPRNG).
+
+\textbf{Placement: header vs.\ query.} RFC~6750 permits bearer tokens in the
+\texttt{Authorization} header, a form body field, or the query
+parameter \texttt{access\_token}. Only the first is acceptable in
+production, and the reason is not ideological --- it is forensic:
+
+\begin{itemize}
+  \item \textbf{Query strings are logged everywhere.} Web server access
+        logs (nginx, Apache, IIS), load balancers, CDNs, APM agents, and
+        browser history all record the full request-target, query included,
+        by default. Headers are \emph{not} logged by default.
+  \item \textbf{Query strings leak via \texttt{Referer}.} If the response
+        page links anywhere, the full URL --- key included --- can flow to
+        third parties.
+  \item \textbf{Query strings survive in analytics and caches.} A cache key
+        computed from the full URL stores the credential; a CDN edge log
+        ships it to a third party's bucket.
+\end{itemize}
+
+The OWASP API Security Top~10 lists exactly this failure mode under broken
+authentication~\cite{owaspapisecurity}. The one-sentence rule: \emph{a
+credential in a URL is a credential in a log file you do not control.}
+
+\subsubsection{HTTP Basic: Base64 Is Not Encryption}
+
+HTTP Basic (RFC~7617) sends \texttt{Authorization: Basic
+base64(username ":" password)}. Base64 is a \emph{transfer encoding}: it is
+injective, keyless, and trivially reversible by every proxy, log shipper,
+and junior analyst on earth. Basic over plaintext HTTP is a password
+broadcast; Basic over TLS is a password on every request, giving the server
+an ongoing obligation to protect a reusable long-lived secret and giving
+every intermediary a readable credential inside the TLS termination
+boundary. It survives today for internal tooling and machine-to-machine
+calls behind mTLS --- contexts where its simplicity outweighs its exposure.
+For public APIs it should be considered a legacy smell.
+
+\subsubsection{Bearer Tokens}
+
+A bearer token is a credential where \emph{possession is proof}: whoever
+presents the string is trusted, exactly like cash. OAuth~2.0 access tokens
+are bearer tokens carried as \texttt{Authorization: Bearer <token>}. The
+design consequences follow immediately: TLS is non-negotiable (anyone who
+sees the token owns the token); tokens must be short-lived to bound the
+theft window; and the client must treat the token string as radioactive ---
+never logged, never in URLs, never in browser storage accessible to
+third-party scripts without an explicit, documented threat analysis.
+
+\subsubsection{HMAC-Signed Requests: Proof Without Disclosure}
+
+HMAC request signing breaks the bearer assumption: the credential (a shared
+secret) never crosses the wire at all. Instead the client computes
+$\operatorname{HMAC}_k(\textit{canonical request})$ and sends the
+\emph{signature}; the server, holding the same $k$, recomputes and compares.
+A replayed signature is useless against a modified body, and the secret
+itself is never exposed to logs, proxies, or referers. This is the design
+behind AWS Signature Version~4, whose anatomy we now walk precisely, because
+the same construction appears in Azure, GCP, and countless webhook schemes
+(GitHub, Stripe, Slack).
+
+\subsection{Anatomy of a SigV4-Style Signature}
+\label{sec:ch5-sigv4}
+
+SigV4's core insight is that signing ``an HTTP request'' is meaningless until
+the request is \emph{canonicalized} --- reduced to exactly one byte string
+per logical request. Two requests that differ only in header casing, header
+order, or query-parameter order must produce the same canonical form, or
+verification becomes a coin flip. The construction proceeds in four stages.
+
+\textbf{Stage 1: the canonical request.} Concatenate, newline-separated:
+
+\begin{enumerate}
+  \item \textbf{HTTP method}, uppercased: \texttt{POST}.
+  \item \textbf{Canonical URI}: the absolute path with each segment
+        URI-encoded per RFC~3986 (unreserved characters
+        \texttt{A--Za--z0--9-.\_\textasciitilde{}} pass through; everything
+        else becomes \texttt{\%XX} uppercase hex; slashes are preserved as
+        delimiters).
+  \item \textbf{Canonical query string}: parameters sorted first by encoded
+        name, then by encoded value, joined as \texttt{name=value} pairs
+        with \texttt{\&} --- each name and value individually URI-encoded.
+  \item \textbf{Canonical headers}: header names lowercased, values trimmed
+        with internal runs of whitespace collapsed to one space, sorted by
+        name, rendered as \texttt{name:value\textbackslash{}n}. At minimum
+        \texttt{host} and the date/payload headers must be signed.
+  \item \textbf{Signed headers}: the semicolon-joined, sorted list of the
+        header names included above --- this binds the signature to a
+        specific header set and prevents an intermediary from injecting an
+        unsigned header the application might honor.
+  \item \textbf{Hashed payload}: $\operatorname{SHA256}(\textit{body})$ in
+        lowercase hex. The body is hashed, not copied, so the canonical
+        request stays bounded in size.
+\end{enumerate}
+
+\textbf{Stage 2: the string-to-sign.} A second newline-separated document:
+the algorithm identifier (\texttt{NWR4-HMAC-SHA256} in our teaching
+dialect; AWS uses \texttt{AWS4-HMAC-SHA256}), the request timestamp in
+\texttt{yyyyMMdd'T'HHmmss'Z'} form, the \emph{credential scope}
+$\textit{date}/\textit{region}/\textit{service}/\texttt{nwr4\_request}$,
+and the hex SHA-256 of the canonical request from Stage~1.
+
+\textbf{Stage 3: the signing-key derivation chain.} Rather than using the
+long-term secret directly, SigV4 derives a scoped, short-lived key through
+a four-stage HMAC cascade:
+
+\begin{align*}
+k_{\text{date}} &= \operatorname{HMAC}(\text{``NWR4''} + k_{\text{secret}},\; d)\\
+k_{\text{region}} &= \operatorname{HMAC}(k_{\text{date}},\; r)\\
+k_{\text{service}} &= \operatorname{HMAC}(k_{\text{region}},\; s)\\
+k_{\text{signing}} &= \operatorname{HMAC}(k_{\text{service}},\; \text{``nwr4\_request''})
+\end{align*}
+
+Each stage is domain-separated: a key derived for the \texttt{parts} service
+in \texttt{test-region-1} on 2026-03-01 is cryptographically unrelated to
+any other scope, so a signature extracted from one context cannot be
+transplanted into another.
+
+\textbf{Stage 4: the signature and the \texttt{Authorization} header.}
+$\textit{sig} = \operatorname{hex}(\operatorname{HMAC}(k_{\text{signing}}, \textit{string-to-sign}))$,
+delivered as a structured header naming the credential scope, the signed
+header list, and the signature. The server repeats Stages 1--4 with its copy
+of the secret and compares with a constant-time equality check
+(\texttt{hmac.compare\_digest} --- never \texttt{==}, whose early-exit leaks
+byte-position information through timing).
+
+Listing~\ref{lst:hmac} implements the whole chain and a verifying stub
+server; run it and observe that flipping one JSON field in the body flips
+the response from 200 to 403, because the payload hash embedded in the
+canonical request no longer matches.
+
+\begin{examplebox}
+Why does the signed-headers list exist? Imagine a proxy adds
+\texttt{X-Debug: true} in transit and the application, finding the header,
+skips an authorization check. If \texttt{x-debug} was not in
+\texttt{SignedHeaders}, the signature still verifies --- the signer never
+saw it --- yet the application behaves as if the client requested debug
+mode. Binding the header \emph{set} into the signature makes such injection
+detectable: any added signed-name breaks verification, and a disciplined
+verifier ignores unsigned hop-by-hop additions by policy.
+\end{examplebox}
+
+\subsection{OAuth 2.0 Decoded (RFC 6749)}
+\label{sec:ch5-oauth}
+
+OAuth~2.0 is a delegation framework, not an authentication protocol: it lets
+a \emph{client} obtain limited access to a \emph{resource owner's} data held
+by a \emph{resource server}, with consent mediated by an
+\emph{authorization server}~\cite{rfc6749}. Memorize the four roles as
+actors with distinct trust boundaries:
+
+\begin{itemize}
+  \item \textbf{Resource owner} --- the human (or organization) whose data
+        is at stake; grants consent.
+  \item \textbf{Client} --- your application; wants access. \emph{Public}
+        clients (SPAs, mobile apps, CLIs) cannot keep a secret;
+        \emph{confidential} clients (server-side daemons) can.
+  \item \textbf{Authorization server (AS)} --- authenticates the owner,
+        captures consent, mints tokens.
+  \item \textbf{Resource server (RS)} --- the API; validates access tokens
+        and enforces scopes.
+\end{itemize}
+
+\begin{definition}[Grant type]
+A \emph{grant type} is the choreography by which a client obtains an access
+token. Choosing a grant is choosing a threat model: each grant exists
+because some client topology makes the others unsafe or impossible.
+\end{definition}
+
+\subsubsection{Authorization Code Grant}
+
+The workhorse for any client with a redirect-capable front channel. The
+client sends the user's browser to the AS \texttt{/authorize} endpoint with
+\texttt{response\_type=code}, \texttt{client\_id},
+\texttt{redirect\_uri}, \texttt{scope}, and a one-time \texttt{state}
+(CSRF defense). The AS authenticates the owner, records consent, and
+302-redirects back with a short-lived, single-use \texttt{code}. The client
+then exchanges the code at the back-channel \texttt{/token} endpoint ---
+authenticated with its \texttt{client\_secret} if confidential --- for an
+access token (and usually a refresh token). The design's elegance is the
+channel split: the browser (front channel, logged, bookmarked, referer-leaky)
+carries only the opaque code; the actual token travels server-to-server.
+
+\subsubsection{PKCE (RFC 7636): Proof Key for Code Exchange}
+
+The code grant has a hole for public clients: anyone who intercepts the code
+(malicious app registering the same custom URI scheme on a phone, referer
+leakage, log scraping) can exchange it, because the public client has no
+secret to prove the exchange request comes from the same party that started
+the flow. PKCE closes the hole with a per-flow ephemeral
+secret~\cite{rfc7636}:
+
+\begin{enumerate}
+  \item The client generates a high-entropy \texttt{code\_verifier}: a
+        random string of \textbf{43--128 characters} drawn from the
+        unreserved URI set \texttt{[A--Za--z0--9-.\_\textasciitilde{}]}.
+        (The 43-character floor corresponds to 256 bits of entropy in
+        base64url: $43 \times 6 \approx 258$.)
+  \item The client derives the challenge via the S256 transform:
+        \[
+          \texttt{code\_challenge} = \operatorname{BASE64URL\text{-}ENCODE}\!\left(\operatorname{SHA256}\!\left(\operatorname{ASCII}(\texttt{code\_verifier})\right)\right)
+        \]
+        and sends it, with \texttt{code\_challenge\_method=S256}, on the
+        authorize request. (The legacy \texttt{plain} method sends the
+        verifier itself and defeats the purpose; reject servers that offer
+        only \texttt{plain}.)
+  \item The AS stores the challenge beside the code. At token exchange, the
+        client presents the \emph{verifier}; the AS recomputes S256 and
+        compares. An interceptor who stole the code but never saw the
+        verifier (it never travels until the back-channel exchange) cannot
+        redeem it.
+\end{enumerate}
+
+Figure~\ref{fig:ch5-pkce-sequence} shows the full sequence, and
+Listing~\ref{lst:pkce} implements both endpoints plus the client.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  actor/.style={rectangle, draw=packtgray, thick, fill=blue!5, minimum width=2.6cm, minimum height=0.9cm},
+  msg/.style={->, thick},
+  lbl/.style={above, midway, font=\footnotesize, align=center},
+]
+  \node[actor] (user) {Resource Owner};
+  \node[actor, right=3.2cm of user] (client) {Client (CLI)};
+  \node[actor, right=3.2cm of client] (as) {Authorization Server};
+  \node[actor, right=3.2cm of as] (rs) {Resource Server};
+
+  \draw[dashed, packtgray] (user.south) -- ++(0,-8.6);
+  \draw[dashed, packtgray] (client.south) -- ++(0,-8.6);
+  \draw[dashed, packtgray] (as.south) -- ++(0,-8.6);
+  \draw[dashed, packtgray] (rs.south) -- ++(0,-8.6);
+
+  \draw[msg] ([yshift=-0.7cm]client.south) -- ([yshift=-0.7cm]as.south)
+      node[lbl]{1. GET /authorize?code\_challenge, state};
+  \draw[msg] ([yshift=-1.5cm]as.south) -- ([yshift=-1.5cm]user.south)
+      node[lbl]{2. authenticate + consent};
+  \draw[msg] ([yshift=-2.3cm]as.south) -- ([yshift=-2.3cm]client.south)
+      node[lbl]{3. 302 redirect: code, state};
+  \draw[msg] ([yshift=-3.1cm]client.south) -- ([yshift=-3.1cm]as.south)
+      node[lbl]{4. POST /token: code + code\_verifier};
+  \node[note, anchor=west] at ([xshift=0.15cm, yshift=-3.75cm]as.south)
+      {AS recomputes S256(verifier) = challenge?};
+  \draw[msg] ([yshift=-4.5cm]as.south) -- ([yshift=-4.5cm]client.south)
+      node[lbl]{5. access token + refresh token};
+  \draw[msg] ([yshift=-5.5cm]client.south) -- ([yshift=-5.5cm]rs.south)
+      node[lbl]{6. GET /parts (Authorization: Bearer at)};
+  \draw[msg] ([yshift=-6.3cm]rs.south) -- ([yshift=-6.3cm]client.south)
+      node[lbl]{7. 200 + representation};
+  \draw[msg] ([yshift=-7.3cm]client.south) -- ([yshift=-7.3cm]as.south)
+      node[lbl]{8. POST /token: refresh\_token (rotation)};
+  \draw[msg] ([yshift=-8.1cm]as.south) -- ([yshift=-8.1cm]client.south)
+      node[lbl]{9. new tokens; old refresh token retired};
+\end{tikzpicture}
+\caption{Authorization code grant with PKCE. The verifier never leaves the
+back channel; the browser-visible front channel carries only the challenge
+and the opaque code.}
+\label{fig:ch5-pkce-sequence}
+\end{figure}
+
+\subsubsection{Client Credentials Grant}
+
+For machine-to-machine calls with no resource owner at all: the confidential
+client POSTs \texttt{grant\_type=client\_credentials} with its
+\texttt{client\_id}/\texttt{client\_secret} directly to \texttt{/token} and
+receives an access token scoped to itself. There is no refresh token ---
+the client simply re-authenticates. If you find a \texttt{client\_secret}
+in shipped browser or mobile code, the architecture has already failed: a
+secret distributed to every device is a public value wearing a trench coat.
+
+\subsubsection{Device Code Grant (RFC 8628)}
+
+For input-constrained devices (CLIs on headless boxes, TVs, IoT): the device
+POSTs to a \texttt{/device\_authorization} endpoint and receives a
+\texttt{device\_code}, a short human-typable \texttt{user\_code}, a
+\texttt{verification\_uri}, and a polling \texttt{interval}. The human
+visits the URI on a real browser, enters the code, and consents; meanwhile
+the device polls \texttt{/token} with the \texttt{device\_code}, honoring
+\texttt{authorization\_pending} and \texttt{slow\_down} responses until
+consent lands. The security property: the credential-conferring channel
+(the human's browser) is disjoint from the constrained device, and polling
+rate limits blunt guessing of user codes.
+
+\subsubsection{Implicit Grant: A Post-Mortem}
+
+The implicit grant (\texttt{response\_type=token}) delivered access tokens
+directly through the browser redirect URI fragment. It is deprecated --- the
+OAuth Security Best Current Practice and the OAuth~2.1 draft both remove it
+--- because it put bearer tokens into URLs (logs, history, referers),
+offered no client authentication, no refresh path, and no way to bind the
+token to the client that requested it. PKCE made its only legitimate use
+case (browser apps) obsolete. If you encounter it in the wild, treat the
+migration to authorization code + PKCE as a security remediation, not a
+refactor.
+
+\subsubsection{Refresh Discipline: Rotation, Reuse Detection, Clock Skew}
+
+Long-lived refresh tokens are the crown jewels of the client. Three
+disciplines make them survivable:
+
+\begin{enumerate}
+  \item \textbf{Proactive refresh.} Never ride a token to its death: refresh
+        when $\textit{now} \ge \textit{exp} - \textit{skew}$ with
+        $\textit{skew} \ge$ the p99 request latency plus clock error
+        (60~s is a sane default). A token that expires mid-flight yields the
+        dreaded ``200 on send, 401 on retry'' flapping.
+  \item \textbf{Single-flight refresh.} Under concurrency, ten threads
+        seeing an expired token must produce \emph{one} refresh call, not
+        ten --- ten parallel refreshes against a rotating AS looks exactly
+        like token replay and can trip reuse detection, revoking your own
+        session. Listing~\ref{lst:tokencache} implements the
+        double-checked-locking pattern.
+  \item \textbf{Rotation with reuse detection.} The AS issues a new refresh
+        token on every use and retires the old one. If a retired token is
+        ever presented again, one of two copies (yours, an attacker's) is
+        stolen --- so the AS revokes the entire token \emph{family}, forcing
+        re-authentication. Clients must therefore persist rotated tokens
+        atomically: crash between ``received new token'' and ``wrote it to
+        disk'' and you have bricked your own session.
+\end{enumerate}
+
+Figure~\ref{fig:ch5-token-lifecycle} summarizes the access-token lifecycle
+as a state machine.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  state/.style={circle, draw=packtgray, thick, fill=blue!5, minimum size=1.7cm, align=center},
+  terminal/.style={circle, draw=packtgray, thick, fill=yellow!20, minimum size=1.7cm, align=center},
+  edge/.style={->, thick},
+  lbl/.style={font=\footnotesize, midway, align=center},
+]
+  \node[terminal] (none) {No\\token};
+  \node[state, right=3.0cm of none] (valid) {Valid};
+  \node[state, right=3.0cm of valid] (stale) {In skew\\window};
+  \node[terminal, right=3.0cm of stale] (expired) {Expired};
+
+  \draw[edge] (none) -- node[lbl, above]{grant /\\exchange} (valid);
+  \draw[edge] (valid) -- node[lbl, above]{$t \ge \textit{exp} - \textit{skew}$} (stale);
+  \draw[edge] (stale) -- node[lbl, above]{$t \ge \textit{exp}$} (expired);
+  \draw[edge] (stale) to[bend left=35] node[lbl, above]{proactive refresh\\(single-flight)} (valid);
+  \draw[edge] (expired) to[bend right=35] node[lbl, below]{refresh token\\still valid} (valid);
+  \draw[edge] (expired) to[bend left=30] node[lbl, below]{refresh rejected /\\reuse detected} (none);
+\end{tikzpicture}
+\caption{Access-token lifecycle state machine. The skew window converts the
+expiry cliff into a managed transition; reuse detection on the refresh path
+can drop the client back to \emph{No token} at any time.}
+\label{fig:ch5-token-lifecycle}
+\end{figure}
+
+\subsection{OpenID Connect: The Identity Layer}
+\label{sec:ch5-oidc}
+
+OAuth~2.0 delegates \emph{access}; it deliberately says nothing about
+\emph{who} the user is. OpenID Connect (OIDC) layers identity on top:
+
+\begin{itemize}
+  \item \textbf{ID token vs.\ access token.} The ID token is a JWT whose
+        audience (\texttt{aud}) is \emph{your client} --- it is proof of
+        authentication \emph{for you to consume locally}. The access token
+        is for the resource server; your client should treat it as opaque
+        and never parse it. The canonical client bug --- sending the ID
+        token to an API --- fails the API's audience check when the API is
+        implemented correctly, and creates a confused deputy when it is not.
+  \item \textbf{Discovery.} OIDC providers publish
+        \texttt{/.well-known/openid-configuration}: issuer, authorization
+        and token endpoints, JWKS URI, supported algorithms and scopes.
+        Hard-coding endpoint URLs is a fragility; discover them.
+  \item \textbf{JWKS and \texttt{kid}.} The AS publishes its public signing
+        keys as a JSON Web Key Set. Tokens carry a \texttt{kid} (key ID)
+        header; verifiers select the matching key. During rotation, the AS
+        signs new tokens with the new key while the JWKS advertises both ---
+        clients that cache JWKS must re-fetch on unknown \texttt{kid}
+        (with a rate limit, or a flood of forged \texttt{kid} values becomes
+        a self-inflicted DoS).
+  \item \textbf{Nonce.} For front-channel ID token delivery, the client
+        embeds a random \texttt{nonce} in the authorize request and requires
+        the same value inside the ID token, binding the token to this
+        authentication round trip and defeating token replay.
+  \item \textbf{Userinfo.} A protected endpoint that returns claims about
+        the authenticated user, checked with the access token --- the OIDC
+        answer to ``who is this session?''
+\end{itemize}
+
+\subsection{JWT Internals (RFC 7519)}
+\label{sec:ch5-jwt}
+
+A JSON Web Token in compact serialization is three base64url segments joined
+by dots: \texttt{header.payload.signature}~\cite{rfc7519}. The header is a
+JSON object naming the algorithm (\texttt{alg}), type (\texttt{typ=JWT}),
+and key id (\texttt{kid}); the payload carries \emph{claims}; the signature
+covers the first two segments exactly as transmitted. Base64url is Base64
+with \texttt{+}/\texttt{/} replaced by \texttt{-}/\texttt{\_} and padding
+omitted --- an \emph{encoding}, so the payload of every JWT you have ever
+issued is readable by anyone holding the token. Never put secrets, PII
+beyond need, or authorization policy you would not publish into a payload.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small]
+  \node[rectangle, draw=packtgray, thick, fill=red!12, minimum width=3.4cm, minimum height=1.5cm, align=center]
+      (h) at (0,0) {\texttt{eyJhbGciOi\ldots}\\ \footnotesize header (alg, typ, kid)};
+  \node[rectangle, draw=packtgray, thick, fill=blue!8, minimum width=4.6cm, minimum height=1.5cm, align=center]
+      (p) at (4.35,0) {\texttt{eyJzdWIiOi\ldots}\\ \footnotesize payload (iss, sub, aud, exp\ldots)};
+  \node[rectangle, draw=packtgray, thick, fill=green!10, minimum width=3.4cm, minimum height=1.5cm, align=center]
+      (s) at (8.7,0) {\texttt{SflKxwRJ\ldots}\\ \footnotesize signature};
+  \node[note] at (2.0,-0.95) {\texttt{.}};
+  \node[note] at (6.55,-0.95) {\texttt{.}};
+  \draw[decorate, decoration={brace, amplitude=6pt}, thick]
+      (-1.75, 1.0) -- (10.45, 1.0)
+      node[midway, above=7pt, font=\footnotesize]
+      {signature input = ASCII(\texttt{b64url(header) "." b64url(payload)})};
+  \draw[decorate, decoration={brace, amplitude=6pt, mirror}, thick]
+      (2.0,-1.15) -- (6.7,-1.15)
+      node[midway, below=7pt, font=\footnotesize]
+      {base64url-decodable by anyone: NOT encrypted (that is JWE, RFC 7516)};
+\end{tikzpicture}
+\caption{JWT compact anatomy. Only the green segment requires the key; the
+red and blue segments are plaintext to every holder of the token.}
+\label{fig:ch5-jwt-anatomy}
+\end{figure}
+
+\subsubsection{Registered Claims}
+
+RFC~7519 registers seven claim names~\cite{rfc7519}. Three are temporal,
+four are identity/routing:
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Claim} & \textbf{Type} & \textbf{Validation rule for consumers} \\
+\midrule
+\texttt{iss} & string & Exact match against the configured issuer. \\
+\texttt{sub} & string & Principal identifier; log it, never trust it before signature verification. \\
+\texttt{aud} & string/list & Must contain \emph{your} audience; reject ``any-audience'' tokens. \\
+\texttt{exp} & NumericDate & Required; reject when $\textit{now} > \textit{exp} + \textit{leeway}$. \\
+\texttt{nbf} & NumericDate & Reject when $\textit{now} + \textit{leeway} < \textit{nbf}$. \\
+\texttt{iat} & NumericDate & Reject future \texttt{iat} beyond leeway (clock-attack signal). \\
+\texttt{jti} & string & Unique token id; the hook for replay caches and revocation lists. \\
+\bottomrule
+\end{tabularx}
+\caption{Registered JWT claims and the consumer-side validation rule for each.}
+\label{tab:ch5-claims}
+\end{table}
+
+\subsubsection{The Validation Order Is the Security Boundary}
+
+A verifier that inspects claims before verifying the signature is reading
+attacker-controlled JSON. The only safe order is:
+
+\begin{enumerate}
+  \item \textbf{Structural parse}: exactly three segments; base64url
+        decodable; header and payload are JSON objects.
+  \item \textbf{Algorithm allow-list}: \texttt{alg} must be in a
+        \emph{configured} set (often a single entry), \texttt{none} must
+        always be rejected, and the algorithm must be consistent with the
+        key type you configured (no HMAC with RSA public keys).
+  \item \textbf{Key selection}: by \texttt{kid} from a \emph{trusted} key
+        set (JWKS you fetched), never by a URL or path inside the token.
+  \item \textbf{Signature verification} with constant-time comparison.
+  \item \textbf{Claim validation}: \texttt{exp}, \texttt{nbf},
+        \texttt{iat} with a bounded leeway (30--60~s; you are compensating
+        for clock skew, not writing tokens a second life), then
+        \texttt{iss} and \texttt{aud}.
+\end{enumerate}
+
+\subsubsection{The Attack Zoo}
+
+\begin{itemize}
+  \item \textbf{\texttt{alg=none}.} Early libraries accepted
+        \texttt{\{"alg":"none"\}} with an empty signature. Every modern
+        library rejects it --- but only if you do not hand-roll verification
+        or pass attacker-influenced algorithm choices.
+  \item \textbf{RS256$\rightarrow$HS256 confusion.} If the verifier expects
+        RS256 but picks its verification method from the token header, an
+        attacker signs with HMAC-SHA256 using the \emph{public key} (which
+        is public --- JWKS publishes it) as the HMAC secret. The naive
+        verifier computes HMAC with its configured key bytes and the forgery
+        verifies. The fix is architectural: bind algorithm to key
+        configuration, never to the token. Listing~\ref{lst:algconfusion}
+        demonstrates both the kill and the cure.
+  \item \textbf{\texttt{kid} injection.} If \texttt{kid} is used to build a
+        file path or SQL query
+        (\texttt{SELECT key FROM keys WHERE id='\$kid'}), the attacker
+        injects \texttt{../../etc/passwd} or \texttt{' OR '1'='1}. Treat
+        \texttt{kid} as an opaque lookup key into an in-memory map you
+        populated from JWKS --- nothing else.
+  \item \textbf{Clock-skew abuse.} Leeway exists for distributed clock
+        error, but an unbounded leeway resurrects expired tokens. Cap it,
+        apply it symmetrically to \texttt{exp}/\texttt{nbf}/\texttt{iat},
+        and alert on skew beyond the cap.
+\end{itemize}
+
+\subsubsection{JWS Is Not Encryption, and Revocation Is the Price of Statelessness}
+
+A signed JWT (JWS, RFC~7515) guarantees integrity and origin --- not
+confidentiality. If claims must be hidden, that is JWE (RFC~7516), a
+different and rarer beast. More important operationally: a valid JWT is
+valid until \texttt{exp} no matter what happens to the user --- password
+reset, termination, role change. Stateless verification bought you
+horizontal scale and paid for it with a revocation gap. Mitigations, in
+order of practicality: short access-token lifetimes (5--15 min) plus refresh
+rotation; a \texttt{jti} blocklist checked on the highest-value endpoints;
+token exchange/downscoping at the edge. Any design that says ``we will just
+revoke the JWT'' without one of these mechanisms has not finished designing.
+
+\subsection{Secret Storage for Consumers}
+\label{sec:ch5-storage}
+
+Where the client keeps credentials between runs is a threat-model decision:
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{Mechanism} & \textbf{Strengths} & \textbf{Failure modes} \\
+\midrule
+Environment variables & Twelve-factor native~\cite{twelvefactor}; trivially
+injectable in CI; no code coupling & Readable via \texttt{/proc}, crash dumps,
+\texttt{docker inspect}; inherited by child processes \\
+OS keychain (keyring) & Encrypted at rest by the OS; per-user ACL; survives
+reboots & Desktop-only; headless CI needs a fallback; API differs per OS \\
+Secret manager (cloud vault) & Central audit, rotation, fine-grained ACL,
+dynamic secrets & Network dependency; bootstrap-credential problem; cost \\
+Files on disk & Simplest possible & World-readable by default; committed to
+git by accident; visible in backups \\
+\bottomrule
+\end{tabularx}
+\caption{Credential storage matrix for client applications.}
+\label{tab:ch5-storage}
+\end{table}
+
+Whatever the store, three disciplines apply. \textbf{Least privilege}: scope
+every credential to the minimum permission set --- a read-only key for a
+read-only job --- so a leak's blast radius is pre-bounded. \textbf{Rotation
+runbooks}: every credential class needs a written, rehearsed procedure ---
+issue new, deploy, verify, revoke old --- with the rotation deadline tied to
+the credential's lifetime, and break-glass steps for a leak (revoke first,
+investigate second; Section~\ref{sec:ch5-lab} walks an incident).
+\textbf{Never log credentials}: install a redaction filter on the root
+logger (Listing~\ref{lst:tokencache}), scrub \texttt{Authorization} headers
+in HTTP client middleware, and treat ``a credential appeared in a log'' as a
+compromise requiring rotation, because log aggregation is exfiltration with
+extra steps.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch5-code}
+
+All five listings share the chapter's golden rules: Python~3.11+ standard
+library only, fully offline (loopback stubs, ephemeral ports), deterministic
+(seeded PRNGs, injected clocks, fixed timestamps), typed, and defensive
+(specific exceptions, input validation, redaction-aware logging). Every key
+is a synthetic Northwind Robotics fixture. Save each listing as its own file
+and run with \texttt{python listing\_5\_N\_*.py} from PowerShell.
+
+\subsection{Listing 5.1 --- SigV4-Style HMAC Signer with Verifying Stub Server}
+\label{lst:hmac}
+
+This is the canonicalization pipeline of Section~\ref{sec:ch5-sigv4}
+rendered in code, plus a stub \texttt{http.server} that re-derives the
+signature and proves tamper detection: the happy path returns 200, while a
+tampered body and a wrong secret each return 403.
+
+\begin{minted}{python}
+"""Listing 5.1 -- SigV4-style HMAC request signer with a verifying stub server.
+
+Educational re-implementation of the AWS Signature Version 4 construction
+(canonical request -> string-to-sign -> key derivation chain -> signature)
+using only the Python 3.11+ standard library. Runs fully offline: the
+verifying server is a stdlib ``http.server`` bound to the loopback
+interface.
+
+All keys in this file are SYNTHETIC TEST FIXTURES for the fictional
+Northwind Robotics universe. Never use them anywhere else.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# --- Synthetic test fixtures (NOT real credentials) -------------------------
+ACCESS_KEY_ID = "NWRTESTACCESSKEY0001"
+SECRET_ACCESS_KEY = "nwr-test-secret-key-0123456789abcdef0123456789abcdef"
+REGION = "test-region-1"
+SERVICE = "parts"
+ALGORITHM = "NWR4-HMAC-SHA256"
+FIXED_AMZ_DATE = "20260301T120000Z"  # fixed for deterministic output
+FIXED_DATE_STAMP = "20260301"
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hmac_sha256(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _uri_encode(value: str, safe: str = "~") -> str:
+    """RFC 3986 URI encoding; unreserved characters are left as-is."""
+    unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._"
+    keep = unreserved + safe
+    out: list[str] = []
+    for ch in value:
+        if ch in keep:
+            out.append(ch)
+        else:
+            out.extend(f"%{b:02X}" for b in ch.encode("utf-8"))
+    return "".join(out)
+
+
+def canonical_uri(path: str) -> str:
+    """Normalize the path: each segment is URI-encoded, slashes preserved."""
+    if not path.startswith("/"):
+        raise ValueError("path must be absolute")
+    return "/".join(_uri_encode(seg) for seg in path.split("/"))
+
+
+def canonical_query(query: dict[str, str]) -> str:
+    """Sort parameters by (name, value); both are URI-encoded."""
+    pairs = sorted((_uri_encode(k), _uri_encode(v)) for k, v in query.items())
+    return "&".join(f"{k}={v}" for k, v in pairs)
+
+
+def canonical_headers(headers: dict[str, str]) -> tuple[str, str]:
+    """Lowercase names, trim/collapse whitespace, sort; return (block, list)."""
+    normalized = {
+        name.strip().lower(): " ".join(value.strip().split())
+        for name, value in headers.items()
+    }
+    ordered = sorted(normalized.items())
+    block = "".join(f"{name}:{value}\n" for name, value in ordered)
+    signed = ";".join(name for name, _ in ordered)
+    return block, signed
+
+
+def build_canonical_request(
+    method: str,
+    path: str,
+    query: dict[str, str],
+    headers: dict[str, str],
+    payload: bytes,
+) -> tuple[str, str]:
+    """Return (canonical_request, signed_headers)."""
+    header_block, signed_headers = canonical_headers(headers)
+    canonical = "\n".join(
+        [
+            method.upper(),
+            canonical_uri(path),
+            canonical_query(query),
+            header_block,
+            signed_headers,
+            _sha256_hex(payload),
+        ]
+    )
+    return canonical, signed_headers
+
+
+def derive_signing_key(secret: str, date_stamp: str, region: str, service: str) -> bytes:
+    """SigV4-style derivation chain: date -> region -> service -> request."""
+    k_date = _hmac_sha256(("NWR4" + secret).encode("utf-8"), date_stamp)
+    k_region = _hmac_sha256(k_date, region)
+    k_service = _hmac_sha256(k_region, service)
+    return _hmac_sha256(k_service, "nwr4_request")
+
+
+def sign_request(
+    method: str,
+    path: str,
+    query: dict[str, str],
+    payload: bytes,
+    host: str,
+    access_key: str,
+    secret_key: str,
+    amz_date: str = FIXED_AMZ_DATE,
+    date_stamp: str = FIXED_DATE_STAMP,
+) -> dict[str, str]:
+    """Produce the signed header set for an outgoing request."""
+    scope = f"{date_stamp}/{REGION}/{SERVICE}/nwr4_request"
+    headers = {
+        "host": host,
+        "x-nwr-date": amz_date,
+        "x-nwr-content-sha256": _sha256_hex(payload),
+    }
+    canonical, signed_headers = build_canonical_request(method, path, query, headers, payload)
+    string_to_sign = "\n".join([ALGORITHM, amz_date, scope, _sha256_hex(canonical.encode("utf-8"))])
+    signature = _hmac_sha256(
+        derive_signing_key(secret_key, date_stamp, REGION, SERVICE), string_to_sign
+    ).hex()
+    headers["Authorization"] = (
+        f"{ALGORITHM} Credential={access_key}/{scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    return headers
+
+
+class VerifyingHandler(BaseHTTPRequestHandler):
+    """Stub parts API that recomputes the signature and rejects tampering."""
+
+    def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = self.rfile.read(length)
+        path, _, raw_query = self.path.partition("?")
+        query = dict(
+            pair.split("=", 1) for pair in raw_query.split("&") if pair
+        ) if raw_query else {}
+
+        try:
+            auth = self.headers["Authorization"]
+            credential = auth.split("Credential=")[1].split(",")[0]
+            access_key, date_stamp, region, service, _ = credential.split("/")
+            amz_date = self.headers["x-nwr-date"]
+            headers = {
+                "host": self.headers["host"],
+                "x-nwr-date": amz_date,
+                "x-nwr-content-sha256": self.headers["x-nwr-content-sha256"],
+            }
+            canonical, _ = build_canonical_request("POST", path, query, headers, payload)
+            scope = f"{date_stamp}/{region}/{service}/nwr4_request"
+            string_to_sign = "\n".join(
+                [ALGORITHM, amz_date, scope, _sha256_hex(canonical.encode("utf-8"))]
+            )
+            expected = _hmac_sha256(
+                derive_signing_key(SECRET_ACCESS_KEY, date_stamp, region, service),
+                string_to_sign,
+            ).hex()
+            presented = auth.split("Signature=")[1]
+            if not hmac.compare_digest(expected, presented):
+                raise PermissionError("signature mismatch")
+            self._respond(200, {"status": "accepted", "access_key": access_key})
+        except (KeyError, IndexError, ValueError, PermissionError) as exc:
+            self._respond(403, {"error": type(exc).__name__})
+
+    def _respond(self, status: int, body: dict[str, str]) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass  # keep demo output deterministic
+
+
+def _post(path: str, query: dict[str, str], payload: bytes, headers: dict[str, str], port: int) -> tuple[int, str]:
+    qs = "&".join(f"{k}={v}" for k, v in query.items())
+    url = f"http://127.0.0.1:{port}{path}" + (f"?{qs}" if qs else "")
+    req = urllib.request.Request(url, data=payload, method="POST")
+    for name, value in headers.items():
+        if name.lower() != "host":
+            req.add_header(name, value)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+def main() -> None:
+    server = HTTPServer(("127.0.0.1", 0), VerifyingHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        host = f"127.0.0.1:{port}"
+        path, query = "/api/v1/parts", {"warehouse": "east", "priority": "high"}
+        payload = json.dumps({"sku": "NWR-ARM-9000", "quantity": 3}).encode("utf-8")
+
+        # 1. Happy path: properly signed request is accepted.
+        headers = sign_request("POST", path, query, payload, host, ACCESS_KEY_ID, SECRET_ACCESS_KEY)
+        status, body = _post(path, query, payload, headers, port)
+        print(f"[1] signed request           -> {status} {body}")
+
+        # 2. Tampered body: signature no longer matches the payload hash.
+        evil_payload = json.dumps({"sku": "NWR-ARM-9000", "quantity": 99999}).encode("utf-8")
+        status, body = _post(path, query, evil_payload, headers, port)
+        print(f"[2] tampered body            -> {status} {body}")
+
+        # 3. Wrong secret: derived signing key differs, verification fails.
+        bad = sign_request("POST", path, query, payload, host, ACCESS_KEY_ID, "wrong-secret")
+        status, body = _post(path, query, payload, bad, port)
+        print(f"[3] wrong secret key         -> {status} {body}")
+
+        # 4. Show the deterministic signing internals for inspection.
+        canonical, signed_headers = build_canonical_request(
+            "POST", path, query,
+            {"host": host, "x-nwr-date": FIXED_AMZ_DATE,
+             "x-nwr-content-sha256": _sha256_hex(payload)},
+            payload,
+        )
+        print("[4] canonical request (lines):", len(canonical.splitlines()),
+              "| signed headers:", signed_headers)
+    finally:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+\noindent\emph{Observed output (deterministic):}
+\begin{minted}{text}
+[1] signed request           -> 200 {"status": "accepted", "access_key": "NWRTESTACCESSKEY0001"}
+[2] tampered body            -> 403 {"error": "PermissionError"}
+[3] wrong secret key         -> 403 {"error": "PermissionError"}
+[4] canonical request (lines): 9 | signed headers: host;x-nwr-content-sha256;x-nwr-date
+\end{minted}
+
+\subsection{Listing 5.2 --- Complete PKCE Flow Against a Local Stub IdP}
+\label{lst:pkce}
+
+A runnable authorization-code + PKCE implementation per RFC~6749 and
+RFC~7636~\cite{rfc6749,rfc7636}: the stub IdP holds in-memory grants,
+enforces S256, rotates refresh tokens, and revokes the whole token family on
+reuse; the client generates the verifier/challenge pair, checks
+\texttt{state}, exchanges, and refreshes. In production the verifier comes
+from \texttt{secrets.token\_urlsafe}; here a seeded PRNG keeps output
+deterministic.
+
+\begin{minted}{python}
+"""Listing 5.2 -- Complete OAuth 2.0 Authorization Code + PKCE flow, offline.
+
+A stdlib-only, fully local demonstration:
+  * ``StubIdP``  -- an in-memory authorization server (authorize + token
+    endpoints) implementing PKCE verification, refresh-token rotation, and
+    reuse detection, per RFC 6749 / RFC 7636 semantics.
+  * ``PkceClient`` -- a public client that generates a code_verifier /
+    code_challenge (S256), obtains a code, exchanges it, and refreshes.
+
+Deterministic: the verifier and codes come from a seeded PRNG. In
+production, use ``secrets.token_urlsafe`` instead of ``random.Random``.
+
+All identifiers are synthetic fixtures for the fictional Northwind Robotics
+universe. No real network is used: the server binds to the loopback
+interface on an ephemeral port.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import random
+import threading
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CLIENT_ID = "nwr-parts-cli"
+REDIRECT_URI = "http://127.0.0.1/callback"
+VERIFIER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
+
+def s256_challenge(verifier: str) -> str:
+    """RFC 7636 S256: BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def make_verifier(rng: random.Random, length: int = 64) -> str:
+    """RFC 7636: 43-128 chars from the unreserved set. Use secrets in prod."""
+    if not 43 <= length <= 128:
+        raise ValueError("code_verifier length must be in [43, 128]")
+    return "".join(rng.choice(VERIFIER_ALPHABET) for _ in range(length))
+
+
+@dataclass
+class PendingGrant:
+    challenge: str
+    method: str
+
+
+class StubIdP:
+    """In-memory authorization-server state shared by the HTTP handler."""
+
+    def __init__(self, seed: int = 20260301) -> None:
+        self._rng = random.Random(seed)
+        self._grants: dict[str, PendingGrant] = {}
+        self._active: dict[str, str] = {}   # refresh_token -> family id
+        self._retired: dict[str, str] = {}  # rotated-out token -> family id
+        self._counter = 0
+
+    def _mint(self, prefix: str) -> str:
+        self._counter += 1
+        return f"{prefix}-{self._counter:04d}-nwr-synthetic"
+
+    def create_grant(self, challenge: str, method: str) -> str:
+        code = self._mint("code")
+        self._grants[code] = PendingGrant(challenge=challenge, method=method)
+        return code
+
+    def exchange_code(self, code: str, verifier: str) -> dict[str, object]:
+        grant = self._grants.pop(code, None)  # one-time use
+        if grant is None:
+            raise PermissionError("invalid_grant: unknown or reused code")
+        if grant.method != "S256" or s256_challenge(verifier) != grant.challenge:
+            raise PermissionError("invalid_grant: PKCE verification failed")
+        return self._issue_tokens(family=self._mint("fam"))
+
+    def refresh(self, refresh_token: str) -> dict[str, object]:
+        if refresh_token in self._retired:
+            # Reuse of an already-rotated token == theft signal:
+            # revoke the ENTIRE token family (RFC 6749 section 10.4 pattern).
+            family = self._retired[refresh_token]
+            self._active = {t: f for t, f in self._active.items() if f != family}
+            raise PermissionError("invalid_grant: refresh token reuse detected; family revoked")
+        family = self._active.pop(refresh_token, None)
+        if family is None:
+            raise PermissionError("invalid_grant: unknown refresh token")
+        self._retired[refresh_token] = family  # rotate: old token retires
+        return self._issue_tokens(family=family)
+
+    def _issue_tokens(self, family: str) -> dict[str, object]:
+        refresh = self._mint("rt")
+        self._active[refresh] = family
+        return {
+            "access_token": self._mint("at"),
+            "token_type": "Bearer",
+            "expires_in": 300,
+            "refresh_token": refresh,
+        }
+
+
+class IdPHandler(BaseHTTPRequestHandler):
+    idp: StubIdP  # injected by make_server()
+
+    def do_GET(self) -> None:  # noqa: N802 -- /authorize
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        try:
+            if not self.path.startswith("/authorize"):
+                raise ValueError("unknown endpoint")
+            if params["client_id"][0] != CLIENT_ID:
+                raise PermissionError("unauthorized_client")
+            if params.get("code_challenge_method", [""])[0] != "S256":
+                raise PermissionError("invalid_request: only S256 is accepted")
+            code = self.idp.create_grant(params["code_challenge"][0], "S256")
+            location = REDIRECT_URI + "?" + urllib.parse.urlencode(
+                {"code": code, "state": params["state"][0]}
+            )
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+        except (KeyError, ValueError, PermissionError) as exc:
+            self._json(400, {"error": str(exc)})
+
+    def do_POST(self) -> None:  # noqa: N802 -- /token
+        length = int(self.headers.get("Content-Length", "0"))
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+        try:
+            if not self.path.startswith("/token"):
+                raise ValueError("unknown endpoint")
+            grant_type = form["grant_type"][0]
+            if grant_type == "authorization_code":
+                tokens = self.idp.exchange_code(form["code"][0], form["code_verifier"][0])
+            elif grant_type == "refresh_token":
+                tokens = self.idp.refresh(form["refresh_token"][0])
+            else:
+                raise ValueError(f"unsupported_grant_type: {grant_type}")
+            self._json(200, tokens)
+        except (KeyError, ValueError) as exc:
+            self._json(400, {"error": str(exc)})
+        except PermissionError as exc:
+            self._json(403, {"error": str(exc)})
+
+    def _json(self, status: int, body: dict[str, object]) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+class PkceClient:
+    def __init__(self, base_url: str, rng: random.Random) -> None:
+        self.base_url = base_url
+        self.rng = rng
+
+    def _post_form(self, path: str, fields: dict[str, str]) -> dict[str, object]:
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=urllib.parse.urlencode(fields).encode("utf-8"),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise PermissionError(exc.read().decode("utf-8")) from exc
+
+    def authorize_and_exchange(self) -> dict[str, object]:
+        verifier = make_verifier(self.rng)
+        params = {
+            "response_type": "code",
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "parts:read",
+            "state": make_verifier(self.rng, 43),
+            "code_challenge": s256_challenge(verifier),
+            "code_challenge_method": "S256",
+        }
+        # A real CLI opens the system browser here; we follow the 302 locally.
+        url = self.base_url + "/authorize?" + urllib.parse.urlencode(params)
+        opener = urllib.request.build_opener(NoRedirect())
+        try:
+            opener.open(url)
+            raise RuntimeError("authorize endpoint must answer 302, not 200")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 302:
+                raise
+            location = exc.headers["Location"]
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(location).query)
+        if query["state"][0] != params["state"]:
+            raise PermissionError("state mismatch: possible CSRF")
+        return self._post_form(
+            "/token",
+            {
+                "grant_type": "authorization_code",
+                "code": query["code"][0],
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "code_verifier": verifier,
+            },
+        )
+
+    def refresh(self, refresh_token: str) -> dict[str, object]:
+        return self._post_form(
+            "/token",
+            {"grant_type": "refresh_token", "refresh_token": refresh_token,
+             "client_id": CLIENT_ID},
+        )
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def main() -> None:
+    idp = StubIdP(seed=20260301)
+    handler = type("BoundIdPHandler", (IdPHandler,), {"idp": idp})
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    client = PkceClient(f"http://127.0.0.1:{server.server_address[1]}",
+                        random.Random(42))
+    try:
+        tokens = client.authorize_and_exchange()
+        print(f"[1] code exchanged        -> access={tokens['access_token']} "
+              f"refresh={tokens['refresh_token']}")
+
+        rotated = client.refresh(str(tokens["refresh_token"]))
+        print(f"[2] refresh rotated       -> access={rotated['access_token']} "
+              f"refresh={rotated['refresh_token']}")
+
+        try:
+            client.refresh(str(tokens["refresh_token"]))  # replay old token
+        except PermissionError as exc:
+            print(f"[3] reuse of old refresh  -> REJECTED: {json.loads(exc.args[0])['error']}")
+        try:
+            client.refresh(str(rotated["refresh_token"]))  # family was revoked
+        except PermissionError as exc:
+            print(f"[4] family after reuse    -> REVOKED: {json.loads(exc.args[0])['error']}")
+    finally:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+\noindent\emph{Observed output (deterministic):}
+\begin{minted}{text}
+[1] code exchanged        -> access=at-0004-nwr-synthetic refresh=rt-0003-nwr-synthetic
+[2] refresh rotated       -> access=at-0006-nwr-synthetic refresh=rt-0005-nwr-synthetic
+[3] reuse of old refresh  -> REJECTED: invalid_grant: refresh token reuse detected; family revoked
+[4] family after reuse    -> REVOKED: invalid_grant: unknown refresh token
+\end{minted}
+
+\subsection{Listing 5.3 --- Hardened JWT Verifier with Adversarial Gauntlet}
+\label{lst:jwt}
+
+The validation order of Section~\ref{sec:ch5-jwt} as executable policy:
+allow-list first, signature second (constant-time), claims third (with
+leeway). The \texttt{SignatureVerifier} protocol marks the exact seam where
+an RS256 backend built on \texttt{cryptography} plugs in.
+
+\begin{minted}{python}
+"""Listing 5.3 -- Hardened JWT (RFC 7519) verifier with adversarial tests.
+
+Stdlib-only HS256 implementation built on ``hmac.compare_digest``, plus a
+``SignatureVerifier`` protocol showing exactly where an RS256 backend (e.g.
+``cryptography``) plugs in. The verifier:
+
+  1. rejects ``alg=none`` and any algorithm outside an explicit allow-list;
+  2. selects the verification key by *configured* algorithm, never by the
+     token's ``alg`` header alone (defeats RS256->HS256 confusion);
+  3. verifies the signature BEFORE trusting a single claim;
+  4. validates exp/nbf/iat with a bounded clock-skew leeway, plus iss/aud.
+
+All keys are synthetic test fixtures for the fictional Northwind Robotics
+universe. The embedded adversarial tokens are for education only.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import time
+from typing import Callable, Mapping, Protocol
+
+# --- Synthetic test fixtures (NOT real keys) ---------------------------------
+HS256_SECRET = b"nwr-test-hs256-secret-do-not-use-in-production"
+ISSUER = "https://idp.northwind-robotics.example/"
+AUDIENCE = "nwr-parts-api"
+ALLOWED_ALGS = frozenset({"HS256"})
+LEEWAY_SECONDS = 30
+
+
+class JWTError(Exception):
+    """Base class for all token validation failures."""
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def b64url_decode(segment: str) -> bytes:
+    if not segment or "=" in segment:
+        raise JWTError("malformed base64url segment")
+    padding = "=" * (-len(segment) % 4)
+    try:
+        return base64.urlsafe_b64decode(segment + padding)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise JWTError("malformed base64url segment") from exc
+
+
+def encode_jwt(header: Mapping[str, object], payload: Mapping[str, object], key: bytes) -> str:
+    """Sign a compact JWS with HS256 (test helper / fixture factory)."""
+    signing_input = f"{b64url_encode(json.dumps(header, separators=(',', ':')).encode())}." \
+                    f"{b64url_encode(json.dumps(payload, separators=(',', ':')).encode())}"
+    signature = hmac.new(key, signing_input.encode("ascii"), hashlib.sha256).digest()
+    return f"{signing_input}.{b64url_encode(signature)}"
+
+
+class SignatureVerifier(Protocol):
+    """Pluggable crypto backend. An RS256 implementation would call
+    ``cryptography.hazmat.primitives.asymmetric.rsa`` verify with PSS/PKCS1v15
+    here; the HS256 implementation below uses stdlib HMAC."""
+
+    def verify(self, signing_input: bytes, signature: bytes) -> bool: ...
+
+
+class HS256Verifier:
+    def __init__(self, secret: bytes) -> None:
+        if len(secret) < 32:
+            raise ValueError("HS256 keys must be >= 256 bits")
+        self._secret = secret
+
+    def verify(self, signing_input: bytes, signature: bytes) -> bool:
+        expected = hmac.new(self._secret, signing_input, hashlib.sha256).digest()
+        return hmac.compare_digest(expected, signature)  # constant time
+
+
+class JWTVerifier:
+    def __init__(
+        self,
+        verifiers: Mapping[str, SignatureVerifier],
+        issuer: str,
+        audience: str,
+        leeway: int = LEEWAY_SECONDS,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        self._verifiers = dict(verifiers)
+        self._issuer = issuer
+        self._audience = audience
+        self._leeway = leeway
+        self._now = now
+
+    def decode(self, token: str) -> dict[str, object]:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise JWTError("token must have exactly three segments")
+        header_b64, payload_b64, signature_b64 = parts
+        try:
+            header = json.loads(b64url_decode(header_b64))
+            payload = json.loads(b64url_decode(payload_b64))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise JWTError("unparsable header or payload") from exc
+        if not isinstance(header, dict) or not isinstance(payload, dict):
+            raise JWTError("header and payload must be JSON objects")
+
+        # --- Step 1: algorithm allow-list, BEFORE touching anything else. ---
+        alg = header.get("alg")
+        if not isinstance(alg, str) or alg == "none" or alg not in self._verifiers:
+            raise JWTError(f"algorithm not allowed: {alg!r}")
+        if header.get("crit"):
+            raise JWTError("unsupported critical extensions")
+
+        # --- Step 2: verify the signature with the CONFIGURED algorithm. ---
+        signature = b64url_decode(signature_b64)
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        if not self._verifiers[alg].verify(signing_input, signature):
+            raise JWTError("invalid signature")
+
+        # --- Step 3: only now are claims trustworthy enough to evaluate. ---
+        self._validate_claims(payload)
+        return payload
+
+    def _validate_claims(self, claims: Mapping[str, object]) -> None:
+        now = int(self._now())
+        exp = claims.get("exp")
+        if not isinstance(exp, int):
+            raise JWTError("missing or non-numeric exp")
+        if now > exp + self._leeway:
+            raise JWTError("token expired")
+        nbf = claims.get("nbf")
+        if nbf is not None and (not isinstance(nbf, int) or now + self._leeway < nbf):
+            raise JWTError("token not yet valid")
+        iat = claims.get("iat")
+        if iat is not None and (not isinstance(iat, int) or iat > now + self._leeway):
+            raise JWTError("iat is in the future")
+        if claims.get("iss") != self._issuer:
+            raise JWTError("issuer mismatch")
+        aud = claims.get("aud")
+        audiences = aud if isinstance(aud, list) else [aud]
+        if self._audience not in audiences:
+            raise JWTError("audience mismatch")
+
+
+def _fixture_claims(now: int) -> dict[str, object]:
+    return {
+        "iss": ISSUER,
+        "sub": "svc-parts-cli@northwind-robotics.example",
+        "aud": AUDIENCE,
+        "exp": now + 300,
+        "nbf": now - 5,
+        "iat": now - 10,
+        "jti": "nwr-jti-0001-synthetic",
+    }
+
+
+def main() -> None:
+    FIXED_NOW = 1_800_000_000  # deterministic clock for the demo
+    verifier = JWTVerifier(
+        verifiers={"HS256": HS256Verifier(HS256_SECRET)},
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        now=lambda: FIXED_NOW,
+    )
+
+    def attempt(label: str, token: str) -> None:
+        try:
+            claims = verifier.decode(token)
+            print(f"[{label}] ACCEPTED  sub={claims['sub']}")
+        except JWTError as exc:
+            print(f"[{label}] rejected  ({exc})")
+
+    good = encode_jwt({"alg": "HS256", "typ": "JWT"}, _fixture_claims(FIXED_NOW), HS256_SECRET)
+    attempt("1 valid           ", good)
+
+    # Adversarial 1: alg=none with an empty signature.
+    none_token = (
+        b64url_encode(json.dumps({"alg": "none", "typ": "JWT"}).encode())
+        + "." + b64url_encode(json.dumps(_fixture_claims(FIXED_NOW)).encode()) + "."
+    )
+    attempt("2 alg=none        ", none_token)
+
+    # Adversarial 2: expired by one hour.
+    expired = _fixture_claims(FIXED_NOW)
+    expired["exp"] = FIXED_NOW - 3600
+    attempt("3 expired         ", encode_jwt({"alg": "HS256"}, expired, HS256_SECRET))
+
+    # Adversarial 3: minted for a different audience (token confused deputy).
+    wrong_aud = _fixture_claims(FIXED_NOW)
+    wrong_aud["aud"] = "nwr-billing-api"
+    attempt("4 wrong audience  ", encode_jwt({"alg": "HS256"}, wrong_aud, HS256_SECRET))
+
+    # Adversarial 4: payload tampered after signing (privilege escalation).
+    header_b64, payload_b64, signature_b64 = good.split(".")
+    evil = _fixture_claims(FIXED_NOW)
+    evil["scope"] = "admin"
+    tampered = f"{header_b64}.{b64url_encode(json.dumps(evil).encode())}.{signature_b64}"
+    attempt("5 tampered payload", tampered)
+
+    # Adversarial 5: not-before in the future (pre-played token).
+    future = _fixture_claims(FIXED_NOW)
+    future["nbf"] = FIXED_NOW + 3600
+    attempt("6 future nbf      ", encode_jwt({"alg": "HS256"}, future, HS256_SECRET))
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+\noindent\emph{Observed output (deterministic):}
+\begin{minted}{text}
+[1 valid           ] ACCEPTED  sub=svc-parts-cli@northwind-robotics.example
+[2 alg=none        ] rejected  (algorithm not allowed: 'none')
+[3 expired         ] rejected  (token expired)
+[4 wrong audience  ] rejected  (audience mismatch)
+[5 tampered payload] rejected  (invalid signature)
+[6 future nbf      ] rejected  (token not yet valid)
+\end{minted}
+
+\subsection{Listing 5.4 --- Token Cache: Single-Flight Proactive Refresh and Redaction-Safe Logging}
+\label{lst:tokencache}
+
+The refresh discipline of Section~\ref{sec:ch5-oauth} as a component: an
+injected clock (deterministic), a double-checked lock (single-flight under
+concurrency), a skew window (proactive refresh), and a
+\texttt{logging.Filter} that scrubs credential-shaped substrings from every
+record before any handler can emit them.
+
+\begin{minted}{python}
+"""Listing 5.4 -- Token cache with single-flight proactive refresh and
+redaction-safe logging.
+
+``TokenCache`` guarantees three production properties:
+  * proactive refresh -- tokens are renewed ``skew`` seconds BEFORE expiry,
+    so in-flight requests never ride a token into its death window;
+  * single-flight -- no matter how many threads hit an expired cache at
+    once, exactly ONE refresh call reaches the token endpoint;
+  * fail-closed -- a refresh error propagates; a poisoned cache never
+    serves a known-dead token as fresh.
+
+``RedactionFilter`` is a ``logging.Filter`` that scrubs bearer tokens,
+client secrets, and API keys from every record -- install it on the root
+logger before any code can log a credential.
+
+Deterministic: the clock is injected. Synthetic Northwind Robotics fixtures
+only; no network access.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import threading
+from dataclasses import dataclass
+from typing import Callable
+
+REDACTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"Bearer\s+[A-Za-z0-9\-._~+/]+=*",
+        r"(api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token)"
+        r"[\"'=:\s]+[^\s\"',}]+[\"']?",
+    )
+)
+
+
+class RedactionFilter(logging.Filter):
+    """Drop-in logging filter that redacts credential-shaped substrings."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._scrub(record.getMessage())
+        record.args = ()
+        return True
+
+    @staticmethod
+    def _scrub(text: str) -> str:
+        for pattern in REDACTION_PATTERNS:
+            text = pattern.sub("[REDACTED]", text)
+        return text
+
+
+@dataclass(frozen=True)
+class Token:
+    access_token: str
+    refresh_token: str
+    expires_at: float  # epoch seconds
+
+
+class TokenCache:
+    def __init__(
+        self,
+        fetch: Callable[[], Token],
+        refresh: Callable[[str], Token],
+        now: Callable[[], float],
+        skew: float = 60.0,
+    ) -> None:
+        self._fetch = fetch
+        self._refresh = refresh
+        self._now = now
+        self._skew = skew
+        self._lock = threading.Lock()
+        self._token: Token | None = None
+        self.refresh_calls = 0  # instrumentation for tests/demos
+
+    def get(self) -> str:
+        token = self._token
+        if token is not None and not self._expiring_soon(token):
+            return token.access_token          # fast path: no lock
+        with self._lock:
+            token = self._token
+            if token is not None and not self._expiring_soon(token):
+                return token.access_token      # double-checked under lock
+            self.refresh_calls += 1            # single-flight: one call only
+            self._token = (
+                self._refresh(token.refresh_token) if token else self._fetch()
+            )
+            return self._token.access_token
+
+    def _expiring_soon(self, token: Token) -> bool:
+        return self._now() >= token.expires_at - self._skew
+
+
+def main() -> None:
+    # --- Redaction demo -------------------------------------------------------
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.addFilter(RedactionFilter())
+    root.addHandler(handler)
+    log = logging.getLogger("nwr.demo")
+
+    # --- Deterministic clock and token factory --------------------------------
+    state = {"now": 1_000.0, "counter": 0}
+
+    def make_token(kind: str) -> Token:
+        state["counter"] += 1
+        return Token(
+            access_token=f"at-{kind}-{state['counter']:02d}-nwr-synthetic",
+            refresh_token=f"rt-{kind}-{state['counter']:02d}-nwr-synthetic",
+            expires_at=state["now"] + 300.0,
+        )
+
+    cache = TokenCache(
+        fetch=lambda: make_token("initial"),
+        refresh=lambda rt: make_token("refresh"),
+        now=lambda: state["now"],
+        skew=60.0,
+    )
+
+    # 1. First call fetches; second call is served from the cache.
+    first, second = cache.get(), cache.get()
+    print(f"[1] cached reuse: {first == second} ({first})")
+
+    # 2. Advance into the proactive-refresh window: expiry-59s <= now.
+    state["now"] += 300.0 - 59.0
+    third = cache.get()
+    print(f"[2] proactive refresh fired: {third != first} ({third})")
+
+    # 3. Single-flight: expire, then hammer the cache from 8 threads.
+    state["now"] += 300.0 - 30.0
+    before = cache.refresh_calls
+    results: list[str] = []
+    threads = [threading.Thread(target=lambda: results.append(cache.get()))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    print(f"[3] threads=8 distinct tokens={len(set(results))} "
+          f"refresh calls made={cache.refresh_calls - before}")
+
+    # 4. Redaction: this must NOT print the credential.
+    log.warning("retrying with Bearer at-refresh-03-nwr-synthetic after 401")
+    log.info("config client_secret='nwr-super-secret-fixture' loaded")
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+\noindent\emph{Observed output (deterministic):}
+\begin{minted}{text}
+retrying with [REDACTED] after 401
+[1] cached reuse: True (at-initial-01-nwr-synthetic)
+[2] proactive refresh fired: True (at-refresh-02-nwr-synthetic)
+[3] threads=8 distinct tokens=1 refresh calls made=1
+config [REDACTED] loaded
+\end{minted}
+
+\subsection{Listing 5.5 --- Educational Attack Demo: RS256\texorpdfstring{$\rightarrow$}{->}HS256 Confusion}
+\label{lst:algconfusion}
+
+The confusion attack of Section~\ref{sec:ch5-jwt}, made concrete. Because
+the standard library ships no RSA, we model the asymmetric relationship with
+a \textbf{toy textbook RSA} (small fixed primes, raw \texttt{pow} math, no
+padding --- a teaching stand-in, not cryptography). The point survives the
+simplification: the naive verifier lets the \emph{token} choose the
+algorithm while the \emph{configuration} supplies the key, and the forgery
+verifies; the hardened verifier binds algorithm to key configuration and the
+attack dies at the allow-list.
+
+\begin{minted}{python}
+"""Listing 5.5 -- EDUCATIONAL ATTACK DEMO: RS256 -> HS256 algorithm confusion.
+
+The classic JWT library bug: the verifier picks its verification ALGORITHM
+from the attacker-controlled token header while picking the KEY from its own
+RS256 configuration. An attacker who knows the public key (public keys are
+public -- JWKS endpoints publish them) mints an ``alg=HS256`` token using
+the public key bytes as the HMAC secret. The naive verifier computes
+``HMAC(public_key, token)`` and the forgery verifies.
+
+This file demonstrates the attack against a naive verifier and its failure
+against a hardened one. Because the Python standard library has no RSA, we
+use a TOY TEXTBOOK RSA (small fixed primes, raw ``pow`` math, no padding).
+It exists ONLY to model the asymmetric/private-public key relationship --
+it is not remotely secure cryptography. Use ``cryptography`` in production.
+
+Synthetic Northwind Robotics fixtures only. Runs fully offline.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+from typing import Mapping
+
+# --- Toy textbook RSA (EDUCATIONAL STAND-IN; never use in real code) --------
+_P = 1_299_709  # fixed small primes for deterministic keys
+_Q = 1_299_721
+N = _P * _Q
+_E = 65_537
+_D = pow(_E, -1, (_P - 1) * (_Q - 1))
+PUBLIC_KEY_PEM = f"-----BEGIN NWR PUBLIC KEY-----\nn={N} e={_E}\n-----END NWR PUBLIC KEY-----".encode()
+PRIVATE_KEY_PEM = f"-----BEGIN NWR PRIVATE KEY-----\nn={N} d={_D}\n-----END NWR PRIVATE KEY-----".encode()
+
+
+def _toy_rsa_sign(signing_input: bytes) -> bytes:
+    h = int.from_bytes(hashlib.sha256(signing_input).digest(), "big") % N
+    return pow(h, _D, N).to_bytes((N.bit_length() + 7) // 8, "big")
+
+
+def _toy_rsa_verify(signing_input: bytes, signature: bytes) -> bool:
+    h = int.from_bytes(hashlib.sha256(signing_input).digest(), "big") % N
+    return pow(int.from_bytes(signature, "big"), _E, N) == h
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _unb64(segment: str) -> bytes:
+    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+
+
+def _mint(header: Mapping[str, object], payload: Mapping[str, object]) -> str:
+    signing_input = (
+        f"{_b64(json.dumps(header, separators=(',', ':')).encode())}."
+        f"{_b64(json.dumps(payload, separators=(',', ':')).encode())}"
+    ).encode("ascii")
+    if header["alg"] == "RS256":  # legit IdP path: signs with PRIVATE key
+        sig = _toy_rsa_sign(signing_input)
+    else:  # attacker path: HMAC with the PUBLIC key as the "secret"
+        sig = hmac.new(PUBLIC_KEY_PEM, signing_input, hashlib.sha256).digest()
+    return signing_input.decode("ascii") + "." + _b64(sig)
+
+
+CLAIMS = {"iss": "https://idp.northwind-robotics.example/", "sub": "attacker",
+          "aud": "nwr-parts-api", "role": "admin", "exp": 9_999_999_999}
+
+
+def naive_verify(token: str, configured_key: bytes) -> dict[str, object]:
+    """BUG: trusts the token's alg header to choose the verification method,
+    while the KEY comes from local config. Classic algorithm confusion."""
+    header_b64, payload_b64, sig_b64 = token.split(".")
+    header = json.loads(_unb64(header_b64))
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    signature = _unb64(sig_b64)
+    if header["alg"] == "RS256":
+        ok = _toy_rsa_verify(signing_input, signature)
+    elif header["alg"] == "HS256":
+        ok = hmac.compare_digest(
+            hmac.new(configured_key, signing_input, hashlib.sha256).digest(), signature
+        )
+    else:
+        ok = False
+    if not ok:
+        raise PermissionError("invalid signature")
+    return json.loads(_unb64(payload_b64))
+
+
+def hardened_verify(token: str, configured_key: bytes) -> dict[str, object]:
+    """FIX: the algorithm allow-list is part of the KEY CONFIGURATION, so the
+    token header can never downgrade RS256 to HS256."""
+    header_b64, payload_b64, sig_b64 = token.split(".")
+    header = json.loads(_unb64(header_b64))
+    if header.get("alg") != "RS256":  # allow-list of exactly one algorithm
+        raise PermissionError(f"algorithm not allowed: {header.get('alg')!r}")
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    if not _toy_rsa_verify(signing_input, _unb64(sig_b64)):
+        raise PermissionError("invalid signature")
+    return json.loads(_unb64(payload_b64))
+
+
+def main() -> None:
+    forged = _mint({"alg": "HS256", "typ": "JWT"}, CLAIMS)
+    legit = _mint({"alg": "RS256", "typ": "JWT"},
+                  {**CLAIMS, "sub": "svc-parts-cli", "role": "reader"})
+
+    for name, verifier in (("naive   ", naive_verify), ("hardened", hardened_verify)):
+        try:
+            claims = verifier(legit, PUBLIC_KEY_PEM)
+            print(f"[{name}] legit RS256 token     -> ACCEPTED sub={claims['sub']}")
+        except PermissionError as exc:
+            print(f"[{name}] legit RS256 token     -> rejected ({exc})")
+        try:
+            claims = verifier(forged, PUBLIC_KEY_PEM)
+            print(f"[{name}] forged HS256 (confused) -> ACCEPTED!! role={claims['role']} "
+                  f"<-- attack succeeded")
+        except PermissionError as exc:
+            print(f"[{name}] forged HS256 (confused) -> rejected ({exc}) <-- attack failed")
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+\noindent\emph{Observed output (deterministic):}
+\begin{minted}{text}
+[naive   ] legit RS256 token     -> ACCEPTED sub=svc-parts-cli
+[naive   ] forged HS256 (confused) -> ACCEPTED!! role=admin <-- attack succeeded
+[hardened] legit RS256 token     -> ACCEPTED sub=svc-parts-cli
+[hardened] forged HS256 (confused) -> rejected (algorithm not allowed: 'HS256') <-- attack failed
+\end{minted}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch5-pitfalls}
+
+Each entry below names the failure, explains why it happens, and gives the
+fix. These are drawn from real incident post-mortems and the OWASP API
+Security Top~10~\cite{owaspapisecurity}.
+
+\begin{enumerate}
+  \item \textbf{Tokens and keys in URLs.} \texttt{?access\_token=...} and
+        \texttt{?api\_key=...} land in access logs, CDN logs, browser
+        history, and \texttt{Referer} headers. \emph{Fix:} credentials ride
+        in \texttt{Authorization} headers, period; treat any historic URL
+        exposure as a leak requiring rotation.
+  \item \textbf{Logging the \texttt{Authorization} header.} Debug-level
+        HTTP middleware that dumps headers is a credential exfiltration
+        pipeline into your log aggregator. \emph{Fix:} redaction filters at
+        the logger and at the HTTP client layer (Listing~\ref{lst:tokencache});
+        alert on regex matches for token shapes in log pipelines.
+  \item \textbf{\texttt{client\_secret} in browser or mobile code.} A secret
+        shipped to every device is public. \emph{Fix:} public clients use
+        authorization code + PKCE with no secret; confidential clients keep
+        secrets server-side.
+  \item \textbf{Accepting whatever \texttt{alg} the token declares.} Enables
+        \texttt{alg=none} and RS256$\rightarrow$HS256 confusion
+        (Listing~\ref{lst:algconfusion}). \emph{Fix:} the algorithm
+        allow-list lives in verifier configuration beside the key, and the
+        token's header can only choose among already-approved
+        \texttt{kid}s.
+  \item \textbf{Ignoring \texttt{exp} (or validating with unbounded
+        leeway).} A token checked only for signature is valid forever once
+        stolen. \emph{Fix:} require \texttt{exp}, cap leeway at 30--60~s,
+        apply it symmetrically to \texttt{nbf}/\texttt{iat}.
+  \item \textbf{Storing tokens in \texttt{localStorage} without a threat
+        analysis.} Any XSS payload in any dependency reads
+        \texttt{localStorage}; a bearer token there is a bearer token for
+        the attacker's C2 server. The honest alternative trade-off ---
+        \texttt{HttpOnly; Secure; SameSite} cookies plus CSRF defenses ---
+        must be a documented decision, not a default~\cite{owaspapisecurity}.
+  \item \textbf{Infinite retry on 401.} Retrying a request whose token was
+        \emph{rejected} (not expired) in a tight loop is a self-DoS that
+        also looks like credential-stuffing to the provider's WAF ---
+        expect IP bans. \emph{Fix:} one refresh + one retry, then fail fast;
+        circuit-breaker semantics belong here as much as they do in service
+        meshes~\cite{nygard2018releaseit}.
+  \item \textbf{One key across environments.} A single API key for
+        dev/staging/prod means the dev laptop leak is a prod breach.
+        \emph{Fix:} per-environment credentials with distinct prefixes and
+        scopes; prod secrets never touch developer machines.
+  \item \textbf{Comparing signatures with \texttt{==}.} Byte-at-a-time
+        early exit leaks match length through timing. \emph{Fix:}
+        \texttt{hmac.compare\_digest}, always.
+  \item \textbf{Parsing access tokens.} Access tokens are opaque to clients;
+        the JWT-shaped ones are an implementation detail of the AS/RS
+        pair. Clients that branch on access-token claims break when the
+        provider rotates formats. Only ID tokens (OIDC) are for the client
+        to parse.
+  \item \textbf{Caching JWKS forever.} A stale key cache fails closed after
+        every provider rotation --- or fails open if a developer ``fixes''
+        it by disabling signature checks. \emph{Fix:} cache with TTL,
+        re-fetch once on unknown \texttt{kid}, rate-limit re-fetches.
+  \item \textbf{Home-rolled crypto beyond educational scope.} Listings
+        \ref{lst:jwt} and \ref{lst:algconfusion} are deliberately stdlib to
+        expose the mechanics; production verifiers belong to maintained
+        libraries (\texttt{pyjwt}, \texttt{cryptography}) with security
+        response teams.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch5-lab}
+
+\subsection{Lab: PKCE End-to-End and the JWT Hardening Gauntlet}
+
+\textbf{Objective.} Stand up the full local identity stack, run the complete
+PKCE flow, then run the adversarial JWT gauntlet --- all offline.
+
+\textbf{Setup (PowerShell).} From the directory where you saved the
+listings:
+
+\begin{minted}{text}
+python --version            # must report 3.11 or newer
+python listing_5_1_hmac_signer.py
+python listing_5_2_pkce_flow.py
+python listing_5_3_jwt_verifier.py
+python listing_5_4_token_cache.py
+python listing_5_5_alg_confusion.py
+\end{minted}
+
+\textbf{Part A --- sign and tamper.} Run Listing~\ref{lst:hmac}. Confirm
+step [2] returns 403. Then modify the client to sign with
+\texttt{warehouse=west} while the request line still says
+\texttt{warehouse=east}; predict the result before running, then explain in
+one sentence which canonical-request line caught the discrepancy.
+
+\textbf{Part B --- PKCE end-to-end.} Run Listing~\ref{lst:pkce}. Then
+instrument \texttt{StubIdP.exchange\_code} to print the presented verifier
+length and confirm it lies in $[43, 128]$. Break PKCE deliberately: change
+the client to send a verifier one character longer than the one it
+challenged with; observe \texttt{invalid\_grant} and identify the exact
+comparison that failed.
+
+\textbf{Part C --- rotation forensics.} Extend Listing~\ref{lst:pkce}'s
+\texttt{main} to refresh three times, then replay \emph{the first} refresh
+token. Verify that all later tokens in the family die. This is the behavior
+your production client must survive gracefully: on family revocation, fall
+back to a fresh interactive grant, never to infinite retry.
+
+\textbf{Part D --- the gauntlet.} Run Listing~\ref{lst:jwt}; all six
+adversarial tokens must be rejected. Then remove \emph{one} defense at a
+time (drop the allow-list check; skip \texttt{aud}; set
+\texttt{leeway=10**9}) and watch which gauntlet rows flip to ACCEPTED.
+Record the defense-to-attack mapping --- it is Table~\ref{tab:ch5-claims}
+made visceral.
+
+\textbf{Part E --- attack and cure.} Run Listing~\ref{lst:algconfusion}.
+Then port \texttt{hardened\_verify}'s policy into Listing~\ref{lst:jwt}'s
+\texttt{JWTVerifier} (it is already there --- find the three lines that
+implement it). Explain why ``just check \texttt{alg != 'none'}'' would still
+have lost to this attack.
+
+\textbf{Deliverable.} A short lab note: the four observed outputs, the
+Part~B failure explanation, and the defense-to-attack table from Part~D.
+
+\subsection{War Story: The CI Log Leak and the 41-Minute Rotation}
+
+At Northwind Robotics (fictional composite, drawn from depressingly common
+real incidents), a build engineer debugging a failing deployment added
+\texttt{echo "using key \$NWR\_API\_KEY"} to a CI pipeline step. The key ---
+a production, write-scoped parts-inventory credential --- landed in the
+build log. The log was ``private,'' but the CI vendor's retention meant it
+was copied to a cold-storage bucket whose bucket policy the security team
+had flagged, twice, as overly broad. Three weeks later an automated scanner
+found the bucket listing, and 02:14 on a Saturday the parts API saw a write
+burst from an unfamiliar ASN: phantom SKU updates pricing robot arms at
+\texttt{\$0.01}.
+
+The incident worked because of four stacked client-side failures, each of
+which maps to a section of this chapter. (1)~\emph{The credential was
+over-scoped}: one key held read and write for every warehouse --- least
+privilege (Section~\ref{sec:ch5-storage}) would have bounded the blast
+radius to a single environment. (2)~\emph{The log pipeline had no redaction}:
+Listing~\ref{lst:tokencache}'s filter, installed at the CI log shipper,
+would have emitted \texttt{[REDACTED]}. (3)~\emph{The key was long-lived
+with no rotation runbook}: the on-call had to invent the rotation procedure
+during the incident. (4)~\emph{Detection came from the attacker's
+carelessness}, not from tooling: no alert existed on ``write burst from new
+ASN with a valid key.''
+
+The rotation itself took 41 minutes: 6 to confirm the leak, 9 to mint
+per-service keys, 14 to redeploy four consumers (one had the key baked into
+a container image, not an environment variable --- the Twelve-Factor
+violation~\cite{twelvefactor} that ate the night), and 12 to verify traffic
+recovery before revoking the old key. The post-incident actions read like
+this chapter's table of contents: per-environment least-privilege keys,
+redaction at the shipper, a written rotation runbook with a 15-minute
+target, secret-scanning on CI logs, and anomaly alerts on valid-credential
+abuse. The lesson worth memorizing: \emph{credential leaks are ``when,''
+not ``if'' --- the engineering variable under your control is the blast
+radius and the rotation clock.}
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch5-exercises}
+
+\subsection*{Exercises}
+
+\begin{enumerate}
+  \item \textbf{Entropy audit.} Compute the min-entropy of these key
+        generation schemes and rank them: (a) 22 base64url chars from
+        \texttt{secrets}; (b) 36-char UUIDv4; (c) 32 hex chars from
+        \texttt{random.Random(42)}; (d) \texttt{sha256(hostname + date)}.
+        Which are acceptable for a production API key?
+  \item \textbf{Canonicalization trap.} Extend Listing~\ref{lst:hmac}'s
+        demo: sign a request whose query contains the key
+        \texttt{filter} twice with different values. What does the current
+        \texttt{canonical\_query} do with multi-valued parameters, what
+        does real SigV4 require, and what is the interoperability bug if
+        client and server disagree?
+  \item \textbf{Leeway calculus.} Your fleet's clocks skew by $\pm 20$~s and
+        p99 request latency is 8~s. Derive a defensible leeway and refresh
+        skew; then state the residual risk of a token replayed within the
+        leeway window and how \texttt{jti} caching closes it.
+  \item \textbf{State and nonce.} In Listing~\ref{lst:pkce}, remove the
+        \texttt{state} check and describe the exact CSRF attack that
+        becomes possible against a browser-based client. Why does PKCE not
+        obviate \texttt{state}?
+  \item \textbf{Gauntlet extension.} Add three new adversarial tokens to
+        Listing~\ref{lst:jwt}: (a) \texttt{exp} as a JSON string
+        (\texttt{"1893456000"}); (b) \texttt{aud} as a list containing your
+        audience and a foreign one --- decide and defend accept/reject;
+        (c) a header with \texttt{"crit":["exp"]}. Verify each is rejected
+        for the right reason.
+  \item \textbf{Single-flight proof.} In Listing~\ref{lst:tokencache},
+        raise the thread count to 64 and add a 50~ms sleep inside the fake
+        \texttt{refresh}. Prove instrumentally that exactly one refresh
+        occurs; then remove the double-check inside the lock and observe the
+        failure mode.
+  \item \textbf{Redaction coverage.} Write five adversarial log lines
+        designed to defeat \texttt{RedactionFilter} (e.g., tokens split
+        across concatenated strings, URL-encoded secrets, JSON with unusual
+        spacing). For each that succeeds, write the defense-in-depth control
+        that catches what regexes cannot.
+\end{enumerate}
+
+\subsection*{Deep-Dive Questions}
+
+\begin{enumerate}
+  \item SigV4 signs the payload hash, not the payload. What class of attack
+        does this \emph{not} prevent, that full request signing including a
+        timestamp and a nonce would? Design the server-side replay cache
+        that closes the gap.
+  \item Why does the authorization-code grant split the flow across a front
+        channel and a back channel, and which specific properties of browser
+        URLs (Chapter~1's wire view) make the split necessary?
+  \item Refresh-token rotation turns a passive leak into an active alarm.
+        Explain the detection logic, then analyze the false-positive case
+        (client crash between receipt and persistence) and design a client
+        that distinguishes it from theft.
+  \item ``JWTs are self-contained, so revocation is impossible'' is half of
+        a true sentence. Reconstruct the full cost model: what does
+        stateless verification buy (latency, scale, blast radius of an RS
+        outage), and what is the precise price (revocation gap, claim
+        staleness)? When does introspection win?
+  \item An auditor asks why your mobile app uses authorization code + PKCE
+        instead of client credentials with an embedded secret, given that
+        ``the secret is obfuscated.'' Write the three-paragraph answer.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch5-qa}
+
+Junior items test vocabulary and hygiene; mid-level items test mechanism;
+senior/staff items test judgment under trade-offs.
+
+\subsection*{Junior (Q1--Q10)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm, itemsep=0.9em]
+  \item \textbf{Why should API keys go in a header rather than the query
+        string?}\par
+        \textbf{A.} Query strings are recorded by default in web-server
+        access logs, load balancers, CDNs, APM agents, browser history, and
+        \texttt{Referer} headers; headers are not. A credential in a URL is
+        a credential in a log you do not control. Headers also keep the
+        credential out of cache keys and bookmarks.
+  \item \textbf{Is Base64 encryption? Why is HTTP Basic dangerous over plain
+        HTTP?}\par
+        \textbf{A.} No --- Base64 is a keyless, reversible \emph{encoding}.
+        \texttt{Authorization: Basic} is the password, lightly dressed. Over
+        plaintext HTTP any on-path reader recovers the password; over TLS it
+        still means a long-lived reusable secret is transmitted on every
+        request.
+  \item \textbf{What does ``bearer token'' mean, and what follows from
+        it?}\par
+        \textbf{A.} Possession is proof: whoever presents the string is
+        trusted, like cash. Therefore TLS everywhere, short lifetimes, and
+        fanatical storage/logging hygiene on the client --- anyone who
+        copies the token owns the session.
+  \item \textbf{What are the three segments of a JWT and what protects
+        each?}\par
+        \textbf{A.} Header, payload, signature, base64url-encoded and
+        dot-joined. Only the signature is cryptographically protected; the
+        header and payload are merely \emph{encoded} --- readable by anyone
+        holding the token (see Figure~\ref{fig:ch5-jwt-anatomy}).
+  \item \textbf{Name the seven registered JWT claims.}\par
+        \textbf{A.} \texttt{iss} (issuer), \texttt{sub} (subject),
+        \texttt{aud} (audience), \texttt{exp} (expiration), \texttt{nbf}
+        (not-before), \texttt{iat} (issued-at), \texttt{jti} (token id).
+  \item \textbf{What is the difference between authentication and
+        authorization in OAuth terms?}\par
+        \textbf{A.} Authentication proves who you are (OIDC's ID token);
+        authorization determines what you may do (OAuth scopes on an access
+        token). OAuth~2.0 alone is a delegation/authorization framework ---
+        that is why OIDC was layered on top.
+  \item \textbf{What is \texttt{state} for in the authorization-code
+        flow?}\par
+        \textbf{A.} CSRF protection: the client plants a random value in the
+        authorize request and requires the same value back on the redirect,
+        proving the redirect belongs to the flow this client instance
+        started.
+  \item \textbf{Why must HMAC signature comparison use
+        \texttt{hmac.compare\_digest} instead of \texttt{==}?}\par
+        \textbf{A.} \texttt{==} exits at the first differing byte, leaking
+        how many leading bytes matched through response timing;
+        \texttt{compare\_digest} runs in constant time, denying the oracle.
+  \item \textbf{Where should a CLI tool store a refresh token?}\par
+        \textbf{A.} OS keychain (via \texttt{keyring}) first; an
+        ACL-restricted file with 0600-style permissions as a fallback; never
+        in the project directory, dotfiles under version control, or the
+        process's logged environment.
+  \item \textbf{What HTTP status should an API return for an expired vs.\
+        an invalid token, and why do clients care?}\par
+        \textbf{A.} Both are 401 (authentication problem), conventionally
+        distinguished by \texttt{WWW-Authenticate} error parameters. Clients
+        care because expiry is retryable via refresh while invalidity
+        (revocation, bad signature) must fail fast --- retry loops on the
+        latter self-DoS and look like attacks.
+\end{enumerate}
+
+\subsection*{Mid-Level (Q11--Q22)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm, itemsep=0.9em, start=11]
+  \item \textbf{Why PKCE for public clients?}\par
+        \textbf{A.} Public clients cannot hold a \texttt{client\_secret}, so
+        an intercepted authorization code was historically redeemable by
+        anyone. PKCE binds the exchange to the flow initiator: the client
+        sends SHA-256 of a random verifier on the front channel and reveals
+        the verifier only on the back-channel exchange; the AS recomputes
+        and compares. An interceptor with the code but not the verifier
+        holds nothing.
+  \item \textbf{Walk through the SigV4 signing chain.}\par
+        \textbf{A.} (1) Canonicalize: method, URI-encoded path, sorted
+        encoded query, normalized sorted headers, signed-header list,
+        SHA-256 of the body --- newline-joined. (2) String-to-sign:
+        algorithm id, timestamp, credential scope
+        (date/region/service/request), SHA-256 of the canonical request.
+        (3) Derive the key: HMAC cascade date $\rightarrow$ region
+        $\rightarrow$ service $\rightarrow$ \texttt{request}, seeded with
+        \texttt{SCHEME+secret}. (4) Signature: hex HMAC of the
+        string-to-sign under the derived key, shipped in
+        \texttt{Authorization} with the scope and signed-header list. The
+        cascade domain-separates keys so a signature is valid for exactly
+        one date/region/service context.
+  \item \textbf{Why is \texttt{alg} allow-listing critical?}\par
+        \textbf{A.} Because the token header is attacker-controlled. If the
+        verifier derives its algorithm from the token, the attacker chooses
+        the verification method: \texttt{none} (no signature at all) or
+        HS256 with the RS256 public key as the HMAC secret --- which
+        verifies, because the public key is public. Binding algorithm to key
+        configuration makes both choices impossible
+        (Listing~\ref{lst:algconfusion}).
+  \item \textbf{ID token vs.\ access token?}\par
+        \textbf{A.} The ID token (OIDC) is a JWT whose audience is the
+        client --- proof of authentication for local consumption. The access
+        token targets the resource server; the client must treat it as
+        opaque, never parse it, never forward the ID token in its place.
+        Audience enforcement is what makes the distinction meaningful.
+  \item \textbf{How do you handle refresh-token reuse detection?}\par
+        \textbf{A.} Rotate on every refresh: the AS retires the presented
+        token and issues a new one. If a retired token is ever presented,
+        either the real client or a thief holds a stale copy, so the AS
+        revokes the entire token family and forces re-authentication. Client
+        side: persist rotated tokens atomically (write-then-swap), or your
+        own crash becomes indistinguishable from theft and logs you out.
+  \item \textbf{When would you choose client credentials over authorization
+        code?}\par
+        \textbf{A.} When there is no resource owner: daemon-to-API,
+        CI-to-registry, service-to-service. The client authenticates as
+        itself with its secret and gets a narrowly scoped token. If a human
+        user's consent or identity is involved, client credentials is the
+        wrong tool.
+  \item \textbf{Describe the device-code grant and its security
+        properties.}\par
+        \textbf{A.} (RFC~8628) The device gets a \texttt{device\_code}, a
+        human-readable \texttt{user\_code}, and a verification URI; the user
+        authorizes on a real browser; the device polls the token endpoint,
+        honoring \texttt{authorization\_pending}/\texttt{slow\_down}.
+        Security: the consent channel is disjoint from the constrained
+        device, user codes are short-lived, and polling intervals rate-limit
+        guessing.
+  \item \textbf{Why was the implicit grant deprecated?}\par
+        \textbf{A.} It delivered bearer tokens through the browser URI
+        fragment: tokens in URLs (history, logs, referers), no client
+        authentication, no refresh path, no proof the token reached the
+        requesting client. PKCE gave browser apps a strictly safer
+        alternative, and OAuth~2.1 removes implicit entirely.
+  \item \textbf{What is \texttt{kid} injection and the fix?}\par
+        \textbf{A.} If the verifier uses the token's \texttt{kid} to build a
+        filesystem path or SQL query, the attacker steers key lookup
+        (\texttt{../../}, \texttt{' OR 1=1 --}). Fix: \texttt{kid} is an
+        opaque key into an in-memory map populated exclusively from the
+        trusted JWKS document; unknown \texttt{kid} triggers one rate-limited
+        JWKS refresh, then rejection.
+  \item \textbf{Explain clock-skew leeway: why it exists and how to bound
+        it.}\par
+        \textbf{A.} Distributed clocks disagree; without leeway, honest
+        tokens fail at boundaries. Leeway widens validity by seconds in both
+        directions for \texttt{exp}/\texttt{nbf}/\texttt{iat}. Bound it to
+        measured fleet skew plus latency (30--60~s typical) --- unbounded
+        leeway silently resurrects expired tokens, which is worse than the
+        flakes it prevents.
+  \item \textbf{Single-flight refresh: what problem does it solve?}\par
+        \textbf{A.} N concurrent threads observe an expired token; without
+        coordination they fire N refreshes. Against a rotating AS, refresh
+        $n>1$ replays a retired token --- which reuse detection reads as
+        theft, revoking the family. A lock with double-checked state
+        guarantees exactly one refresh (Listing~\ref{lst:tokencache}).
+  \item \textbf{Why are JWTs ``not encrypted,'' and when would you use
+        JWE?}\par
+        \textbf{A.} JWS signs; anyone can base64url-decode the payload. Use
+        JWE only when claims themselves are confidential in transit at the
+        application layer --- rare, because TLS already protects the wire
+        and the endpoint must decrypt anyway. The common real answer:
+        minimize claims instead of encrypting them.
+\end{enumerate}
+
+\subsection*{Senior \& Staff (Q23--Q32)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm, itemsep=0.9em, start=23]
+  \item \textbf{Design the revocation story for a stateless JWT
+        architecture.}\par
+        \textbf{A.} Accept that signature-validity and authorization-validity
+        decouple. Layer: (1) short access-token TTLs (5--15 min) bounding
+        the gap; (2) refresh rotation with reuse detection as the kill
+        switch; (3) a \texttt{jti} or subject-level blocklist consulted only
+        on high-value endpoints (bounded state where it pays); (4) a
+        security-events channel pushing ``user disabled'' signals to edge
+        verifiers. State explicitly what residue remains: up to TTL seconds
+        of valid access for low-value endpoints.
+  \item \textbf{Your CI pipeline leaked a production API key into build
+        logs. Walk the first hour.}\par
+        \textbf{A.} Revoke/rotate first, investigate second --- every minute
+        of debate is exposure. Then: contain log access (the log is now a
+        credential store), enumerate what the key could do (scope audit),
+        review usage telemetry for anomalies across the exposure window,
+        rotate anything that touched the same secret store, and only then
+        write the post-mortem. The durable fixes: redaction at the shipper,
+        per-environment scoped keys, and a rehearsed runbook with a rotation
+        SLO (Section~\ref{sec:ch5-lab}).
+  \item \textbf{Compare HMAC request signing with bearer tokens for a
+        service-to-service mesh.}\par
+        \textbf{A.} HMAC: secret never on the wire, integrity per request,
+        replay needs timestamp/nonce plus a cache; cost is canonicalization
+        fragility and shared-secret management at scale. Bearer+TLS: simple,
+        composes with OAuth scopes and identity propagation, but possession
+        is proof --- theft equals impersonation until expiry. Staff answer:
+        bearer for identity propagation inside mTLS, HMAC (or
+        proof-of-possession schemes like DPoP) where the channel or the
+        storage cannot be trusted end-to-end.
+  \item \textbf{An engineer proposes validating JWTs by decoding claims
+        first to route to the right key, then verifying. Reject or
+        accept?}\par
+        \textbf{A.} Accept only in a precisely bounded form: reading
+        \texttt{iss} or \texttt{kid} \emph{to select} a key from your
+        trusted configuration is unavoidable in multi-issuer systems, but
+        every claim remains untrusted input until the signature verifies ---
+        so the selected key must come from your allow-listed map, the
+        algorithm from that key's configuration, and all authorization
+        decisions strictly after verification. Routing on unverified claims
+        for \emph{trust} decisions (not just key lookup) is the confused
+        deputy wearing a routing hat.
+  \item \textbf{How do you scope credentials under least privilege when the
+        provider offers only coarse scopes?}\par
+        \textbf{A.} Compensate at layers you control: separate credentials
+        per environment and per job; a thin internal broker that exchanges a
+        coarse token for task-shaped, short-lived downscoped ones; network
+        egress policy bounding where the credential can be used from; and
+        telemetry keyed by credential identity so each key's behavior has a
+        baseline. Document the residual risk as an accepted-risk item, not
+        a footnote.
+  \item \textbf{Explain why ``we rotate keys annually'' fails the entropy
+        argument even with perfect key generation.}\par
+        \textbf{A.} Entropy answers ``can it be guessed''; lifetime answers
+        ``how long does a leak stay useful.'' A 256-bit key leaked on day
+        one is worth 364 days of access under annual rotation. Rotation
+        cadence is a blast-radius decision: set it from exposure telemetry
+        (how fast can you detect?) and revocation cost, not from calendar
+        aesthetics. Automation is what makes a short cadence survivable.
+  \item \textbf{Design a token-broker service for untrusted developer
+        laptops.}\par
+        \textbf{A.} Developers hold only short-lived personal OIDC sessions
+        (SSO with phishing-resistant MFA); the broker --- a confidential
+        service --- holds real provider credentials, mints task-scoped
+        short-lived tokens after policy checks, logs every issuance with
+        redaction-safe audit records, and rotates its own secrets
+        continuously. Laptops never see production-grade keys, so a lost
+        laptop is an account-disable event, not a fleet rotation.
+  \item \textbf{What breaks first when you scale refresh-token rotation to
+        10{,}000 concurrent client instances?}\par
+        \textbf{A.} Thundering-herd refresh (shared TTLs synchronize
+        expiries --- add jitter), single-flight failures under partial
+        persistence (instance crashes post-rotation read as reuse ---
+        tolerate one grace refresh within seconds of rotation, as major
+        providers do), and family-revocation storms cascading into 10{,}000
+        simultaneous interactive logins. SLO the token endpoint for refresh
+        bursts, not steady state.
+  \item \textbf{Assess ``store tokens in \texttt{localStorage}'' for an
+        SPA.}\par
+        \textbf{A.} localStorage is readable by any script in the origin ---
+        every npm dependency included. The honest options: BFF pattern
+        (tokens stay server-side; the browser holds an
+        \texttt{HttpOnly; Secure; SameSite} cookie with CSRF defenses), or
+        in-memory tokens with silent refresh and accepted XSS exposure. What
+        is not acceptable is the unexamined default. Cite the trade-off in
+        the design doc; auditors and interviewers both ask.
+  \item \textbf{How would you detect algorithm-confusion regressions in a
+        large polyglot fleet?}\par
+        \textbf{A.} Continuous adversarial testing, not audits: a CI gate
+        that replays a corpus of attack tokens (\texttt{alg=none},
+        RS256$\rightarrow$HS256, \texttt{kid} traversal, foreign
+        \texttt{aud}, expired-within-huge-leeway) against every service's
+        verifier build --- Listing~\ref{lst:jwt}'s gauntlet productized ---
+        plus dependency pinning with security-update SLAs and a policy test
+        asserting each service's configured allow-list has exactly the
+        intended entries.
+  \item \textbf{Your provider rotates JWKS keys with zero overlap and your
+        fleet fails closed for 20 minutes monthly. Design the fix.}\par
+        \textbf{A.} Client-side: cache JWKS with a short TTL, refetch once
+        on unknown \texttt{kid} (rate-limited), and retry verification once
+        with refreshed keys before rejecting. Provider-side escalation:
+        publish-before-sign overlap is the industry norm; raise it as a
+        reliability defect with the failing signature windows as evidence.
+        Fleet-side: alert on \texttt{kid}-miss rate so you see the provider
+        event as an event, not as an outage.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch5-bibliography}
+
+\begin{itemize}
+  \item \textbf{RFC 6749 --- The OAuth 2.0 Authorization Framework}
+        \cite{rfc6749}. The base specification: roles, grants, token
+        endpoint, error codes. Read sections 1--4 and 10 (security
+        considerations) first.
+  \item \textbf{RFC 6750 --- OAuth 2.0 Bearer Token Usage.} How bearer
+        tokens are carried (header, body, query) and the
+        \texttt{WWW-Authenticate} error vocabulary.
+  \item \textbf{RFC 7636 --- PKCE} \cite{rfc7636}. Fourteen pages that fixed
+        public-client OAuth; the S256 transform and verifier alphabet are
+        specified precisely enough to implement in an afternoon.
+  \item \textbf{RFC 8628 --- Device Authorization Grant.} The device-code
+        flow: polling discipline, \texttt{slow\_down}, user-code design.
+  \item \textbf{RFC 7519 --- JSON Web Token} \cite{rfc7519}, with
+        \textbf{RFC 7515 (JWS)} for the signature construction and
+        \textbf{RFC 7518 (JWA)} for the algorithm registry.
+  \item \textbf{OpenID Connect Core 1.0.} ID token semantics, discovery,
+        nonce, userinfo --- read alongside RFC 6749, never instead of it.
+  \item \textbf{OWASP API Security Top 10 (2023)} \cite{owaspapisecurity}
+        and the \textbf{OWASP Cheat Sheets} (JSON Web Token, Secrets
+        Management, REST Security). The pitfall taxonomy of
+        Section~\ref{sec:ch5-pitfalls} in operational form.
+  \item \textbf{Justin Richer \& Antonio Sanso, \emph{OAuth 2 in Action}
+        (Manning, 2017).} The best prose walkthrough of the grants,
+        including the attack history behind PKCE.
+  \item \textbf{Auth0 and Okta developer documentation.} Vendor-maintained,
+        pragmatic treatments of refresh rotation, reuse detection, and SPA
+        storage trade-offs; read critically --- defaults optimize for
+        time-to-first-token, not blast radius.
+  \item \textbf{AWS Signature Version 4 documentation.} The canonical
+        reference for the signing chain reproduced in
+        Section~\ref{sec:ch5-sigv4}.
+  \item \textbf{Michael T. Nygard, \emph{Release It!}, 2nd ed.}
+        \cite{nygard2018releaseit}. Stability patterns (circuit breaker,
+        fail fast) that govern what your client does \emph{after} a 401.
+  \item \textbf{The Twelve-Factor App, factor III} \cite{twelvefactor}.
+        Config-in-environment discipline: the baseline for keeping
+        credentials out of images and source trees.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch5-capstones}
+
+All capstones run offline against local stubs, use synthetic Northwind
+Robotics fixtures only, and must be documented with PowerShell instructions.
+
+\subsection*{Capstone 5.1 --- HMAC-Signed Webhook Consumer \textbf{[junior]}}
+
+\textbf{Objective.} Build the receiving half of a signed-webhook contract: a
+local stub that verifies \texttt{X-NWR-Signature} headers on incoming
+delivery events.
+
+\textbf{Inputs/Datasets.} A synthetic JSONL file of 20 delivery events
+(order updates for fictional SKUs); a fixed synthetic shared secret; three
+deliberately corrupted events (tampered body, stale timestamp, wrong
+secret).
+
+\textbf{Steps.} (1) Implement canonical signing (method + path + timestamp +
+SHA-256 body) from Section~\ref{sec:ch5-sigv4}, simplified to a single-stage
+key. (2) Stand up a stub \texttt{http.server} verifier using
+\texttt{hmac.compare\_digest} and a 5-minute timestamp window. (3) Replay
+the 20 events; reject the 3 corrupted ones for the correct distinct reasons.
+(4) Add a replay cache keyed by signature with a 10-minute TTL.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] All 17 valid events accepted; all 3 corrupted events
+        rejected with distinct error messages.
+  \item[$\square$] Replay of a previously accepted event rejected by the
+        cache.
+  \item[$\square$] Comparison uses \texttt{hmac.compare\_digest}; no
+        \texttt{==} on secrets anywhere (grep-verifiable).
+  \item[$\square$] Runs offline; output is byte-for-byte reproducible.
+\end{itemize}
+
+\textbf{Stretch Goals.} Multi-secret key rollover (accept current and
+previous secret for 24~h); constant-time behavior measurement across
+matching/non-matching prefixes.
+
+\subsection*{Capstone 5.2 --- Full PKCE CLI \textbf{[mid]}}
+
+\textbf{Objective.} Ship a complete command-line OAuth client for the
+fictional Northwind Robotics parts API: login, call, refresh, logout ---
+against the Listing~\ref{lst:pkce} stub IdP.
+
+\textbf{Inputs/Datasets.} The stub IdP (extended with
+\texttt{/device\_authorization} if attempting the stretch); a token file
+path under the user profile; a synthetic parts dataset.
+
+\textbf{Steps.} (1) Wrap Listing~\ref{lst:pkce}'s client in a CLI with
+\texttt{login}, \texttt{parts list}, \texttt{refresh}, \texttt{logout}
+subcommands. (2) Persist tokens atomically (write temp file, then rename)
+with owner-only ACL. (3) Integrate Listing~\ref{lst:tokencache}'s cache for
+proactive, single-flight refresh. (4) Handle family revocation by falling
+back to a fresh login flow with a clear message --- never a retry loop.
+(5) Install the redaction filter before any logging.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] \texttt{login} performs the full PKCE exchange and stores
+        tokens with owner-only permissions.
+  \item[$\square$] Expired access tokens are refreshed proactively; 8
+        concurrent invocations cause exactly one refresh call.
+  \item[$\square$] Replaying a retired refresh token (simulated) revokes the
+        family and the CLI re-authenticates cleanly.
+  \item[$\square$] No token material appears in any log output (tested by
+        scraping stderr).
+\end{itemize}
+
+\textbf{Stretch Goals.} Device-code login mode; OS keychain storage via
+\texttt{keyring} with file fallback.
+
+\subsection*{Capstone 5.3 --- JWT Security Linter \textbf{[mid]}}
+
+\textbf{Objective.} Build a static analyzer that flags the JWT-handling
+anti-patterns of Section~\ref{sec:ch5-pitfalls} in Python source.
+
+\textbf{Inputs/Datasets.} A corpus of 12 synthetic ``client'' files seeded
+with known violations (accepting any \texttt{alg}, missing \texttt{exp}
+check, unbounded leeway, \texttt{==} on signatures, tokens logged, tokens in
+URLs) and 3 clean files.
+
+\textbf{Steps.} (1) Use the \texttt{ast} module to find \texttt{jwt.decode}
+calls and verifier constructions; extract the effective algorithm set and
+claim checks. (2) Emit findings as structured records (file, line, rule id,
+severity, one-line fix). (3) Define exit codes: 0 clean, 1 findings.
+(4) Validate against the corpus: every seeded violation found, zero false
+positives on clean files.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Detects at least the six named rule categories with file
+        and line attribution.
+  \item[$\square$] Zero false positives on the clean corpus files.
+  \item[$\square$] Findings output is deterministic (sorted, stable).
+  \item[$\square$] Each rule cites the chapter subsection or OWASP category
+        it enforces~\cite{owaspapisecurity}.
+\end{itemize}
+
+\textbf{Stretch Goals.} Auto-fix mode for the mechanical rules
+(\texttt{==} $\rightarrow$ \texttt{compare\_digest}); \texttt{pre-commit}
+integration instructions.
+
+\subsection*{Capstone 5.4 --- Token-Broker Service \textbf{[senior]}}
+
+\textbf{Objective.} Implement the broker from Q29: a local service that
+exchanges developer identity (a stub OIDC login) for short-lived,
+task-scoped tokens --- so developer processes never hold long-lived
+credentials.
+
+\textbf{Inputs/Datasets.} A stub IdP issuing HS256 ID tokens; a policy file
+mapping fictional roles (\texttt{parts-reader}, \texttt{parts-writer}) to
+allowed scopes; a stub resource API enforcing scopes.
+
+\textbf{Steps.} (1) Broker endpoint validates the ID token with
+Listing~\ref{lst:jwt}'s verifier (issuer, audience, exp, allow-list).
+(2) Policy engine downscopes: requested scope $\cap$ role scope, TTL capped
+at 15 minutes. (3) Issue task tokens; log issuance through the redaction
+filter with \texttt{jti} recorded. (4) Resource API verifies task tokens and
+rejects escalated or expired ones. (5) Chaos test: kill the broker
+mid-refresh; clients must fail fast with actionable errors, not hang or
+retry-storm~\cite{nygard2018releaseit}.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] End-to-end: login $\rightarrow$ broker $\rightarrow$
+        scoped call succeeds; scope escalation attempt rejected.
+  \item[$\square$] No long-lived secret exists in any client process or
+        file (demonstrated by inspection test).
+  \item[$\square$] Issuance audit log contains \texttt{sub}, \texttt{jti},
+        scope, expiry --- and zero token material.
+  \item[$\square$] Broker outage produces bounded, observable client
+        failure (one retry, then exit code 2).
+\end{itemize}
+
+\textbf{Stretch Goals.} \texttt{jti} blocklist revocation endpoint with
+propagation measurement; RS256 issuance using \texttt{cryptography}.
+
+\subsection*{Capstone 5.5 --- Red-Team Your Own Client \textbf{[staff]}}
+
+\textbf{Objective.} Adversarially review the chapter's own code --- and your
+Capstone 5.2/5.4 artifacts --- then land the fixes.
+
+\textbf{Inputs/Datasets.} Listings \ref{lst:hmac}--\ref{lst:algconfusion};
+your capstone artifacts; a written threat model template (assets, trust
+boundaries, abuse cases).
+
+\textbf{Steps.} (1) Build the attack corpus: timing oracles, replay within
+leeway, \texttt{kid} confusion, multi-valued query canonicalization
+mismatch, refresh-family false positives, redaction bypasses. (2) Execute
+each against the listings; record succeed/fail with evidence. (3) For each
+success, land the minimal fix and a regression test. (4) Write the review
+report: finding, severity, blast radius, fix, residual risk. (5) Convert
+the corpus into a CI gate that fails the build on regression.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Threat model document with at least 6 abuse cases traced
+        to code.
+  \item[$\square$] At least 3 genuine findings in the chapter listings (they
+        exist --- the stubs simplify for pedagogy), each with fix and test.
+  \item[$\square$] The CI gate demonstrably fails on a reintroduced
+        vulnerability and passes on the fixed tree.
+  \item[$\square$] Report quantifies residual risk for each accepted
+        finding.
+\end{itemize}
+
+\textbf{Stretch Goals.} Differential testing of your verifier against
+\texttt{pyjwt} on 10{,}000 fuzzed tokens; a short internal
+``lessons learned'' writeup suitable for an engineering blog.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch5-dependencies}
+
+Every listing in this chapter runs on the Python 3.11+ \textbf{standard
+library alone}; the packages below are what you adopt when graduating the
+patterns to production. The chapter's pinned \texttt{requirements.txt}:
+
+\begin{minted}{text}
+# Chapter 5 production stack (chapter listings themselves are stdlib-only)
+pyjwt>=2.8,<3          # JWT encode/decode with JWKS support
+cryptography>=42       # real RSA/EC signatures (RS256/ES256 verification)
+httpx>=0.27,<1         # modern HTTP client with timeouts and auth middleware
+keyring>=25            # optional: OS keychain storage for tokens
+\end{minted}
+
+\subsection{pyjwt}
+
+\textbf{Description.} The de-facto Python JWT library: encode/decode, claim
+validation, algorithm allow-lists, JWKS client.
+
+\textbf{Why included.} Listing~\ref{lst:jwt} is deliberately hand-rolled to
+expose the verification order; production code must inherit a maintained
+library's security response. \texttt{pyjwt} makes the safe order the
+default: \texttt{algorithms=["RS256"]} is mandatory, \texttt{none} is
+rejected, and \texttt{leeway} is a first-class parameter.
+
+\textbf{Alternatives.} \texttt{authlib} (broader: full OAuth/OIDC client and
+server); \texttt{python-jose} (historically common, less actively
+maintained).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "pyjwt>=2.8,<3"
+python -m pip install "pyjwt[crypto]"   # adds cryptography for RS256
+\end{minted}
+
+\subsection{cryptography}
+
+\textbf{Description.} The Python binding to vetted cryptographic primitives
+(RSA, EC, Ed25519, X.509).
+
+\textbf{Why included.} The standard library has no asymmetric crypto ---
+Listing~\ref{lst:algconfusion}'s toy RSA exists precisely to mark that gap.
+Real RS256/ES256 verification, and any JWE work, goes through this package.
+
+\textbf{Alternatives.} \texttt{pyca/cryptography} is effectively the
+consensus choice; \texttt{pynacl} covers a different (NaCl) primitive set.
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "cryptography>=42"
+\end{minted}
+
+\subsection{httpx}
+
+\textbf{Description.} A modern sync/async HTTP client: connection pooling,
+strict timeouts, middleware-friendly auth hooks, HTTP/2.
+
+\textbf{Why included.} Chapter 2 used \texttt{urllib} for pedagogy;
+production OAuth clients need enforced timeouts (a hung token endpoint must
+not hang your refresh path), automatic retries with backoff, and an auth
+middleware seam where Listing~\ref{lst:tokencache}'s cache plugs in.
+
+\textbf{Alternatives.} \texttt{requests} (sync-only, ubiquitous);
+\texttt{aiohttp} (async-first); stdlib \texttt{urllib} (no dependencies, no
+ergonomics).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "httpx>=0.27,<1"
+\end{minted}
+
+\subsection{keyring (optional)}
+
+\textbf{Description.} Cross-platform access to OS credential stores:
+Windows Credential Manager, macOS Keychain, Linux Secret Service.
+
+\textbf{Why included.} Section~\ref{sec:ch5-storage}'s matrix ranks the OS
+keychain above files for CLI token storage; \texttt{keyring} is the uniform
+API. Optional because headless CI environments usually have no keychain ---
+fall back to ACL-restricted files or injected environment variables.
+
+\textbf{Alternatives.} Per-OS APIs via \texttt{ctypes}/shelling out (do
+not); cloud secret managers (heavier, network-bound).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "keyring>=25"
+\end{minted}
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch5-summary}
+
+\begin{itemize}
+  \item \textbf{Placement is destiny.} Credentials in URLs end up in logs;
+        credentials in headers do not. Header placement, TLS, and redaction
+        filters are the baseline, not the hardening.
+  \item \textbf{Canonicalization is the signature.} HMAC request signing
+        (SigV4) derives its strength from deterministic canonical form plus
+        a domain-separated key-derivation chain; tamper with any byte and
+        verification fails closed (Listing~\ref{lst:hmac}).
+  \item \textbf{Match the grant to the topology.} Public clients:
+        authorization code + PKCE (43--128 char verifier, S256 challenge).
+        Daemons: client credentials. Constrained devices: device code.
+        Implicit: never again~\cite{rfc6749,rfc7636}.
+  \item \textbf{Refresh is a distributed-systems problem.} Proactive refresh
+        inside a skew window, single-flight under concurrency, rotation with
+        family revocation on reuse --- and atomic persistence, or your own
+        crash reads as theft.
+  \item \textbf{Verify in order or not at all.} Parse structure, enforce
+        the \emph{configured} algorithm allow-list, verify the signature
+        with constant-time comparison, then validate claims with bounded
+        leeway. Any other order reads attacker-controlled data as truth
+        (Listings \ref{lst:jwt} and \ref{lst:algconfusion}).
+  \item \textbf{JWTs expire; they do not revoke.} Stateless verification
+        trades a revocation gap for scale. Close the gap with short TTLs,
+        rotation, and targeted \texttt{jti} blocklists.
+  \item \textbf{Leaks are ``when.''} Pre-bound the blast radius
+        (least-privilege, per-environment keys), rehearse the rotation
+        runbook, and never let a credential reach a log pipeline.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch5-quickref}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Client topology} & \textbf{Grant} \\
+\midrule
+Server-side web app (can hold a secret) & Authorization code (+PKCE for defense in depth) \\
+SPA / mobile / CLI (public client) & Authorization code + PKCE, no secret \\
+Daemon, CI job, service account & Client credentials, narrowest scope \\
+TV, console, headless device & Device code (RFC 8628) \\
+First-party password prompt & Migrate to code+PKCE; never roll your own \\
+Legacy implicit deployment & Security remediation: migrate to code+PKCE \\
+\bottomrule
+\end{tabularx}
+\caption{Grant-selection table.}
+\label{tab:ch5-grants}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{c X}
+\toprule
+\textbf{\#} & \textbf{JWT validation checklist (in order)} \\
+\midrule
+1 & Exactly three segments; base64url decodes; header/payload are JSON objects. \\
+2 & \texttt{alg} in configured allow-list; \texttt{none} rejected; alg matches configured key type. \\
+3 & \texttt{kid} resolves in your trusted JWKS map (one rate-limited refetch on miss). \\
+4 & Signature verifies, constant-time comparison. \\
+5 & \texttt{exp} present, $\textit{now} \le \textit{exp} + \textit{leeway}$. \\
+6 & \texttt{nbf}/\texttt{iat} sane within the same leeway. \\
+7 & \texttt{iss} exact match; \texttt{aud} contains you. \\
+8 & Only now: authorization decisions from claims. \\
+\bottomrule
+\end{tabularx}
+\caption{The only safe JWT validation order.}
+\label{tab:ch5-jwtcheck}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l l l X}
+\toprule
+\textbf{Context} & \textbf{First choice} & \textbf{Fallback} & \textbf{Never} \\
+\midrule
+CI/CD pipeline & Secret manager / OIDC federation & Scoped env var injection & Secrets in repo, logs, images \\
+Developer CLI & OS keychain & 0600-style ACL file outside repo & Dotfiles, shell history \\
+Server daemon & Secret manager & Env var via orchestrator & Config files in image \\
+Browser SPA & BFF server-side session & In-memory + silent refresh & localStorage without documented analysis \\
+\bottomrule
+\end{tabularx}
+\caption{Credential storage matrix.}
+\label{tab:ch5-storagematrix}
+\end{table}
+
+\input{chapters/_standard_addendum}
+

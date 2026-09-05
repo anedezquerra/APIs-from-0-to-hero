@@ -1,0 +1,28 @@
+openapi: 3.1.0
+info:
+  title: Legacy Widgets API
+  version: "v3"
+paths:
+  /widgets:
+    get:
+      summary: List widgets
+      responses:
+        "200":
+          description: Widgets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+components:
+  schemas:
+    Widget:
+      type: object

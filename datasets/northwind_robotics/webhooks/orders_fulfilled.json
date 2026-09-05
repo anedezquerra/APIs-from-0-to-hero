@@ -1,0 +1,13 @@
+{
+  "name": "orders.fulfilled",
+  "description": "An order was fulfilled at a warehouse (valid signature).",
+  "scheme": "HMAC-SHA256 over '<timestamp>.<body>'; header X-Northwind-Signature: t=<ts>,v1=<hex>",
+  "signing_key_file": "TEST-ONLY_signing_key.txt",
+  "timestamp": 1772323200,
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Northwind-Signature": "t=1772323200,v1=e69fae2b2b735b17aa5b10637f5e3ab92beb259c7f4ddc8df58880263b837ee5"
+  },
+  "body": "{\"id\":\"evt_01JNRWT0002SYNTHETIC000002\",\"type\":\"orders.fulfilled\",\"created\":\"2026-03-01T00:00:00Z\",\"data\":{\"order_id\":\"O-100017\",\"warehouse_id\":\"W-01\",\"shipped_lines\":3,\"carrier\":\"Northwind Freight (fictional)\"}}",
+  "expected_verification": "pass"
+}

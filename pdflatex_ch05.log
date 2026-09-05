@@ -1,0 +1,4286 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (MiKTeX 26.5) (preloaded format=pdflatex.fmt)
+ restricted \write18 enabled.
+entering extended mode
+(main.tex
+LaTeX2e <2026-06-01>
+L3 programming layer <2026-06-18>
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/base\book.cls
+Document Class: book 2025/01/22 v1.4n Standard LaTeX document class
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/base\bk12.clo))
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/babel\babel.s
+ty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/babel\txtbabe
+l.def)
+*************************************
+* Local config file bblopts.cfg used
+*
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/arabi\bblopts.c
+fg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/babel/locale/
+en\babel-english.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/babel-english\e
+nglish.ldf))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/base\fontenc.st
+y)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/geometry\geomet
+ry.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics\keyval
+.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/iftex\ifvtex.
+sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/iftex\iftex.s
+ty))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/geometry\geomet
+ry.cfg))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/microtype\micro
+type.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/etoolbox\etoolb
+ox.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/microtype\micro
+type-pdftex.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/microtype\micro
+type.cfg))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\lmodern.sty)
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsmath
+.sty
+For additional information on amsmath, use the `?' option.
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amstext
+.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsgen.
+sty))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsbsy.
+sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsmath\amsopn.
+sty))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsfonts\amssym
+b.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsfonts\amsfon
+ts.sty))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amscls\amsthm.s
+ty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics\graphi
+cx.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics\graphi
+cs.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics\trig.s
+ty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics-cfg\gr
+aphics.cfg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics-def\pd
+ftex.def)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/frontendlay
+er\tikz.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/basiclayer\
+pgf.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/utilities\p
+gfrcs.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgfutil-common.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgfutil-latex.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgfrcs.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf\pgf.revis
+ion.tex)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/basiclayer\
+pgfcore.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/systemlayer
+\pgfsys.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlay
+er\pgfsys.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgfkeys.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgfkeyslibraryfiltered.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlay
+er\pgf.cfg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlay
+er\pgfsys-pdftex.def
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlay
+er\pgfsys-common-pdf.def)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlay
+er\pgfsyssoftpath.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/systemlay
+er\pgfsysprotocol.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/xcolor\xcolor.s
+ty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics-cfg\co
+lor.cfg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics\mathco
+lor.ltx))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcore.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+ath.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athutil.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athparser.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.basic.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.trigonometric.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.random.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.comparison.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.base.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.round.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.misc.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfunctions.integerarithmetics.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athcalc.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+athfloat.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfi
+nt.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorepoints.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorepathconstruct.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorepathusage.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorescopes.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoregraphicstate.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoretransformations.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorequick.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoreobjects.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorepathprocessing.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorearrows.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoreshade.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoreimage.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoreexternal.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorelayers.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcoretransparency.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorepatterns.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/basiclaye
+r\pgfcorerdf.code.tex)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/modules\p
+gfmoduleshapes.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/modules\p
+gfmoduleplot.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/compatibili
+ty\pgfcomp-version-0-65.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/compatibili
+ty\pgfcomp-version-1-18.sty))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/utilities\p
+gffor.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/utilities\p
+gfkeys.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgfkeys.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgf/math\pgfmat
+h.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/math\pgfm
+ath.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/utilities
+\pgffor.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz\tikz.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+\pgflibraryplothandlers.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/modules\p
+gfmodulematrix.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibrarytopaths.code.tex)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pgfplots\pgfplo
+ts.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lots.revision.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lots.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotscore.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/sys\
+pgfplotssysgeneric.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/libs
+\pgfplotslibrary.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/oldp
+gfcompatib\pgfplotsoldpgfsupp_loader.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+\pgflibraryfpu.code.tex)
+Package pgfplots: loading complementary utilities for your pgf version...
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/oldp
+gfcompatib\pgfplotsoldpgfsupp_pgfutil-common-lists.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/util
+\pgfplotsutil.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/list
+structure\pgfplotsliststructure.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/list
+structure\pgfplotsliststructureext.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/list
+structure\pgfplotsarray.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/list
+structure\pgfplotsmatrix.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/numt
+able\pgfplotstableshared.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/list
+structure\pgfplotsdeque.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/util
+\pgfplotsbinary.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/util
+\pgfplotsbinary.data.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/util
+\pgfplotsutil.verb.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/libs
+\pgflibrarypgfplots.surfshading.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/sys\
+pgflibrarypgfplots.surfshading.pgfsys-pdftex.def)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/util
+\pgfplotscolormap.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/util
+\pgfplotscolor.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotsstackedplots.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotsplothandlers.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotsmeshplothandler.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotsmeshplotimage.code.tex)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lots.scaling.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotscoordprocessing.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lots.errorbars.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lots.markers.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lotsticks.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots\pgfp
+lots.paths.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibrarydecorations.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/modules\p
+gfmoduledecorations.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibrarydecorations.pathmorphing.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/decorations\pgflibrarydecorations.pathmorphing.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibrarydecorations.pathreplacing.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/decorations\pgflibrarydecorations.pathreplacing.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgfplots/libs
+\tikzlibrarypgfplots.contourlua.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryplotmarks.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+\pgflibraryplotmarks.code.tex)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.geometric.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/shapes\pgflibraryshapes.geometric.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.misc.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/shapes\pgflibraryshapes.misc.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.symbols.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/shapes\pgflibraryshapes.symbols.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.arrows.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/shapes\pgflibraryshapes.arrows.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.callouts.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/shapes\pgflibraryshapes.callouts.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryshapes.multipart.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+/shapes\pgflibraryshapes.multipart.code.tex)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryarrows.code.tex
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/libraries
+\pgflibraryarrows.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibrarypositioning.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibrarycalc.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pgf/frontendl
+ayer/tikz/libraries\tikzlibraryfit.code.tex)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/graphics\dvipsn
+am.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/xstring\xstring
+.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/xstring\xstri
+ng.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/listings\listin
+gs.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/listings\lstpat
+ch.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/listings\lstmis
+c.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/listings\listin
+gs.cfg))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/fancyhdr\fancyh
+dr.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\hyperr
+ef.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/kvsetkeys\kvset
+keys.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/kvdefinekeys\
+kvdefinekeys.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pdfescape\pdf
+escape.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/ltxcmds\ltxcm
+ds.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/pdftexcmds\pd
+ftexcmds.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/infwarerr\inf
+warerr.sty)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/hycolor\hycolor
+.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\namere
+f.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/refcount\refcou
+nt.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/gettitlestrin
+g\gettitlestring.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/kvoptions\kvopt
+ions.sty)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/stringenc\str
+ingenc.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\pd1enc
+.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/intcalc\intca
+lc.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\puenc.
+def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/url\url.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/bitset\bitset
+.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/bigintcalc\bi
+gintcalc.sty)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/hyperref\hpdfte
+x.def
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/rerunfilecheck\
+rerunfilecheck.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/generic/uniquecounter
+\uniquecounter.sty)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tools\array.sty
+)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/booktabs\bookta
+bs.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/multirow\multir
+ow.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tools\tabularx.
+sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/enumitem\enumit
+em.sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tcolorbox\tcolo
+rbox.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tools\verbatim.
+sty)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/environ\environ
+.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/trimspaces\trim
+spaces.sty)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tcolorbox\tcbbr
+eakable.code.tex
+Library (tcolorbox): 'tcbbreakable.code.tex' version '6.10.0'
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/pdfcol\pdfcol.s
+ty))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tcolorbox\tcbsk
+ins.code.tex
+Library (tcolorbox): 'tcbskins.code.tex' version '6.10.0'
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tikzfill\tikzfi
+ll.image.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tikzfill\tikzli
+braryfill.image.code.tex))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/tcolorbox\tcbsk
+insjigsaw.code.tex
+Library (tcolorbox): 'tcbskinsjigsaw.code.tex' version '6.10.0'
+))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex\biblat
+ex.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/logreq\logreq.s
+ty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/logreq\logreq.d
+ef))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/base\ifthen.sty
+)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex\blx-dm
+.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex\blx-co
+mpat.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex\biblat
+ex.def)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex/bbx\al
+phabetic.bbx
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex/bbx\st
+andard.bbx))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex/cbx\al
+phabetic.cbx)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex\biblat
+ex.cfg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/l3kernel\expl3.
+sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/l3backend\l3bac
+kend-pdftex.def))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex\blx-ca
+se-expl3.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/l3packages/xpar
+se\xparse.sty)))
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/appendix\append
+ix.sty)
+
+Package biblatex Warning: 'babel/polyglossia' detected but 'csquotes' missing.
+(biblatex)                Loading 'csquotes' recommended.
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\t1lmr.fd)
+(main.aux)
+*geometry* driver: auto-detecting
+*geometry* detected driver: pdftex
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-cm
+r.cfg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/context/base/mkii\sup
+p-pdf.mkii
+[Loading MPS to PDF converter (version 2006.09.02).]
+)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/epstopdf-pkg\ep
+stopdf-base.sty
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/00miktex\epstop
+df-sys.cfg))
+Package pgfplots notification 'compat/show suggested version=true': you might b
+enefit from \pgfplotsset{compat=1.18} (current compat level: 1.17).
+
+(main.out) (main.out)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/biblatex/lbx\en
+glish.lbx) (main.bbl)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\ts1lmr.fd)
+[1{C:/Users/aned.esquerra/AppData/Local/MiKTeX/fonts/map/pdftex/pdftex.map}{C:/
+Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-ec.enc}
+{C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-ts1
+.enc}] [2] (main.toc
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\ot1lmr.fd)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\omllmm.fd)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\omslmsy.fd)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\omxlmex.fd)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsfonts\umsa.f
+d)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-ms
+a.cfg)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/amsfonts\umsb.f
+d)
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/microtype\mt-ms
+b.cfg) [3]
+Overfull \hbox (0.41351pt too wide) in paragraph at lines 103--103
+ [] [][][]\T1/lmr/bx/n/12 (-20) The HTTP Wire Pro-to-col: HTTP/1.1, HTTP/2 & HT
+TP/3[][] []  
+[4] [5{C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/
+lm-mathsy.enc}] [6] [7] [8] [9{C:/Users/aned.esquerra/AppData/Local/Programs/Mi
+KTeX/fonts/enc/dvips/lm/lm-rm.enc}]
+Overfull \hbox (12.92958pt too wide) in paragraph at lines 407--407
+ [][] [][][]\T1/lmr/m/n/12 (-20) Listing 5.5 --- Ed-u-ca-tional At-tack Demo: R
+S256$\OMS/lmsy/m/n/12 !$\T1/lmr/m/n/12 (-20) HS256 
+[10] [11] [12]
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/lm\t1lmtt.fd)
+[13]
+Overfull \hbox (0.43004pt too wide) in paragraph at lines 582--582
+ [][] [][][]\T1/lmr/m/n/12 (-20) Listing 2: Three Pag-i-na-tion Strate-gies in 
+One FastAPI 
+[14]
+Overfull \hbox (1.87735pt too wide) in paragraph at lines 640--640
+ [][] [][][]\T1/lmr/m/n/12 (-20) Evolution Me-chan-ics: Expand-and-Contract and
+ Dual- 
+[15]
+Overfull \hbox (17.4394pt too wide) in paragraph at lines 685--685
+ [] [][][]\T1/lmr/bx/n/12 (-20) Placeholder: chap-ter_10_idempotency_caching_co
+ncurrency[][] []  
+[16]) [17] [18] (main.lof
+Underfull \vbox (badness 10000) has occurred while \output is active [19{C:/Use
+rs/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-mathit.enc
+}] [20])
+Underfull \vbox (badness 10000) has occurred while \output is active [21]
+[22] (main.lot [23] [24]) [25] [26] (chapters/chapter_00_introduction.tex
+Chapter 1.
+[1] [2]
+Overfull \hbox (16.07436pt too wide) in paragraph at lines 86--89
+[]\T1/lmr/m/n/12 (-20) Measure client-observed la-tency cor-rectly us-ing per-c
+entiles (p50/p95/p99),
+[3]
+Underfull \hbox (badness 1019) in paragraph at lines 173--173
+\T1/lmr/m/n/10.95 (+20) po-tent pipelines, web-hooks/streams, and back-pres-sur
+e;
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[4]
+Overfull \hbox (64.2176pt too wide) in paragraph at lines 196--200
+\T1/lmr/m/n/12 (-20) the virtual-environment ac-ti-va-tion script is writ-ten \
+T1/lmtt/m/n/12 .venv\Scripts\Activate.ps1\T1/lmr/m/n/12 (-20) ;
+
+Underfull \vbox (badness 10000) has occurred while \output is active [5]
+[6]
+Underfull \hbox (badness 10000) in paragraph at lines 281--290
+[]\T1/lmr/bx/n/12 (+20) Northwind Robotics. \T1/lmr/m/n/12 (+20) North-wind bui
+lds ware-house
+
+Underfull \hbox (badness 6110) in paragraph at lines 281--290
+\T1/lmr/m/n/12 (+20) robots. Its teleme-try plat-form (ca-pa-bil-ity) ex-poses 
+\T1/lmtt/m/n/12 GET
+
+Underfull \hbox (badness 10000) in paragraph at lines 281--290
+\T1/lmtt/m/n/12 /v1/robots/{id}/telemetry \T1/lmr/m/n/12 (+20) (in-ter-face), p
+ub-lished through
+[7]
+Underfull \hbox (badness 1496) in paragraph at lines 358--358
+\T1/lmr/m/n/10.95 (+20) shake tim-ing, load-balancer
+
+Underfull \hbox (badness 10000) in paragraph at lines 358--358
+[]|\T1/lmr/m/n/10.95 (+20) Schema-diff gates in CI,
+
+Underfull \hbox (badness 10000) in paragraph at lines 358--358
+\T1/lmr/m/n/10.95 (+20) consumer-driven con-tract
+[8]
+Overfull \hbox (1.46361pt too wide) in paragraph at lines 389--392
+[]\T1/lmr/m/n/12 (-20) OpenAPI/JSON Schema ar-ti-facts are gen-
+
+Overfull \hbox (34.45578pt too wide) in paragraph at lines 424--427
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[9] [10]
+Underfull \hbox (badness 10000) in paragraph at lines 513--513
+[]|\T1/lmr/m/n/10.95 (+20) Secures typed, contract-aware
+
+Underfull \hbox (badness 10000) in paragraph at lines 513--513
+[]|\T1/lmr/m/n/10.95 (+20) Compatibility is de-fined over
+
+Underfull \hbox (badness 10000) in paragraph at lines 513--513
+[]|\T1/lmr/m/n/10.95 (+20) Webhooks/SSE/WebSockets ex-
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (2.08551pt too wide) in paragraph at lines 531--534
+[]\T1/lmr/m/n/12 (-20) An edge gate-way routes to mul-
+
+Package pgf Warning: Returning node center instead of a point on node border. D
+id you specify a point identical to the center of node ``bus''? on input line 5
+69.
+
+
+Overfull \hbox (68.96664pt too wide) in paragraph at lines 574--577
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \hbox (badness 4366) in paragraph at lines 619--619
+[]|\T1/lmr/m/n/10.95 (+20) Downstream fan-out; query
+[11]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[12] [13]
+Overfull \hbox (0.28754pt too wide) in paragraph at lines 699--701
+[]\T1/lmr/m/n/12 (-20) Python 3.11+ on Win-dows with Pow-er-Shell; com-mands ar
+e PowerShell-
+
+Underfull \hbox (badness 1297) in paragraph at lines 729--729
+[]|\T1/lmr/m/n/10.95 (+20) Chapters state ex-actly
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[14]
+Overfull \hbox (6.22876pt too wide) in paragraph at lines 772--776
+\T1/lmtt/m/n/12 CurrentUser RemoteSigned \T1/lmr/m/n/12 (-20) once, or in-voke 
+\T1/lmtt/m/n/12 .\.venv\Scripts\python.exe
+
+(C:\Users\aned.esquerra\AppData\Local\Programs\MiKTeX\tex/latex/listings\lstlan
+g1.sty) [15]
+Underfull \vbox (badness 10000) has occurred while \output is active [16]
+[17] [18]
+Underfull \vbox (badness 10000) has occurred while \output is active [19]
+Underfull \vbox (badness 10000) has occurred while \output is active [20]
+Underfull \vbox (badness 10000) has occurred while \output is active [21]
+Underfull \vbox (badness 10000) has occurred while \output is active [22]
+[23]
+Underfull \vbox (badness 10000) has occurred while \output is active [24]
+Underfull \vbox (badness 10000) has occurred while \output is active [25]
+Underfull \vbox (badness 10000) has occurred while \output is active [26]
+Underfull \vbox (badness 10000) has occurred while \output is active [27]
+Underfull \vbox (badness 10000) has occurred while \output is active [28]
+Overfull \hbox (29.0927pt too wide) in paragraph at lines 1327--1331
+[]\T1/lmr/m/n/12 (-20) Matching on \T1/lmtt/m/n/12 "something went wrong"
+
+Overfull \hbox (1.41687pt too wide) in paragraph at lines 1350--1353
+[]\T1/lmr/m/n/12 (-20) Items in-serted while a con-
+[29]
+Overfull \hbox (0.93344pt too wide) in paragraph at lines 1386--1390
+[]\T1/lmr/m/n/12 (-20) It means the server pro-duced a re-sponse
+
+Overfull \hbox (22.00273pt too wide) in paragraph at lines 1390--1394
+[]\T1/lmr/m/n/12 (-20) Internal con-sumers
+[30]
+Overfull \hbox (4.67838pt too wide) in paragraph at lines 1405--1408
+[]\T1/lmr/m/n/12 (-20) Averages hide the tail where
+
+Overfull \hbox (8.57362pt too wide) in paragraph at lines 1408--1411
+[]\T1/lmr/m/n/12 (-20) Only gen-er-ated ar-ti-facts stay
+
+Overfull \hbox (11.2854pt too wide) in paragraph at lines 1447--1447
+[]|\T1/lmtt/m/n/10.95 ConnectionRefusedError
+
+Underfull \hbox (badness 3343) in paragraph at lines 1447--1447
+\T1/lmr/m/n/10.95 (+20) bound to a dif-fer-ent
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+[]|\T1/lmtt/m/n/10.95 Test-NetConnection
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+\T1/lmtt/m/n/10.95 127.0.0.1 -Port 8000
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+\T1/lmr/m/n/10.95 (+20) server ac-cepted but
+
+Underfull \hbox (badness 2310) in paragraph at lines 1447--1447
+[]|\T1/lmr/m/n/10.95 (+20) Add/verify con-nect +
+
+Underfull \hbox (badness 3557) in paragraph at lines 1447--1447
+\T1/lmr/m/n/10.95 (+20) read time-outs; check
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+[]|\T1/lmr/m/n/10.95 (+20) Intermittent
+
+Underfull \hbox (badness 2088) in paragraph at lines 1447--1447
+[]|\T1/lmr/m/n/10.95 (+20) Server closed an idle
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+\T1/lmr/m/n/10.95 (+20) keep-alive con-nec-tion
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+[]|\T1/lmr/m/n/10.95 (+20) Missing or wrong
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+\T1/lmr/m/n/10.95 (+20) (proxy HTML page,
+
+Underfull \hbox (badness 1902) in paragraph at lines 1447--1447
+[]|\T1/lmr/m/n/10.95 (+20) Decompose per Equa-
+
+Underfull \hbox (badness 1371) in paragraph at lines 1447--1447
+\T1/lmr/m/n/10.95 (+20) thread-pool star-va-tion,
+
+Underfull \hbox (badness 10000) in paragraph at lines 1447--1447
+[]|\T1/lmr/m/n/10.95 (+20) Count open sock-ets;
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (33.13966pt too wide) in paragraph at lines 1479--1482
+[]\T1/lmr/m/n/12 (-20) Expect the sum-mary keys (\T1/lmtt/m/n/12 p50_ms\T1/lmr/
+m/n/12 (-20) , \T1/lmtt/m/n/12 p95_ms\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 p99
+_ms\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 errors\T1/lmr/m/n/12 (-20) , \T1/lmtt
+/m/n/12 throughput_rps\T1/lmr/m/n/12 (-20) )
+[31] [32] [33] [34]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[35]
+Overfull \hbox (8.94556pt too wide) in paragraph at lines 1702--1706
+[]\T1/lmr/bx/n/12 (-20) [junior] Ex-tend the mini API. \T1/lmr/m/n/12 (-20) Add
+ \T1/lmtt/m/n/12 GET /v1/parts?in_stock=true
+
+Underfull \vbox (badness 10000) has occurred while \output is active [36]
+[37]
+Underfull \vbox (badness 10000) has occurred while \output is active [38]
+Underfull \vbox (badness 10000) has occurred while \output is active [39]
+Underfull \vbox (badness 10000) has occurred while \output is active [40]
+Underfull \vbox (badness 10000) has occurred while \output is active [41]
+[42] [43] [44] [45] [46] [47] [48] [49]
+Underfull \hbox (badness 10000) in paragraph at lines 2361--2361
+[]|\T1/lmtt/m/n/10.95 python -m venv .venv \T1/lmr/m/n/10.95 (+20) then
+
+Underfull \hbox (badness 10000) in paragraph at lines 2361--2361
+\T1/lmtt/m/n/10.95 .\.venv\Scripts\Activate.ps1\T1/lmr/m/n/10.95 (+20) ; run th
+e san-ity
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+(chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[50]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \vbox (badness 10000) has occurred while \output is active [51]))
+(chapters/chapter_01_http_wire_protocol.tex [52] [53] [54] [55] [56] [57]
+[58]
+Chapter 2.
+
+Underfull \vbox (badness 1226) has occurred while \output is active [59]
+[60] [61] [62]
+Overfull \hbox (11.4897pt too wide) in paragraph at lines 99--100
+\T1/lmr/m/n/12 (-20) makes con-nec-tions \T1/lmr/m/it/12 (-20) per-sis-tent by 
+de-fault \T1/lmr/m/n/12 (-20) [[][]Fie22b[][]]. A client de-clares \T1/lmtt/m/n
+/12 Connection:
+[63]
+Underfull \hbox (badness 3229) in paragraph at lines 128--128
+[]|\T1/lmr/m/n/10.95 (+20) Replace the tar-get re-
+
+Underfull \hbox (badness 3049) in paragraph at lines 128--128
+[]|\T1/lmr/m/n/10.95 (+20) Remove the tar-get re-
+
+Underfull \hbox (badness 10000) in paragraph at lines 128--128
+[]|\T1/lmr/m/n/10.95 (+20) Loop-back di-ag-nos-tic
+
+Underfull \hbox (badness 10000) in paragraph at lines 153--153
+[]|\T1/lmr/m/n/10.95 (+20) 401 = unau-then-ti-cated (send
+[64]
+Overfull \hbox (10.94073pt too wide) in paragraph at lines 165--166
+\T1/lmtt/m/n/12 application/json;q=1.0, text/csv;q=0.5, */*;q=0.1\T1/lmr/m/n/12
+ (-20) . The server
+[65]
+Overfull \hbox (13.96133pt too wide) in paragraph at lines 167--168
+[]\T1/lmtt/b/n/12 Cache-Control \T1/lmr/m/n/12 (-20) --- di-rec-tives such as \
+T1/lmtt/m/n/12 no-store \T1/lmr/m/n/12 (-20) (never per-sist), \T1/lmtt/m/n/12 
+no-cache
+
+Overfull \hbox (32.15294pt too wide) in paragraph at lines 167--168
+\T1/lmr/m/n/12 (-20) (reval-i-date ev-ery time), \T1/lmtt/m/n/12 max-age=60\T1/
+lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 private \T1/lmr/m/n/12 (-20) vs. \T1/lmtt/m/
+n/12 public\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 must-revalidate\T1/lmr/m/n/12
+ (-20) .
+
+Overfull \hbox (137.01013pt too wide) in paragraph at lines 168--169
+[]\T1/lmr/bx/n/12 (-20) CORS pre-flight \T1/lmr/m/n/12 (-20) --- browsers send 
+\T1/lmtt/m/n/12 OPTIONS \T1/lmr/m/n/12 (-20) with \T1/lmtt/m/n/12 Origin \T1/lm
+r/m/n/12 (-20) and \T1/lmtt/m/n/12 Access-Control-Request-Method\T1/lmr/m/n/12 
+(-20) ;
+
+Overfull \hbox (26.68144pt too wide) in paragraph at lines 168--169
+\T1/lmr/m/n/12 (-20) the server an-swers with \T1/lmtt/m/n/12 Access-Control-Al
+low-Origin\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 -Allow-Methods\T1/lmr/m/n/12 (
+-20) ,
+
+Overfull \hbox (10.95013pt too wide) in paragraph at lines 174--175
+\T1/lmr/m/it/12 (-20) tion pref-ace\T1/lmr/m/n/12 (-20) ---the 24-octet magic s
+tring \T1/lmtt/m/n/12 PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
+
+Overfull \hbox (74.60706pt too wide) in paragraph at lines 185--186
+[][][][][][] 
+
+Overfull \hbox (74.60706pt too wide) in paragraph at lines 187--188
+[][][][][][] 
+
+Overfull \hbox (74.60706pt too wide) in paragraph at lines 189--190
+[][][][][][] 
+[66]
+Underfull \hbox (badness 2245) in paragraph at lines 212--212
+[]|\T1/lmr/m/n/10.95 (+20) Body octets (\T1/lmtt/m/n/10.95 END_STREAM=0x1\T1/lm
+r/m/n/10.95 (+20) ,
+
+Underfull \hbox (badness 10000) in paragraph at lines 212--212
+[]|\T1/lmr/m/n/10.95 (+20) HPACK header block
+
+Underfull \hbox (badness 10000) in paragraph at lines 212--212
+\T1/lmr/m/n/10.95 (+20) (\T1/lmtt/m/n/10.95 END_STREAM=0x1\T1/lmr/m/n/10.95 (+2
+0) ,
+
+Underfull \hbox (badness 2608) in paragraph at lines 212--212
+\T1/lmtt/m/n/10.95 END_HEADERS=0x4\T1/lmr/m/n/10.95 (+20) , \T1/lmtt/m/n/10.95 
+PADDED=0x8\T1/lmr/m/n/10.95 (+20) ,
+
+Underfull \hbox (badness 10000) in paragraph at lines 212--212
+[]|\T1/lmr/m/n/10.95 (+20) 8-octet opaque live-ness/RTT
+
+Underfull \hbox (badness 2277) in paragraph at lines 212--212
+[]|\T1/lmr/m/n/10.95 (+20) Continue a header block too
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[67]
+Overfull \hbox (85.82704pt too wide) in paragraph at lines 260--261
+\T1/lmtt/m/n/12 WINDOW_UPDATE\T1/lmr/m/n/12 (-20) ; senders change peer stream 
+win-dows with \T1/lmtt/m/n/12 SETTINGS_INITIAL_WINDOW_SIZE\T1/lmr/m/n/12 (-20) 
+.
+[68]
+Overfull \hbox (6.80524pt too wide) in paragraph at lines 277--278
+[]\T1/lmr/m/n/12 (-20) Deployment re-al-i-ties: HTTP/3 re-quires \T1/lmtt/m/n/1
+2 Alt-Svc \T1/lmr/m/n/12 (-20) ad-ver-tise-ment or HTTPS
+[69]
+Overfull \hbox (101.38849pt too wide) in paragraph at lines 308--309
+ [][] 
+
+Overfull \hbox (8.21338pt too wide) in paragraph at lines 319--320
+\T1/lmr/m/n/12 (-20) Handshake mes-sage types are sin-gle octets: \T1/lmtt/m/n/
+12 ClientHello\T1/lmr/m/n/12 (-20) =1, \T1/lmtt/m/n/12 ServerHello\T1/lmr/m/n/1
+2 (-20) =2,
+
+Overfull \hbox (54.18655pt too wide) in paragraph at lines 319--320
+\T1/lmtt/m/n/12 EncryptedExtensions\T1/lmr/m/n/12 (-20) =8, \T1/lmtt/m/n/12 Cer
+tificate\T1/lmr/m/n/12 (-20) =11, \T1/lmtt/m/n/12 CertificateVerify\T1/lmr/m/n/
+12 (-20) =15, \T1/lmtt/m/n/12 Finished\T1/lmr/m/n/12 (-20) =20. 
+
+Overfull \hbox (71.59058pt too wide) in paragraph at lines 322--323
+\T1/lmr/m/n/12 (-20) the 1-RTT), \T1/lmtt/m/n/12 server_name \T1/lmr/m/n/12 (-2
+0) (SNI), and \T1/lmtt/m/n/12 application_layer_protocol_negotiation
+[70]
+Overfull \hbox (60.80994pt too wide) in paragraph at lines 337--338
+[][][][][][] 
+
+Overfull \hbox (4.92578pt too wide) in paragraph at lines 337--338
+[]  
+
+Overfull \hbox (67.01282pt too wide) in paragraph at lines 338--339
+[][] 
+
+Overfull \hbox (4.92578pt too wide) in paragraph at lines 338--339
+[]  
+
+Overfull \hbox (73.91138pt too wide) in paragraph at lines 339--340
+[][] 
+
+Overfull \hbox (18.7229pt too wide) in paragraph at lines 340--341
+[][] 
+
+Overfull \hbox (60.11426pt too wide) in paragraph at lines 341--342
+[][] 
+[71]
+Underfull \hbox (badness 10000) in paragraph at lines 368--368
+[]|\T1/lmr/m/n/10.95 (+20) (EC)DHE only;
+
+Underfull \hbox (badness 10000) in paragraph at lines 368--368
+\T1/lmr/m/n/10.95 (+20) for-ward se-crecy
+
+Underfull \hbox (badness 10000) in paragraph at lines 368--368
+[]|\T1/lmr/m/n/10.95 (+20) everything af-ter
+
+Underfull \hbox (badness 10000) in paragraph at lines 368--368
+\T1/lmr/m/n/10.95 (+20) Server-Hello en-
+
+Underfull \hbox (badness 1184) in paragraph at lines 368--368
+[]|\T1/lmr/m/n/10.95 (+20) five AEAD suites
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[72] [73]
+Underfull \vbox (badness 10000) has occurred while \output is active [74]
+Underfull \vbox (badness 10000) has occurred while \output is active [75]
+[76]
+Underfull \vbox (badness 10000) has occurred while \output is active [77]
+Underfull \vbox (badness 10000) has occurred while \output is active [78]
+Underfull \vbox (badness 10000) has occurred while \output is active [79]
+[80]
+Underfull \vbox (badness 10000) has occurred while \output is active [81]
+[82]
+Underfull \vbox (badness 10000) has occurred while \output is active [83]
+Overfull \hbox (4.92578pt too wide) in paragraph at lines 793--794
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [84]
+Underfull \vbox (badness 10000) has occurred while \output is active [85]
+Overfull \hbox (26.65884pt too wide) in paragraph at lines 845--846
+\T1/lmr/m/n/12 (-20) socket the mid-dle-box just closed, pro-duc-ing in-ter-mit
+-tent \T1/lmtt/m/n/12 ECONNRESET\T1/lmr/m/n/12 (-20) /``connection
+[86] [87]
+Overfull \hbox (5.54564pt too wide) in paragraph at lines 904--905
+\T1/lmtt/m/n/12 close \T1/lmr/m/n/12 (-20) and ob-serve that the client now han
+gs un-less it hon-ors \T1/lmtt/m/n/12 Content-Length
+
+Overfull \hbox (9.26479pt too wide) in paragraph at lines 920--921
+\T1/lmtt/m/n/12 HEADERS(END_STREAM|END_HEADERS)\T1/lmr/m/n/12 (-20) , \T1/lmtt/
+m/n/12 DATA(END_STREAM) \T1/lmr/m/n/12 (-20) on stream 1. Then
+[88]
+Overfull \hbox (72.25247pt too wide) in paragraph at lines 931--932
+\T1/lmr/m/n/12 (-20) Robotics API (\T1/lmtt/m/n/12 POST /robots\T1/lmr/m/n/12 (
+-20) , \T1/lmtt/m/n/12 GET /robots/{id}\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 P
+UT /robots/{id}/firmware\T1/lmr/m/n/12 (-20) ,
+[89]
+Overfull \hbox (55.85887pt too wide) in paragraph at lines 934--935
+[]\T1/lmr/bx/n/12 (-20) Flow-control dead-lock hunt. \T1/lmr/m/n/12 (-20) A cli
+ent sets \T1/lmtt/m/n/12 SETTINGS_INITIAL_WINDOW_SIZE
+
+Underfull \vbox (badness 10000) has occurred while \output is active [90]
+[91]
+Overfull \hbox (38.58656pt too wide) in paragraph at lines 966--967
+\T1/lmr/m/n/12 (-20) con-di-tional re-quest's pre-con-di-tion header (\T1/lmtt/
+m/n/12 If-Match\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 If-Unmodified-Since\T1/lm
+r/m/n/12 (-20) )
+[92]
+Overfull \hbox (30.26784pt too wide) in paragraph at lines 970--971
+\T1/lmtt/m/n/12 Access-Control-Request-Method\T1/lmr/m/n/12 (-20) ; the server'
+s \T1/lmtt/m/n/12 Access-Control-Allow-*
+
+Overfull \hbox (6.85304pt too wide) in paragraph at lines 972--973
+[]\T1/lmr/bx/n/12 (-20) Name all ten HTTP/2 frame types and their codes. \T1/lm
+r/m/n/12 (-20) DATA=\T1/lmtt/m/n/12 0x0\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (38.60718pt too wide) in paragraph at lines 972--973
+\T1/lmr/m/n/12 (-20) HEAD-ERS=\T1/lmtt/m/n/12 0x1\T1/lmr/m/n/12 (-20) , PRI-OR-
+ITY=\T1/lmtt/m/n/12 0x2\T1/lmr/m/n/12 (-20) , RST_STREAM=\T1/lmtt/m/n/12 0x3\T1
+/lmr/m/n/12 (-20) , SET-TINGS=\T1/lmtt/m/n/12 0x4\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (68.59857pt too wide) in paragraph at lines 972--973
+\T1/lmr/m/n/12 (-20) PUSH_PROMISE=\T1/lmtt/m/n/12 0x5\T1/lmr/m/n/12 (-20) , PIN
+G=\T1/lmtt/m/n/12 0x6\T1/lmr/m/n/12 (-20) , GO-AWAY=\T1/lmtt/m/n/12 0x7\T1/lmr/
+m/n/12 (-20) , WIN-DOW_UPDATE=\T1/lmtt/m/n/12 0x8\T1/lmr/m/n/12 (-20) ,
+
+Underfull \vbox (badness 10000) has occurred while \output is active [93]
+Overfull \hbox (12.21521pt too wide) in paragraph at lines 986--987
+\T1/lmr/m/n/12 (-20) record wrap-ping); from \T1/lmtt/m/n/12 EncryptedExtension
+s \T1/lmr/m/n/12 (-20) on-ward --- \T1/lmtt/m/n/12 Certificate\T1/lmr/m/n/12 (-
+20) ,
+[94]
+Overfull \hbox (5.65828pt too wide) in paragraph at lines 993--994
+[]\T1/lmr/bx/n/12 (-20) Design the retry pol-icy for \T1/lmtt/b/n/12 POST /paym
+ents \T1/lmr/bx/n/12 (-20) over flaky HTTP/2.
+
+Underfull \vbox (badness 10000) has occurred while \output is active [95]
+Underfull \vbox (badness 10000) has occurred while \output is active [96]
+Overfull \hbox (5.60358pt too wide) in paragraph at lines 1033--1038
+\T1/lmr/m/n/12 (-20) GET/HEAD for \T1/lmtt/m/n/12 /parts \T1/lmr/m/n/12 (-20) a
+nd \T1/lmtt/m/n/12 /parts/{id}\T1/lmr/m/n/12 (-20) ; (3) emit cor-rect \T1/lmtt
+/m/n/12 Content-Length\T1/lmr/m/n/12 (-20) ,
+[97]
+Overfull \hbox (0.35081pt too wide) in paragraph at lines 1059--1064
+\T1/lmr/bx/n/12 (-20) Steps: \T1/lmr/m/n/12 (-20) (1) im-ple-ment RFC 7541 in-t
+e-ger en-cod-ing ($\OML/lmm/m/it/12 N$\T1/lmr/m/n/12 (-20) -bit pre-fixes); (2)
+ match
+[98] [99]
+Overfull \hbox (38.31056pt too wide) in paragraph at lines 1082--1083
+\T1/lmr/bx/n/12 (-20) Stretch Goals: \T1/lmr/m/n/12 (-20) HPACK state re-con-st
+ruc-tion across HEAD-ERS/CONTINUATION
+[100]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 1106.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 1106.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 1106.
+
+[101]
+Underfull \hbox (badness 1194) in paragraph at lines 1165--1165
+[]|\T1/lmr/m/n/10.95 (+20) OK with body / cre-ated
+
+Underfull \hbox (badness 10000) in paragraph at lines 1165--1165
+[]|\T1/lmr/m/n/10.95 (+20) Permanent / tem-po-rary
+
+Underfull \hbox (badness 2088) in paragraph at lines 1165--1165
+[]|\T1/lmr/m/n/10.95 (+20) Not mod-i-fied (con-di-tional
+
+Underfull \hbox (badness 7291) in paragraph at lines 1165--1165
+[]|\T1/lmr/m/n/10.95 (+20) Malformed / unau-then-ti-
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 1187--1187
+[]|\T1/lmr/m/n/10.95 (+20) Header-block spillover; needs
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+(chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[102]
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[103] [104]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+[105])) (chapters/chapter_02_consuming_apis_python.tex [106]
+Chapter 3.
+[107]
+Overfull \hbox (4.65735pt too wide) in paragraph at lines 59--63
+[]\T1/lmr/bx/n/12 (-20) Select \T1/lmr/m/n/12 (-20) the ap-pro-pri-ate Python H
+TTP client li-brary (\T1/lmtt/m/n/12 urllib\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/
+12 requests\T1/lmr/m/n/12 (-20) ,
+[108] [109]
+Underfull \hbox (badness 2310) in paragraph at lines 198--198
+\T1/lmr/m/n/10.95 (+20) strained en-vi-
+
+Underfull \hbox (badness 2426) in paragraph at lines 198--198
+[]|\T1/lmr/m/n/10.95 (+20) keep-alive de-
+
+Underfull \hbox (badness 10000) in paragraph at lines 198--198
+[]|\T1/lmr/m/n/10.95 (+20) httpx adds
+
+Overfull \hbox (2.15665pt too wide) in paragraph at lines 198--198
+[]|\T1/lmr/m/n/10.95 (-20) MockTransport
+
+Underfull \hbox (badness 2027) in paragraph at lines 198--198
+\T1/lmr/m/n/10.95 (+20) runs the full
+
+Underfull \hbox (badness 10000) in paragraph at lines 198--198
+[]|\T1/lmr/m/n/10.95 (+20) httpx ships
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[110]
+Overfull \hbox (137.03658pt too wide) in paragraph at lines 258--262
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (12.80338pt too wide) in paragraph at lines 269--275
+[]\T1/lmr/m/n/12 (-20) Store the base URL once; join paths with a \T1/lmtt/m/n/
+12 httpx.URL
+[111]
+Overfull \hbox (62.34225pt too wide) in paragraph at lines 281--286
+\T1/lmr/m/n/12 (-20) callable or a constructor-level header. Never sprin-kle \T
+1/lmtt/m/n/12 headers={"Authorization":
+[112]
+Underfull \vbox (badness 1082) has occurred while \output is active [113]
+[114]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (90.71158pt too wide) in paragraph at lines 513--517
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[115{C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm
+-mathex.enc}] [116]
+Overfull \hbox (23.74706pt too wide) in paragraph at lines 563--567
+[]\T1/lmr/bx/n/12 (-20) Idempotency keys: \T1/lmr/m/n/12 (-20) the API ac-cepts
+ a client-generated \T1/lmtt/m/n/12 Idempotency-Key
+[117]
+Overfull \hbox (5.58467pt too wide) in paragraph at lines 614--617
+\T1/lmr/m/n/12 (-20) describing and cache-friendly; ter-mi-na-tion is the ab-se
+nce of \T1/lmtt/m/n/12 rel="next"\T1/lmr/m/n/12 (-20) . 
+
+Overfull \hbox (28.82658pt too wide) in paragraph at lines 619--629
+\T1/lmtt/m/n/12 gzip\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 br \T1/lmr/m/n/12 (-2
+0) de-com-pres-sion when the codecs are in-stalled --- ver-ify \T1/lmtt/m/n/12 
+Content-Encoding
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+[]|\T1/lmr/m/n/10.95 (+20) ConnectTimeout,
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) Read-Time-out,
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) Con-nectEr-ror,
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+[]|\T1/lmr/m/n/10.95 (+20) Request never
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) com-pleted, or
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) re-sponse never
+
+Underfull \hbox (badness 6575) in paragraph at lines 654--654
+[]|\T1/lmr/m/n/10.95 (+20) 4xx, 5xx af-ter
+
+Underfull \hbox (badness 7099) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) a com-plete ex-
+
+Underfull \hbox (badness 2894) in paragraph at lines 654--654
+[]|\T1/lmr/m/n/10.95 (+20) Server an-swered
+
+Underfull \hbox (badness 2088) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) quest (de-ter-min-
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+[]|\T1/lmr/m/n/10.95 (+20) Never retry.
+
+Underfull \hbox (badness 10000) in paragraph at lines 654--654
+\T1/lmr/m/n/10.95 (+20) Raise loudly;
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (48.14636pt too wide) in paragraph at lines 660--669
+\T1/lmtt/m/n/12 ApiClientError4xx\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 ApiServ
+erError5xx\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 ApiRateLimited \T1/lmr/m/n/12 
+(-20) car-ry-ing \T1/lmtt/m/n/12 retry_after\T1/lmr/m/n/12 (-20) ),
+[118] [119]
+Underfull \vbox (badness 10000) has occurred while \output is active [120]
+Underfull \vbox (badness 10000) has occurred while \output is active [121]
+Overfull \hbox (32.52002pt too wide) in paragraph at lines 805--807
+[][][][] 
+[122]
+Overfull \hbox (32.52002pt too wide) in paragraph at lines 843--845
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [123]
+Overfull \hbox (73.91138pt too wide) in paragraph at lines 860--862
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [124]
+Overfull \hbox (39.41858pt too wide) in paragraph at lines 907--909
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [125]
+Overfull \hbox (94.60706pt too wide) in paragraph at lines 941--943
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [126]
+Overfull \hbox (21.57585pt too wide) in paragraph at lines 985--994
+\T1/lmr/m/n/12 (-20) codes ex-actly the rules of Sec-tion [][]3.2.5[][]: full j
+it-ter via \T1/lmtt/m/n/12 wait_random_exponential
+
+Underfull \vbox (badness 10000) has occurred while \output is active [127]
+[128]
+Underfull \vbox (badness 10000) has occurred while \output is active [129]
+Underfull \vbox (badness 10000) has occurred while \output is active [130]
+[131]
+Underfull \vbox (badness 10000) has occurred while \output is active [132]
+Underfull \vbox (badness 10000) has occurred while \output is active [133]
+Underfull \vbox (badness 10000) has occurred while \output is active [134]
+Overfull \hbox (8.30315pt too wide) in paragraph at lines 1261--1261
+[]\T1/lmr/bx/n/14.4 (-20) Hermetic Of-fline Tests with httpx.MockTransport 
+[135]
+Underfull \vbox (badness 10000) has occurred while \output is active [136]
+Overfull \hbox (67.01282pt too wide) in paragraph at lines 1353--1355
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [137]
+Underfull \vbox (badness 10000) has occurred while \output is active [138]
+Overfull \hbox (18.7229pt too wide) in paragraph at lines 1409--1410
+[][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [139]
+[140]
+Underfull \vbox (badness 1062) has occurred while \output is active [141]
+[142]
+Underfull \vbox (badness 10000) has occurred while \output is active [143]
+Underfull \vbox (badness 10000) has occurred while \output is active [144]
+Underfull \vbox (badness 10000) has occurred while \output is active [145]
+Overfull \hbox (21.72304pt too wide) in paragraph at lines 1671--1674
+\T1/lmr/m/n/12 (-20) Con-firm it an-swers: \T1/lmtt/m/n/12 curl.exe http://127.
+0.0.1:8765/parts/NR-1001\T1/lmr/m/n/12 (-20) . 
+
+Overfull \hbox (13.38246pt too wide) in paragraph at lines 1674--1679
+[]\T1/lmr/bx/n/12 (-20) Baseline. \T1/lmr/m/n/12 (-20) In a sec-ond ter-mi-nal 
+run \T1/lmtt/m/n/12 python ch02_urllib_baseline.py\T1/lmr/m/n/12 (-20) .
+
+Overfull \hbox (18.31654pt too wide) in paragraph at lines 1674--1679
+\T1/lmr/m/n/12 (-20) Note in the stub's log that ev-ery re-quest is a fresh con
+-nec-tion (\T1/lmtt/m/n/12 Connection:
+
+Overfull \hbox (25.89687pt too wide) in paragraph at lines 1686--1690
+[]\T1/lmr/bx/n/12 (-20) Pagination and stream-ing. \T1/lmr/m/n/12 (-20) Run \T1
+/lmtt/m/n/12 python ch02_pagination_stream.py\T1/lmr/m/n/12 (-20) ;
+[146]
+Underfull \vbox (badness 10000) has occurred while \output is active [147]
+[148] [149] [150]
+Overfull \hbox (6.50363pt too wide) in paragraph at lines 1895--1900
+\T1/lmr/m/it/12 (-20) A: \T1/lmr/m/n/12 (-20) On at-tempt $\OML/lmm/m/it/12 n$\
+T1/lmr/m/n/12 (-20) , wait a \T1/lmr/m/it/12 (-20) ran-dom \T1/lmr/m/n/12 (-20)
+ value drawn uni-formly from $\OT1/lmr/m/n/12 (-20) [0\OML/lmm/m/it/12 ; []\OT1
+/lmr/m/n/12 (-20) (\OML/lmm/m/it/12 c; b \OMS/lmsy/m/n/12 ^^A
+
+Overfull \hbox (12.78842pt too wide) in paragraph at lines 1929--1934
+\T1/lmr/m/it/12 (-20) A: \T1/lmr/m/n/12 (-20) Server-advertised min-i-mum de-la
+y be-fore retry-ing, de-fined by RFC 9110
+
+Underfull \vbox (badness 10000) has occurred while \output is active [151]
+[152] [153]
+Overfull \hbox (20.81218pt too wide) in paragraph at lines 2085--2088
+\T1/lmr/m/n/12 (-20) com-pos-able stop/wait/retry strate-gies. [][]$\T1/lmtt/m/
+n/12 https : / / tenacity . readthedocs .
+[154] [155]
+Overfull \hbox (40.93369pt too wide) in paragraph at lines 2153--2156
+\T1/lmr/m/n/12 (-20) part syn-thetic cat-a-log, a token-bucket lim-iter, and \T
+1/lmtt/m/n/12 RateLimit-Policy\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 Retry-After
+
+[156]
+Overfull \hbox (18.5132pt too wide) in paragraph at lines 2198--2200
+[]\T1/lmr/m/n/12 (-20) Parse re-sponses into mod-els; map val-i-da-tion fail-ur
+es to \T1/lmtt/m/n/12 ApiContractError
+
+Overfull \hbox (6.20857pt too wide) in paragraph at lines 2230--2234
+[]\T1/lmr/bx/n/12 (-20) Inputs/Datasets. \T1/lmr/m/n/12 (-20) A \T1/lmtt/m/n/12
+ ChaosTransport \T1/lmr/m/n/12 (-20) wrap-ping \T1/lmtt/m/n/12 httpx.MockTransp
+ort
+[157]
+Overfull \hbox (4.47354pt too wide) in paragraph at lines 2237--2239
+[]\T1/lmr/m/n/12 (-20) Implement \T1/lmtt/m/n/12 ChaosTransport(BaseTransport) 
+\T1/lmr/m/n/12 (-20) read-ing a YAML/JSON
+
+Overfull \hbox (1.93086pt too wide) in paragraph at lines 2263--2263
+[]\T1/lmr/bx/n/14.4 (-20) Capstone 2.5 [staff] --- Async Con-cur-rent Fetcher
+
+Overfull \hbox (9.43234pt too wide) in paragraph at lines 2277--2279
+[]\T1/lmr/m/n/12 (-20) Bounded con-cur-rency via \T1/lmtt/m/n/12 asyncio.Semaph
+ore \T1/lmr/m/n/12 (-20) (not un-bounded \T1/lmtt/m/n/12 gather\T1/lmr/m/n/12 (
+-20) );
+[158]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2330.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2330.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2330.
+
+[159]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2351.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2351.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2351.
+
+
+Overfull \hbox (63.82246pt too wide) in paragraph at lines 2363--2367
+[]\T1/lmr/bx/n/12 (-20) Alternatives. \T1/lmtt/m/n/12 backoff \T1/lmr/m/n/12 (-
+20) (decorator-oriented, less com-pos-able); \T1/lmtt/m/n/12 urllib3.util.Retry
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2370.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2370.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2370.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2387.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2387.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2387.
+
+[160]
+Overfull \hbox (21.64973pt too wide) in paragraph at lines 2419--2423
+\T1/lmtt/m/n/12 max_connections \T1/lmr/m/n/12 (-20) to peak con-cur-rency and 
+\T1/lmtt/m/n/12 max_keepalive_connections
+
+Overfull \hbox (21.70438pt too wide) in paragraph at lines 2460--2460
+[]|\T1/lmr/bx/n/10.95 (-20) Failure
+
+Underfull \hbox (badness 10000) in paragraph at lines 2460--2460
+\T1/lmr/bx/n/10.95 (+20) it
+
+Overfull \hbox (23.3365pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/bx/n/10.95 (-20) catches| 
+
+Overfull \hbox (56.40102pt too wide) in paragraph at lines 2460--2460
+[]|\T1/lmr/m/n/10.95 (-20) dead/firewalled
+
+Overfull \hbox (5.73161pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) host,
+
+Overfull \hbox (4.56384pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) TLS
+
+Overfull \hbox (2.44377pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) mis-
+
+Overfull \hbox (2.38449pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) con-
+
+Overfull \hbox (7.48575pt too wide) in paragraph at lines 2460--2460
+[]|\T1/lmr/m/n/10.95 (-20) hung
+
+Overfull \hbox (1.82834pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) app
+
+Underfull \hbox (badness 10000) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (+20) be-
+
+Overfull \hbox (5.40524pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) hind
+
+Overfull \hbox (18.7063pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) healthy
+
+Overfull \hbox (15.00386pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) stalled
+
+Overfull \hbox (16.22575pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) stream| 
+
+Overfull \hbox (4.32819pt too wide) in paragraph at lines 2460--2460
+[]|\T1/lmr/m/n/10.95 (-20) peer
+
+Overfull \hbox (3.91765pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) that
+
+Overfull \hbox (21.2696pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) stopped
+
+Overfull \hbox (6.58746pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) read-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (+20) ing
+
+Overfull \hbox (1.10333pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) (up-
+
+Overfull \hbox (12.61916pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) loads)| 
+
+Overfull \hbox (40.53212pt too wide) in paragraph at lines 2460--2460
+[]|\T1/lmr/m/n/10.95 (-20) concurrency
+
+Underfull \hbox (badness 10000) in paragraph at lines 2460--2460
+\OML/lmm/m/it/10.95 >$
+
+Overfull \hbox (4.82138pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) pool
+
+Overfull \hbox (1.29208pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) size
+
+Overfull \hbox (16.30594pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) (queue-
+
+Overfull \hbox (3.02083pt too wide) in paragraph at lines 2460--2460
+\T1/lmr/m/n/10.95 (-20) ing)| 
+
+Underfull \vbox (badness 2096) has occurred while \output is active [161]
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+[]|\T1/lmr/m/n/10.95 (+20) idempotent
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) method or
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) idem-po-tency
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) key; jit-tered
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+[]|\T1/lmr/m/n/10.95 (+20) after
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmtt/m/n/10.95 Retry-After
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) (clamped);
+
+Underfull \hbox (badness 6477) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) back off the
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+[]|\T1/lmr/m/n/10.95 (+20) bounded at-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) tempts +
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmtt/m/n/10.95 Retry-After
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+[]|\T1/lmr/m/n/10.95 (+20) deterministic:
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) ro-tate cre-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) den-tials, or
+
+Overfull \hbox (21.50903pt too wide) in paragraph at lines 2482--2482
+[]|\T1/lmtt/m/n/10.95 ApiContractError\T1/lmr/m/n/10.95 (-20) :
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) provider bug
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+[]|\T1/lmr/m/n/10.95 (+20) replay may
+
+Underfull \hbox (badness 10000) in paragraph at lines 2482--2482
+\T1/lmr/m/n/10.95 (+20) du-pli-cate ef-
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+(chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [162]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[163]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+)) (chapters/chapter_03_rest_architectural_style.tex [164] [165] [166]
+Chapter 4.
+[167] [168] [169] [170] [171] [172]
+Overfull \hbox (116.95853pt too wide) in paragraph at lines 324--328
+ [][] 
+
+Underfull \hbox (badness 2111) in paragraph at lines 348--348
+[]|\T1/lmr/m/n/10.95 (+20) less ef-fi-cient than be-
+
+Underfull \hbox (badness 1472) in paragraph at lines 348--348
+[]|\T1/lmr/m/n/10.95 (+20) scalability, se-cu-rity at
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \vbox (badness 5008) has occurred while \output is active [173]
+Overfull \hbox (434.65057pt too wide) in paragraph at lines 388--391
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[174] [175] [176] [177]
+Overfull \hbox (3.0971pt too wide) in paragraph at lines 553--559
+\T1/lmr/m/n/12 (-20) ing in for an op-er-a-tion that can-not be rei-fied: \T1/l
+mtt/m/n/12 POST /catalog/exports
+[178]
+Overfull \hbox (42.36812pt too wide) in paragraph at lines 634--638
+[]\T1/lmr/bx/n/12 (-20) Hierarchy. \T1/lmr/m/n/12 (-20) For-ward slashes ex-pre
+ss con-tain-ment; \T1/lmtt/m/n/12 /warehouses/WH-01/stock
+
+Overfull \hbox (33.98816pt too wide) in paragraph at lines 638--645
+[]\T1/lmr/bx/n/12 (-20) Casing. \T1/lmr/m/n/12 (-20) Low-er-case \T1/lmr/m/it/1
+2 (-20) kebab-case \T1/lmr/m/n/12 (-20) for multi-word seg-ments (\T1/lmtt/m/n/
+12 /purchase-orders\T1/lmr/m/n/12 (-20) ).
+[179]
+Overfull \hbox (5.88643pt too wide) in paragraph at lines 661--668
+\T1/lmr/m/n/12 (-20) pag-i-na-tion (\T1/lmtt/m/n/12 ?cursor=...\T1/lmr/m/n/12 (
+-20) ), par-tial rep-re-sen-ta-tion (\T1/lmtt/m/n/12 ?fields=sku,name\T1/lmr/m/
+n/12 (-20) ).
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[180]
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) con-flict (du-pli-cate
+
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) SKU); 415 wrong
+
+Underfull \hbox (badness 1394) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) me-dia type; 422 se-
+
+Underfull \hbox (badness 3525) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) 410 per-ma-nently re-
+
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) 409 concurrent-edit
+
+Underfull \hbox (badness 1796) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) con-flict; 400/422 in-
+
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+[]|\T1/lmr/m/n/10.95 (+20) 405 method not
+
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) al-lowed (+ \T1/lmtt/m/n/10.95 Allow
+
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) header); 429 rate
+
+Underfull \hbox (badness 10000) in paragraph at lines 755--755
+\T1/lmr/m/n/10.95 (+20) lim-ited; 500/503
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[181]
+Overfull \hbox (3.98982pt too wide) in paragraph at lines 813--818
+\T1/lmr/m/n/12 (-20) server an-swers with the best avail-able rep-re-sen-ta-tio
+n or \T1/lmtt/m/n/12 406 Not Acceptable
+[182]
+Overfull \hbox (96.09682pt too wide) in paragraph at lines 828--834
+\T1/lmr/m/n/12 (-20) dif-fer-ently; (3) media-type pa-ram-e-ters (\T1/lmtt/m/n/
+12 application/vnd.northwind.part+json;version=2\T1/lmr/m/n/12 (-20) )
+
+Overfull \hbox (7.64317pt too wide) in paragraph at lines 867--867
+[]|\T1/lmr/bx/n/10.95 (-20) Collection+JSON| 
+
+Overfull \hbox (26.52296pt too wide) in paragraph at lines 867--867
+[]|\T1/lmtt/m/n/10.95 application/hal+json| 
+
+Overfull \hbox (49.5179pt too wide) in paragraph at lines 867--867
+[]|\T1/lmtt/m/n/10.95 application/vnd.api+json| 
+
+Overfull \hbox (89.75903pt too wide) in paragraph at lines 867--867
+[]|\T1/lmtt/m/n/10.95 application/vnd.collection+json| 
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+[]|\T1/lmtt/m/n/10.95 _links\T1/lmr/m/n/10.95 (+20) ,
+
+Overfull \hbox (78.95384pt too wide) in paragraph at lines 867--867
+[]|\T1/lmtt/m/n/10.95 data\T1/lmr/m/n/10.95 (-20) /\T1/lmtt/m/n/10.95 attribute
+s\T1/lmr/m/n/10.95 (-20) /\T1/lmtt/m/n/10.95 relationships\T1/lmr/m/n/10.95 (-2
+0) ,
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+\T1/lmr/m/n/10.95 (+20) com-pound doc-u-
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+[]|\T1/lmr/m/n/10.95 (+20) template-driven
+
+Underfull \hbox (badness 1147) in paragraph at lines 867--867
+\T1/lmr/m/n/10.95 (+20) POST/PUT bod-
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+[]|\T1/lmr/m/n/10.95 (+20) opinionated full
+
+Underfull \hbox (badness 4013) in paragraph at lines 867--867
+\T1/lmr/m/n/10.95 (+20) pro-to-col (pag-i-na-
+
+Underfull \hbox (badness 1668) in paragraph at lines 867--867
+[]|\T1/lmr/m/n/10.95 (+20) pure hy-per-me-dia;
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+[]|\T1/lmr/m/n/10.95 (+20) greenfield APIs
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+\T1/lmr/m/n/10.95 (+20) want-ing ev-ery-
+
+Underfull \hbox (badness 2261) in paragraph at lines 867--867
+[]|\T1/lmr/m/n/10.95 (+20) reference de-signs,
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+\T1/lmr/m/n/10.95 (+20) hy-per-me-dia re-
+
+Underfull \hbox (badness 10000) in paragraph at lines 867--867
+\T1/lmr/m/n/10.95 (+20) search, generic
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[183] [184] [185] [186]
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1018--1019
+[][][][] 
+
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1020--1022
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [187]
+Underfull \vbox (badness 10000) has occurred while \output is active [188]
+Underfull \vbox (badness 10000) has occurred while \output is active [189]
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1144--1145
+[][][][] 
+
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1146--1148
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [190]
+Overfull \hbox (18.7229pt too wide) in paragraph at lines 1201--1203
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [191]
+Underfull \vbox (badness 10000) has occurred while \output is active [192]
+Overfull \hbox (101.50562pt too wide) in paragraph at lines 1265--1267
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [193]
+Overfull \hbox (11.82434pt too wide) in paragraph at lines 1307--1309
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [194]
+Underfull \vbox (badness 10000) has occurred while \output is active [195]
+Underfull \vbox (badness 10000) has occurred while \output is active [196]
+Underfull \vbox (badness 10000) has occurred while \output is active [197]
+Underfull \vbox (badness 10000) has occurred while \output is active [198]
+Underfull \vbox (badness 10000) has occurred while \output is active [199]
+[200]
+Underfull \vbox (badness 10000) has occurred while \output is active [201]
+Underfull \vbox (badness 10000) has occurred while \output is active [202]
+Underfull \vbox (badness 10000) has occurred while \output is active [203]
+Underfull \vbox (badness 10000) has occurred while \output is active [204]
+[205]
+Underfull \vbox (badness 10000) has occurred while \output is active [206]
+Underfull \vbox (badness 10000) has occurred while \output is active [207]
+[208] [209]
+Underfull \vbox (badness 10000) has occurred while \output is active [210]
+Underfull \vbox (badness 10000) has occurred while \output is active [211]
+Underfull \vbox (badness 10000) has occurred while \output is active [212]
+Overfull \hbox (2.93753pt too wide) in paragraph at lines 2008--2017
+[]\T1/lmr/m/n/12 (-20) Design com-men-tary: ev-ery re-sponse de-clares its head
+-ers (\T1/lmtt/m/n/12 ETag\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 Location\T1/lm
+r/m/n/12 (-20) )
+
+Overfull \hbox (53.36668pt too wide) in paragraph at lines 2008--2017
+\T1/lmr/m/n/12 (-20) com-po-nents so the \T1/lmtt/m/n/12 400\T1/lmr/m/n/12 (-20
+) s across re-sources can never drift apart; \T1/lmtt/m/n/12 additionalProperti
+es:
+[213]
+Overfull \hbox (152.541pt too wide) in paragraph at lines 2056--2062
+[]\T1/lmr/bx/n/12 (-20) Deep nest-ing be-yond two lev-els \T1/lmr/m/n/12 (-20) 
+(\T1/lmtt/m/n/12 /warehouses/WH-01/zones/Z-3/bins/B-17/parts/NX-1001\T1/lmr/m/n
+/12 (-20) ).
+
+Overfull \hbox (4.90968pt too wide) in paragraph at lines 2069--2074
+[]\T1/lmr/bx/n/12 (-20) Silent query-parameter di-ver-gence \T1/lmr/m/n/12 (-20
+) (\T1/lmtt/m/n/12 ?format=json \T1/lmr/m/n/12 (-20) be-side \T1/lmtt/m/n/12 Ac
+cept\T1/lmr/m/n/12 (-20) ).
+
+Underfull \vbox (badness 10000) has occurred while \output is active [214]
+Overfull \hbox (38.33495pt too wide) in paragraph at lines 2102--2110
+\T1/lmr/m/n/12 (-20) can-not ex-ist with-out both.) Is \T1/lmtt/m/n/12 /supplie
+rs/{sid}/purchase-orders/{poid}
+[215]
+Overfull \hbox (72.9706pt too wide) in paragraph at lines 2154--2162
+\T1/lmr/m/n/12 (-20) rugged An-droid de-vices scan-ning ware-house stock) con-s
+umed \T1/lmtt/m/n/12 GET /api/inventory/{sku}\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (19.31978pt too wide) in paragraph at lines 2154--2162
+\T1/lmr/m/n/12 (-20) book much like this one, re-designed the API ``prop-erly''
+: \T1/lmtt/m/n/12 /api/inventory/{sku}
+[216] [217]
+Overfull \hbox (44.4207pt too wide) in paragraph at lines 2210--2214
+[]\T1/lmr/bx/n/12 (-20) (7.7) Deep dive. \T1/lmr/m/n/12 (-20) Ar-gue both sides
+: should \T1/lmtt/m/n/12 /warehouses/{wid}/stock/{sku}
+[218]
+Underfull \vbox (badness 10000) has occurred while \output is active [219]
+Overfull \hbox (1.38013pt too wide) in paragraph at lines 2308--2315
+\T1/lmr/m/it/12 (-20) Answer: \T1/lmtt/m/n/12 /parts\T1/lmr/m/n/12 (-20) , \T1/
+lmtt/m/n/12 /parts/{sku}\T1/lmr/m/n/12 (-20) ; \T1/lmtt/m/n/12 /warehouses/{wid
+}/stock/{sku}
+
+Underfull \vbox (badness 10000) has occurred while \output is active [220]
+Overfull \hbox (19.76021pt too wide) in paragraph at lines 2359--2366
+[]\T1/lmr/bx/n/12 (-20) When does hy-per-me-dia pay off, and when is it over-en
+gineering? 
+[221]
+Overfull \hbox (126.85403pt too wide) in paragraph at lines 2408--2415
+\T1/lmr/m/it/12 (-20) Answer: \T1/lmr/m/n/12 (-20) REST never for-bids server-c
+omposed re-sources: a \T1/lmtt/m/n/12 /dashboards/warehouse-summary
+
+Underfull \vbox (badness 10000) has occurred while \output is active [222]
+Overfull \hbox (27.0812pt too wide) in paragraph at lines 2416--2424
+\T1/lmr/m/n/12 (-20) field names, closed-by-default schemas in re-view (\T1/lmt
+t/m/n/12 additionalProperties:
+
+Overfull \hbox (8.3865pt too wide) in paragraph at lines 2447--2454
+\T1/lmr/m/n/12 (-20) are in-trin-si-cally com-pu-ta-tions over tran-sient in-pu
+ts (\T1/lmtt/m/n/12 calculateRoute\T1/lmr/m/n/12 (-20) );
+
+Underfull \vbox (badness 10000) has occurred while \output is active [223]
+[224]
+Overfull \hbox (4.34595pt too wide) in paragraph at lines 2512--2516
+[]\T1/lmr/bx/n/12 (-20) Martin Klepp-mann, \T1/lmr/m/it/12 (-20) De-sign-ing Da
+ta-Intensive Ap-pli-ca-tions, \T1/lmr/m/n/12 (-20) O'Reilly,
+
+Underfull \vbox (badness 10000) has occurred while \output is active [225]
+[226]
+Overfull \hbox (25.37155pt too wide) in paragraph at lines 2589--2591
+[]\T1/lmr/bx/n/12 (-20) Stretch Goals. \T1/lmr/m/n/12 (-20) Im-ple-ment \T1/lmt
+t/m/n/12 HEAD\T1/lmr/m/n/12 (-20) -only ver-i-fi-ca-tion; add \T1/lmtt/m/n/12 S
+unset\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 Deprecation
+[227] [228]
+Overfull \hbox (4.66963pt too wide) in paragraph at lines 2676--2678
+[]\T1/lmr/m/n/12 (-20) Quantify: lint find-ings by rule; status-code us-age dis
+-tri-bu-tion; cacheabil-
+[229]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2712.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2712.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2712.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2730.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2730.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2730.
+
+[230]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (7.05643pt too wide) in paragraph at lines 2804--2816
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 2831--2831
+[]|\T1/lmr/m/n/10.95 (+20) representations carry
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+(chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \vbox (badness 10000) has occurred while \output is active [231]
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[232]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+)) (chapters/chapter_04_serialization_contracts.tex [233] [234] [235] [236]
+Chapter 5.
+
+Underfull \vbox (badness 1675) has occurred while \output is active [237]
+Overfull \hbox (33.95944pt too wide) in paragraph at lines 71--76
+[]\T1/lmr/m/n/12 (-20) Author JSON Schema (2020-12) doc-u-ments us-ing \T1/lmtt
+/m/n/12 type\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 properties\T1/lmr/m/n/12 (-2
+0) ,
+
+Overfull \hbox (14.79774pt too wide) in paragraph at lines 71--76
+\T1/lmtt/m/n/12 required\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 additionalProper
+ties\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 $ref\T1/lmr/m/n/12 (-20) , \T1/lmtt/
+m/n/12 oneOf\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 anyOf\T1/lmr/m/n/12 (-20) /\T
+1/lmtt/m/n/12 allOf\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (3.24019pt too wide) in paragraph at lines 71--76
+\T1/lmr/m/n/12 (-20) and \T1/lmtt/m/n/12 unevaluatedProperties\T1/lmr/m/n/12 (-
+20) , and dis-tin-guish as-ser-tions from
+
+Overfull \hbox (12.12572pt too wide) in paragraph at lines 76--82
+\T1/lmr/m/n/12 (-20) ex-plain the catas-tro-phe that fol-lows from vi-o-lat-ing
+ them [[][]Goo24[][]]. 
+[238]
+Overfull \hbox (1.47607pt too wide) in paragraph at lines 85--89
+[]\T1/lmr/m/n/12 (-20) Implement HTTP con-tent ne-go-ti-a-tion cor-rectly: pars
+e \T1/lmtt/m/n/12 Accept
+[239] [240]
+Overfull \hbox (60.63914pt too wide) in paragraph at lines 192--194
+[]\T1/lmr/m/n/12 (-20) Transmit 64-bit in-te-gers as \T1/lmr/bx/n/12 (-20) JSON
+ strings \T1/lmr/m/n/12 (-20) (\T1/lmtt/m/n/12 "order_id": "9007199254740993"\T
+1/lmr/m/n/12 (-20) )
+[241] [242]
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Per-key sub-schemas for
+
+Underfull \hbox (badness 1210) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Array of mem-ber names
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Schema for mem-
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+\T1/lmr/m/n/10.95 (+20) bers not matched by
+
+Overfull \hbox (31.62708pt too wide) in paragraph at lines 311--311
+\T1/lmtt/m/n/10.95 properties\T1/lmr/m/n/10.95 (-20) /\T1/lmtt/m/n/10.95 patter
+nProperties\T1/lmr/m/n/10.95 (-20) ;
+
+Underfull \hbox (badness 2753) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Inline the schema at a
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Instance must val-i-date
+
+Underfull \hbox (badness 2165) in paragraph at lines 311--311
+\T1/lmr/m/n/10.95 (+20) against \T1/lmr/m/it/10.95 (+20) ev-ery \T1/lmr/m/n/10.
+95 (+20) sub-schema
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+\T1/lmr/m/n/10.95 (+20) (con-junc-tion; used for
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Instance must val-i-date
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Instance must val-i-date
+
+Underfull \hbox (badness 2229) in paragraph at lines 311--311
+\T1/lmr/m/n/10.95 (+20) against \T1/lmr/m/it/10.95 (+20) ex-actly one \T1/lmr/m
+/n/10.95 (+20) sub-
+
+Underfull \hbox (badness 1365) in paragraph at lines 311--311
+\T1/lmr/m/n/10.95 (+20) ap-pli-ca-tor --- the \T1/lmtt/m/n/10.95 allOf\T1/lmr/m
+/n/10.95 (+20) -
+
+Underfull \hbox (badness 10000) in paragraph at lines 311--311
+[]|\T1/lmr/m/n/10.95 (+20) Vocabulary hint
+
+LaTeX Warning: Float too large for page by 5.97711pt on input line 314.
+
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (31.11293pt too wide) in paragraph at lines 316--323
+\T1/lmr/m/n/12 (-20) it, so a ``closed'' base schema wrongly re-jects ex-ten-si
+ons. \T1/lmtt/m/n/12 unevaluatedProperties:
+[243]
+Overfull \hbox (33.85243pt too wide) in paragraph at lines 354--356
+\T1/lmr/m/n/12 (-20) (\T1/lmtt/m/n/12 https://schemas.northwind-robotics.exampl
+e/parts/v2/part.json\T1/lmr/m/n/12 (-20) ). 
+
+Overfull \hbox (122.15858pt too wide) detected at line 382
+[] \OT1/lmr/m/n/12 = ([] \OMS/lmsy/m/n/12 ^^\ \OT1/lmr/m/n/12 3) \OMS/lmsy/m/n/
+12 j []\OML/lmm/m/it/12 ;  [] \OT1/lmr/m/n/12 = [] \OMS/lmsy/m/n/12 ^^] \OT1/lm
+r/m/n/12 3\OML/lmm/m/it/12 ;  [] \OT1/lmr/m/n/12 = [] & []\OML/lmm/m/it/12 :
+[244]
+
+Package tabularx Warning: X Columns too narrow (table too wide)
+(tabularx)                 on input line 397.
+
+
+Overfull \hbox (31.75082pt too wide) in paragraph at lines 397--397
+[]|\T1/lmr/bx/n/10.95 (-20) Payload| 
+
+Underfull \hbox (badness 10000) in paragraph at lines 397--397
+[]|\T1/lmr/m/n/10.95 (+20) 1--
+
+Underfull \hbox (badness 10000) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (+20) 10
+
+Overfull \hbox (15.90509pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) varint
+
+Overfull \hbox (16.52754pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) bytes.| 
+
+Overfull \hbox (24.56444pt too wide) in paragraph at lines 397--397
+[]|\T1/lmr/m/n/10.95 (-20) Exactly
+
+Underfull \hbox (badness 10000) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (+20) 8
+
+Overfull \hbox (15.0055pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) bytes,
+
+Overfull \hbox (12.85672pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) little-
+
+Overfull \hbox (23.03128pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) endian.| 
+
+Overfull \hbox (18.27005pt too wide) in paragraph at lines 397--397
+[]|\T1/lmr/m/n/10.95 (-20) Varint
+
+Overfull \hbox (18.26216pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) length
+
+Underfull \hbox (badness 10000) in paragraph at lines 397--397
+\OML/lmm/m/it/10.95 n$\T1/lmr/m/n/10.95 (+20) ,
+
+Overfull \hbox (9.91586pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) then
+
+Underfull \hbox (badness 10000) in paragraph at lines 397--397
+\OML/lmm/m/it/10.95 n$
+
+Overfull \hbox (16.52754pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) bytes.| 
+
+Overfull \hbox (2.6129pt too wide) in paragraph at lines 397--397
+[]|\T1/lmr/m/n/10.95 (-20) Do
+
+Overfull \hbox (4.25471pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) not
+
+Overfull \hbox (6.99463pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) use.| 
+
+Overfull \hbox (24.56444pt too wide) in paragraph at lines 397--397
+[]|\T1/lmr/m/n/10.95 (-20) Exactly
+
+Underfull \hbox (badness 10000) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (+20) 4
+
+Overfull \hbox (15.0055pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) bytes,
+
+Overfull \hbox (12.85672pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) little-
+
+Overfull \hbox (23.03128pt too wide) in paragraph at lines 397--397
+\T1/lmr/m/n/10.95 (-20) endian.| 
+
+Overfull \hbox (106.95926pt too wide) in alignment at lines 397--397
+[][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (32.68823pt too wide) detected at line 414
+\OT1/lmr/m/n/12 300 = 256 + 44 = (2 \OMS/lmsy/m/n/12 ^^\ \OT1/lmr/m/n/12 7) + 4
+4  =[]\OMS/lmsy/m/n/12 )  [] \OT1/lmr/m/n/12 = [44\OML/lmm/m/it/12 ; \OT1/lmr/m
+/n/12 2]  =[]\OMS/lmsy/m/n/12 )  [] \OT1/lmr/m/n/12 = [[]\OML/lmm/m/it/12 ;  []
+\OT1/lmr/m/n/12 ]
+
+Overfull \hbox (23.23372pt too wide) in paragraph at lines 447--449
+[]\T1/lmr/m/n/12 (-20) With \T1/lmtt/m/n/12 part_id = "A1"\T1/lmr/m/n/12 (-20) 
+, \T1/lmtt/m/n/12 qty = 300\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 delta = -3\T1
+/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 unit_kg = 1.5\T1/lmr/m/n/12 (-20) , \T1/lmt
+t/m/n/12 width_mm
+[245]
+Overfull \hbox (82.38213pt too wide) detected at line 480
+[]\OT1/lmr/m/n/12 (\OML/lmm/m/it/12 n\OT1/lmr/m/n/12 ) = (\OML/lmm/m/it/12 n \O
+MS/lmsy/m/n/12 ^^\ \OT1/lmr/m/n/12 1) [] (\OML/lmm/m/it/12 n \OMS/lmsy/m/n/12 ^
+^] \OT1/lmr/m/n/12 63)  \OMS/lmsy/m/n/12 ([])  \OT1/lmr/m/n/12 0 \OMS/lmsy/m/n/
+12 7! \OT1/lmr/m/n/12 0\OML/lmm/m/it/12 ;  \OMS/lmsy/m/n/12 ^^@\OT1/lmr/m/n/12 
+1 \OMS/lmsy/m/n/12 7! \OT1/lmr/m/n/12 1\OML/lmm/m/it/12 ;  \OT1/lmr/m/n/12 1 \O
+MS/lmsy/m/n/12 7! \OT1/lmr/m/n/12 2\OML/lmm/m/it/12 ;  \OMS/lmsy/m/n/12 ^^@\OT1
+/lmr/m/n/12 2 \OMS/lmsy/m/n/12 7! \OT1/lmr/m/n/12 3\OML/lmm/m/it/12 ;  \OT1/lmr
+/m/n/12 2 \OMS/lmsy/m/n/12 7! \OT1/lmr/m/n/12 4\OML/lmm/m/it/12 ;  []
+[246] [247]
+Overfull \hbox (19.09091pt too wide) in paragraph at lines 579--579
+[]|\T1/lmr/bx/n/10.95 (-20) MessagePack| 
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Largest;
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) + text
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Smallest;
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) tags +
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Smallest;
+
+Underfull \hbox (badness 4120) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) names re-
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Slowest
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) (text
+
+Underfull \hbox (badness 1308) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Fast (gen-
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) er-ated
+
+Underfull \hbox (badness 3049) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Yes (IDL,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) schema,
+
+Overfull \hbox (1.38138pt too wide) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (-20) Convention
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) + JSON
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) Schema
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) com-pat
+
+Underfull \hbox (badness 4266) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Tag num-
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Name
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) match-ing
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) + pro-mo-
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Excellent
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Poor
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) (needs
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) pro-toc
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Poor
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) (needs
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Poor (bi-
+
+Overfull \hbox (4.55177pt too wide) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (-20) Everywhere;
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) browsers
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) gRPC,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) Google
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) stack,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) poly-glot
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Kafka,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) Hadoop,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) stream-ing
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Redis,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) game/IoT,
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Ignored
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) by most
+
+Overfull \hbox (27.69632pt too wide) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (-20) Ignored/dropped
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Resolved
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Preserved
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Safe (ex-
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (+20) plicit
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Safe
+
+Underfull \hbox (badness 10000) in paragraph at lines 579--579
+[]|\T1/lmr/m/n/10.95 (+20) Safe
+
+Overfull \hbox (13.8184pt too wide) in paragraph at lines 579--579
+\T1/lmr/m/n/10.95 (-20) (uint64/int64)| 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[248]
+Overfull \hbox (308.01404pt too wide) in paragraph at lines 645--648
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[249] [250] [251]
+Overfull \hbox (68.78322pt too wide) in paragraph at lines 791--793
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (162.38782pt too wide) in paragraph at lines 822--824
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (53.29543pt too wide) in paragraph at lines 835--841
+ []\T1/lmr/bx/n/12 (-20) Schema reg-istries.[] \T1/lmr/m/n/12 (-20) A reg-istry
+ (Con-flu-ent Schema Reg-istry for Avro/Protobuf/JSON
+[252]
+Underfull \vbox (badness 4378) has occurred while \output is active [253]
+Underfull \vbox (badness 1648) has occurred while \output is active [254]
+Underfull \vbox (badness 10000) has occurred while \output is active [255]
+Underfull \vbox (badness 10000) has occurred while \output is active [256]
+Underfull \vbox (badness 10000) has occurred while \output is active [257]
+Overfull \hbox (26.04442pt too wide) in paragraph at lines 1066--1070
+\T1/lmr/m/n/12 (-20) 2020-12 schema and ren-ders fail-ures as an RFC 9457 \T1/l
+mtt/m/n/12 application/problem+json
+[258]
+Underfull \vbox (badness 10000) has occurred while \output is active [259]
+Underfull \vbox (badness 10000) has occurred while \output is active [260]
+Overfull \hbox (9.41866pt too wide) in paragraph at lines 1171--1175
+\T1/lmr/m/n/12 (-20) pi-la-tion is ex-pen-sive; per-request com-pi-la-tion is a
+n anti-pattern), \T1/lmtt/m/n/12 iter_errors
+[261]
+Underfull \vbox (badness 10000) has occurred while \output is active [262]
+Underfull \vbox (badness 10000) has occurred while \output is active [263]
+[264]
+Underfull \vbox (badness 10000) has occurred while \output is active [265]
+Underfull \vbox (badness 10000) has occurred while \output is active [266]
+[267]
+Underfull \vbox (badness 10000) has occurred while \output is active [268]
+Overfull \hbox (29.68896pt too wide) in paragraph at lines 1501--1508
+\T1/lmr/m/n/12 (-20) (\T1/lmtt/m/n/12 unit_price_cents: 1999\T1/lmr/m/n/12 (-20
+) ) or as a dec-i-mal string parsed into \T1/lmtt/m/n/12 decimal.Decimal\T1/lmr
+/m/n/12 (-20) ;
+[269] [270] [271]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 1599.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `superscript' on input line 1599.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 1599.
+
+
+Overfull \hbox (201.52995pt too wide) in paragraph at lines 1611--1622
+\T1/lmtt/m/n/12 "9007199254740993"\T1/lmr/m/n/12 (-20) , shipped be-hind a ven-
+dor me-dia type bump \T1/lmtt/m/n/12 application/vnd.northwind.orders+json;v=2
+[272]
+Overfull \hbox (20.37654pt too wide) in paragraph at lines 1647--1651
+[]\T1/lmr/m/n/12 (-20) Show that \T1/lmtt/m/n/12 additionalProperties: false \T
+1/lmr/m/n/12 (-20) in-side an \T1/lmtt/m/n/12 allOf\T1/lmr/m/n/12 (-20) -compos
+ed
+
+Overfull \hbox (73.74696pt too wide) in paragraph at lines 1647--1651
+\T1/lmr/m/n/12 (-20) schema re-jects le-git-i-mate ex-tended fields, then fix i
+t with \T1/lmtt/m/n/12 unevaluatedProperties\T1/lmr/m/n/12 (-20) .
+
+Underfull \vbox (badness 10000) has occurred while \output is active [273]
+[274]
+Overfull \hbox (43.51357pt too wide) in paragraph at lines 1741--1746
+[]\T1/lmtt/b/n/12 additionalProperties: false \T1/lmr/bx/n/12 (-20) vs. \T1/lmt
+t/b/n/12 unevaluatedProperties: false\T1/lmr/bx/n/12 (-20) ? 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [275]
+Underfull \vbox (badness 10000) has occurred while \output is active [276]
+Underfull \vbox (badness 10000) has occurred while \output is active [277]
+Overfull \hbox (7.75688pt too wide) in paragraph at lines 1845--1850
+\T1/lmtt/m/n/12 application/vnd.northwind.parts+json;v=2\T1/lmr/m/n/12 (-20) : 
+ven-dor tree for own-
+
+Overfull \hbox (1.96364pt too wide) in paragraph at lines 1864--1869
+[]\T1/lmr/bx/n/12 (-20) Why must caches see \T1/lmtt/b/n/12 Vary: Accept \T1/lm
+r/bx/n/12 (-20) on ne-go-ti-ated re-sources? 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [278]
+Overfull \hbox (11.78401pt too wide) in paragraph at lines 1908--1915
+\T1/lmr/m/n/12 (-20) The pro-ducer owns it: emit-ting du-pli-cates is al-ready 
+out-side RFC 8259's
+
+Underfull \vbox (badness 10000) has occurred while \output is active [279]
+[280]
+Overfull \hbox (0.27238pt too wide) in paragraph at lines 1959--1963
+[]\T1/lmr/m/it/12 (-20) MessagePack Spec-i-fi-ca-tion\T1/lmr/m/n/12 (-20) , [][
+]$\T1/lmtt/m/n/12 https : / / github . com / msgpack / msgpack /
+
+Overfull \hbox (100.52322pt too wide) in paragraph at lines 1979--1983
+\T1/lmr/m/n/12 (-20) syn-thetic North-wind Robotics data. Place de-liv-er-ables
+ un-der \T1/lmtt/m/n/12 capstones\capstone_NN_<slug>\
+[281]
+Overfull \hbox (7.9823pt too wide) in paragraph at lines 2006--2006
+[]\T1/lmr/bx/n/14.4 (-20) Capstone 2: Schema-Validation Mid-dle-ware [mid] 
+[282]
+Overfull \hbox (1.23538pt too wide) in paragraph at lines 2076--2076
+[]\T1/lmr/bx/n/14.4 (-20) Capstone 5: Format-Migration CLI for a Dataset
+[283] [284]
+Underfull \vbox (badness 2096) has occurred while \output is active [285]
+Overfull \hbox (16.26054pt too wide) in paragraph at lines 2172--2176
+\T1/lmr/m/n/12 (-20) tracts: as-ser-tions en-force, an-no-ta-tions de-scribe, \
+T1/lmtt/m/n/12 unevaluatedProperties
+
+Underfull \hbox (badness 1546) in paragraph at lines 2209--2209
+[]|\T1/lmr/m/n/10.95 (+20) Internal RPC, strict
+
+Underfull \hbox (badness 10000) in paragraph at lines 2209--2209
+[]|\T1/lmr/m/n/10.95 (+20) Event logs, Kafka,
+
+Underfull \hbox (badness 10000) in paragraph at lines 2209--2209
+\T1/lmr/m/n/10.95 (+20) writer/reader evo-lu-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2209--2209
+[]|\T1/lmr/m/n/10.95 (+20) Schemaless in-ter-nal
+
+Underfull \hbox (badness 10000) in paragraph at lines 2209--2209
+[]|\T1/lmr/m/n/10.95 (+20) Feeds, logs, bulk
+
+Underfull \hbox (badness 10000) in paragraph at lines 2209--2209
+\T1/lmr/m/n/10.95 (+20) ex-port, re-sum-able
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[286] (chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \vbox (badness 1661) has occurred while \output is active [287]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \vbox (badness 1231) has occurred while \output is active [288]))
+(chapters/chapter_05_client_side_security.tex [289] [290] [291] [292] [293]
+[294] [295] [296]
+Chapter 6.
+
+Underfull \vbox (badness 1226) has occurred while \output is active [297]
+Overfull \hbox (24.48436pt too wide) in paragraph at lines 79--83
+[]\OT1/lmr/m/n/12 (-20) ([]([]([]([] + \OML/lmm/m/it/12 k; d\OT1/lmr/m/n/12 (-2
+0) )\OML/lmm/m/it/12 ; r\OT1/lmr/m/n/12 (-20) )\OML/lmm/m/it/12 ; s\OT1/lmr/m/n
+/12 (-20) )\OML/lmm/m/it/12 ; []\OT1/lmr/m/n/12 (-20) )$\T1/lmr/m/n/12 (-20) . 
+
+
+Overfull \hbox (20.16432pt too wide) in paragraph at lines 83--89
+[]\T1/lmr/m/n/12 (-20) Explain the four OAuth 2.0 roles and im-ple-ment the aut
+horization-
+
+Overfull \hbox (60.48727pt too wide) in paragraph at lines 83--89
+\T1/lmtt/m/n/12 code_verifier\T1/lmr/m/n/12 (-20) , de-riv-ing $[] \OT1/lmr/m/n
+/12 (-20) = []([](\OML/lmm/m/it/12 v\OT1/lmr/m/n/12 (-20) ))$\T1/lmr/m/n/12 (-2
+0) ,
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[298] [299]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[300]
+Overfull \hbox (3.65431pt too wide) in paragraph at lines 195--205
+\T1/lmr/m/n/12 (-20) HTTP Ba-sic (RFC 7617) sends \T1/lmtt/m/n/12 Authorization
+: Basic base64(username
+[301]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[302] [303]
+Overfull \hbox (37.74884pt too wide) in paragraph at lines 339--350
+\T1/lmr/m/n/12 (-20) sends the user's browser to the AS \T1/lmtt/m/n/12 /author
+ize \T1/lmr/m/n/12 (-20) end-point with \T1/lmtt/m/n/12 response_type=code\T1/l
+mr/m/n/12 (-20) ,
+
+Overfull \hbox (34.27415pt too wide) in paragraph at lines 361--366
+\T1/lmr/m/n/12 (-20) of \T1/lmr/bx/n/12 (-20) 43--128 char-ac-ters \T1/lmr/m/n/
+12 (-20) drawn from the un-re-served URI set \T1/lmtt/m/n/12 [A--Za--z0--9-._~]
+\T1/lmr/m/n/12 (-20) .
+
+Overfull \hbox (56.52937pt too wide) detected at line 369
+[] \OT1/lmr/m/n/12 = []  []
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[304]
+Overfull \hbox (247.46718pt too wide) in paragraph at lines 422--425
+ [][] 
+
+Overfull \hbox (49.89793pt too wide) in paragraph at lines 431--438
+\T1/lmr/m/n/12 (-20) client POSTs \T1/lmtt/m/n/12 grant_type=client_credentials
+ \T1/lmr/m/n/12 (-20) with its \T1/lmtt/m/n/12 client_id\T1/lmr/m/n/12 (-20) /\
+T1/lmtt/m/n/12 client_secret
+[305]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[306]
+Overfull \hbox (76.7159pt too wide) in paragraph at lines 513--516
+ [][] 
+
+Overfull \hbox (38.29556pt too wide) in paragraph at lines 534--538
+[]\T1/lmr/bx/n/12 (-20) Discovery. \T1/lmr/m/n/12 (-20) OIDC providers pub-lish
+ \T1/lmtt/m/n/12 /.well-known/openid-configuration\T1/lmr/m/n/12 (-20) :
+[307]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[308] [309]
+Overfull \hbox (33.9051pt too wide) in paragraph at lines 652--658
+\T1/lmtt/m/n/12 key FROM keys WHERE id='$kid'\T1/lmr/m/n/12 (-20) ), the at-tac
+ker in-jects \T1/lmtt/m/n/12 ../../etc/passwd
+
+Underfull \hbox (badness 10000) in paragraph at lines 698--698
+[]|\T1/lmr/m/n/10.95 (+20) Twelve-factor na-
+
+Underfull \hbox (badness 1509) in paragraph at lines 698--698
+[]|\T1/lmr/m/n/10.95 (+20) Desktop-only; head-
+
+Underfull \hbox (badness 10000) in paragraph at lines 698--698
+[]|\T1/lmr/m/n/10.95 (+20) Central au-dit, ro-
+
+Underfull \hbox (badness 7869) in paragraph at lines 698--698
+\T1/lmr/m/n/10.95 (+20) ta-tion, fine-grained
+
+Underfull \hbox (badness 10000) in paragraph at lines 698--698
+\T1/lmr/m/n/10.95 (+20) bootstrap-credential
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[310] [311]
+Overfull \hbox (94.60706pt too wide) in paragraph at lines 777--778
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[312]
+Underfull \vbox (badness 10000) has occurred while \output is active [313]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[314]
+Underfull \vbox (badness 10000) has occurred while \output is active [315]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[316]
+Underfull \vbox (badness 10000) has occurred while \output is active [317]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[318] [319]
+Overfull \hbox (67.01282pt too wide) in paragraph at lines 1027--1030
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[320]
+Underfull \vbox (badness 10000) has occurred while \output is active [321]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[322]
+Underfull \vbox (badness 10000) has occurred while \output is active [323]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[324]
+Underfull \vbox (badness 10000) has occurred while \output is active [325]
+Overfull \hbox (37.89986pt too wide) in paragraph at lines 1260--1264
+\T1/lmr/m/n/12 (-20) na-ture sec-ond (constant-time), claims third (with lee-wa
+y). The \T1/lmtt/m/n/12 SignatureVerifier
+
+Overfull \hbox (11.3064pt too wide) in paragraph at lines 1260--1264
+\T1/lmr/m/n/12 (-20) pro-to-col marks the ex-act seam where an RS256 back-end b
+uilt on \T1/lmtt/m/n/12 cryptography
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[326]
+Underfull \vbox (badness 10000) has occurred while \output is active [327]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[328]
+Underfull \vbox (badness 10000) has occurred while \output is active [329]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[330]
+Underfull \vbox (badness 10000) has occurred while \output is active [331]
+Underfull \vbox (badness 1033) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[332] [333]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[334]
+Overfull \hbox (46.31714pt too wide) in paragraph at lines 1588--1589
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [335]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[336]
+Overfull \hbox (54.21666pt too wide) in paragraph at lines 1653--1653
+[]\T1/lmr/bx/n/14.4 (-20) Listing 5.5 --- Ed-u-ca-tional At-tack Demo: RS256$\O
+MS/lmsy/m/n/14.4 !$\T1/lmr/bx/n/14.4 (-20) HS256
+[337]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[338]
+Underfull \vbox (badness 10000) has occurred while \output is active [339]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[340]
+Underfull \vbox (badness 6284) has occurred while \output is active [341]
+Overfull \hbox (10.86359pt too wide) in paragraph at lines 1844--1848
+[]\T1/lmr/bx/n/12 (-20) One key across en-vi-ron-ments. \T1/lmr/m/n/12 (-20) A 
+sin-gle API key for dev/staging/prod
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[342] [343]
+Overfull \hbox (35.22643pt too wide) in paragraph at lines 1914--1919
+[]\T1/lmr/bx/n/12 (-20) Part E --- at-tack and cure. \T1/lmr/m/n/12 (-20) Run L
+ist-ing [][]6.3.5[][]. Then port \T1/lmtt/m/n/12 hardened_verify\T1/lmr/m/n/12 
+(-20) 's
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[344] [345]
+Underfull \vbox (badness 1735) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[346]
+Underfull \vbox (badness 10000) has occurred while \output is active [347]
+Overfull \hbox (40.1119pt too wide) in paragraph at lines 2081--2081
+[]\T1/lmr/bx/n/12 (-20) Why must HMAC sig-na-ture com-par-i-son use \T1/lmtt/b/
+n/12 hmac.compare_digest
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[348]
+Overfull \hbox (128.71652pt too wide) in paragraph at lines 2153--2160
+\T1/lmr/m/n/12 (-20) browser; the de-vice polls the to-ken end-point, hon-or-in
+g \T1/lmtt/m/n/12 authorization_pending\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 sl
+ow_down\T1/lmr/m/n/12 (-20) .
+
+Underfull \vbox (badness 10000) has occurred while \output is active [349]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[350] [351]
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[352]
+Underfull \vbox (badness 10000) has occurred while \output is active [353]
+Overfull \hbox (2.4324pt too wide) in paragraph at lines 2345--2348
+[]\T1/lmr/bx/n/12 (-20) The Twelve-Factor App, fac-tor III \T1/lmr/m/n/12 (-20)
+ [[][]Wig17[][]]. Config-in-environment
+
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[354]
+Overfull \hbox (13.89847pt too wide) in paragraph at lines 2396--2399
+[]\T1/lmr/bx/n/12 (-20) Inputs/Datasets. \T1/lmr/m/n/12 (-20) The stub IdP (ex-
+tended with \T1/lmtt/m/n/12 /device_authorization
+[355]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[356]
+Overfull \hbox (42.1296pt too wide) in paragraph at lines 2450--2453
+[]\T1/lmr/bx/n/12 (-20) Stretch Goals. \T1/lmr/m/n/12 (-20) Auto-fix mode for t
+he me-chan-i-cal rules (\T1/lmtt/m/n/12 == $\OMS/lmsy/m/n/12 !$ \T1/lmtt/m/n/12
+ compare_digest\T1/lmr/m/n/12 (-20) );
+[357]
+Overfull \hbox (11.06177pt too wide) in paragraph at lines 2543--2548
+\T1/lmr/m/n/12 (-20) rity re-sponse. \T1/lmtt/m/n/12 pyjwt \T1/lmr/m/n/12 (-20)
+ makes the safe or-der the de-fault: \T1/lmtt/m/n/12 algorithms=["RS256"]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[358] [359]
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[360]
+
+Package tabularx Warning: X Columns too narrow (table too wide)
+(tabularx)                 on input line 2699.
+
+
+Overfull \hbox (21.26605pt too wide) in paragraph at lines 2699--2699
+[]|\T1/lmr/bx/n/10.95 (-20) Never| 
+
+Overfull \hbox (21.92886pt too wide) in paragraph at lines 2699--2699
+[]|\T1/lmr/m/n/10.95 (-20) Secrets
+
+Underfull \hbox (badness 10000) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (+20) in
+
+Overfull \hbox (11.11238pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) repo,
+
+Overfull \hbox (8.45338pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) logs,
+
+Overfull \hbox (2.72128pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) im-
+
+Overfull \hbox (8.78322pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) ages| 
+
+Overfull \hbox (26.18956pt too wide) in paragraph at lines 2699--2699
+[]|\T1/lmr/m/n/10.95 (-20) Dotfiles,
+
+Overfull \hbox (9.97543pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) shell
+
+Overfull \hbox (3.97359pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) his-
+
+Overfull \hbox (8.45557pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) tory| 
+
+Overfull \hbox (19.4541pt too wide) in paragraph at lines 2699--2699
+[]|\T1/lmr/m/n/10.95 (-20) Config
+
+Overfull \hbox (6.99463pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) files
+
+Underfull \hbox (badness 10000) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (+20) in
+
+Overfull \hbox (2.72128pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) im-
+
+Overfull \hbox (4.55038pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) age| 
+
+Overfull \hbox (46.01988pt too wide) in paragraph at lines 2699--2699
+[]|\T1/lmr/m/n/10.95 (-20) localStorage
+
+Overfull \hbox (11.26976pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) with-
+
+Overfull \hbox (4.25471pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) out
+
+Overfull \hbox (7.199pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) doc-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (+20) u-
+
+Overfull \hbox (23.3232pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) mented
+
+Overfull \hbox (10.47174pt too wide) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (-20) anal-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2699--2699
+\T1/lmr/m/n/10.95 (+20) y-
+
+Overfull \hbox (73.45486pt too wide) in alignment at lines 2699--2699
+[][][][] 
+(chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[361]
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[362]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+[363])) (chapters/chapter_06_building_apis_fastapi.tex
+
+Package fancyhdr Warning: \headheight is too small (15.0pt): 
+(fancyhdr)                Make it at least 27.85004pt, for example:
+(fancyhdr)                \setlength{\headheight}{27.85004pt}.
+(fancyhdr)                You might also make \topmargin smaller:
+(fancyhdr)                \addtolength{\topmargin}{-12.85004pt}.
+
+[364]
+Chapter 7.
+[365]
+Overfull \hbox (19.51352pt too wide) in paragraph at lines 63--69
+\T1/lmtt/m/n/12 paths\T1/lmr/m/n/12 (-20) , op-er-a-tions, \T1/lmtt/m/n/12 comp
+onents.schemas\T1/lmr/m/n/12 (-20) , and \T1/lmtt/m/n/12 securitySchemes
+
+Overfull \hbox (9.20677pt too wide) in paragraph at lines 84--89
+[]\T1/lmr/m/n/12 (-20) Apply the Py-dan-tic v2 val-i-da-tion pipeline --- \T1/l
+mtt/m/n/12 field_validator\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (2.49379pt too wide) in paragraph at lines 84--89
+\T1/lmr/m/n/12 (-20) core --- to en-force do-main in-vari-ants, and use \T1/lmt
+t/m/n/12 response_model
+[366]
+Overfull \hbox (85.02354pt too wide) in paragraph at lines 89--93
+[]\T1/lmr/m/n/12 (-20) Operate the ser-vice: 12-factor con-fig-u-ra-tion with \
+T1/lmtt/m/n/12 pydantic-settings \T1/lmr/m/n/12 (-20) [[][]Wig17[][]],
+[367]
+Underfull \hbox (badness 6032) in paragraph at lines 190--190
+[]|\T1/lmr/m/n/10.95 (+20) Hand-written Ope-nAPI
+
+Underfull \hbox (badness 4913) in paragraph at lines 190--190
+[]|\T1/lmr/m/n/10.95 (+20) Immediately (gen-er-ated
+
+Underfull \hbox (badness 10000) in paragraph at lines 190--190
+[]|\T1/lmr/m/n/10.95 (+20) After first de-ploy-able
+
+Underfull \hbox (badness 10000) in paragraph at lines 190--190
+[]|\T1/lmr/m/n/10.95 (+20) Internal APIs, small
+
+Underfull \hbox (badness 10000) in paragraph at lines 190--190
+[]|\T1/lmr/m/n/10.95 (+20) Spec/implementation
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (170.29608pt too wide) in paragraph at lines 222--225
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[368]
+Overfull \hbox (3.87259pt too wide) in paragraph at lines 247--255
+[]\T1/lmtt/b/n/12 paths \T1/lmr/m/n/12 (-20) --- the heart: a map from path tem
+-plates (\T1/lmtt/m/n/12 /orders/{order_id}\T1/lmr/m/n/12 (-20) )
+
+Overfull \hbox (14.46454pt too wide) in paragraph at lines 260--265
+\T1/lmr/m/n/12 (-20) ca-tion mech-a-nisms (\T1/lmtt/m/n/12 apiKey\T1/lmr/m/n/12
+ (-20) , \T1/lmtt/m/n/12 http \T1/lmr/m/n/12 (-20) bearer/basic, \T1/lmtt/m/n/1
+2 oauth2\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 openIdConnect\T1/lmr/m/n/12 (-20
+) )
+[369]
+Overfull \hbox (1.42148pt too wide) in paragraph at lines 269--278
+[]\T1/lmr/m/n/12 (-20) FastAPI gen-er-ates all of this from your an-no-ta-tions
+: the \T1/lmtt/m/n/12 response_model
+
+Overfull \hbox (30.72543pt too wide) in paragraph at lines 287--295
+\T1/lmr/m/n/12 (-20) chunks, \T1/lmtt/m/n/12 http.disconnect\T1/lmr/m/n/12 (-20
+) ); \T1/lmtt/m/n/12 send \T1/lmr/m/n/12 (-20) awaits out-bound events (\T1/lmt
+t/m/n/12 http.response.start
+[370]
+Overfull \hbox (3.25488pt too wide) in paragraph at lines 305--309
+[]\T1/lmr/bx/n/12 (-20) Starlette \T1/lmr/m/n/12 (-20) is the ASGI toolkit: the
+ router that matches \T1/lmtt/m/n/12 scope["path"]\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (1.58374pt too wide) in paragraph at lines 305--309
+\T1/lmr/m/n/12 (-20) the mid-dle-ware ma-chin-ery, re-quest/response ab-strac-t
+ions, \T1/lmtt/m/n/12 TestClient\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (13.93636pt too wide) in paragraph at lines 309--314
+\T1/lmr/m/n/12 (-20) tion com-piler on top of Star-lette. When you write \T1/lm
+tt/m/n/12 @app.get("/orders")\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (80.77032pt too wide) in paragraph at lines 341--344
+ [][] 
+[371] [372] [373]
+Overfull \hbox (13.61526pt too wide) in paragraph at lines 484--490
+\T1/lmr/m/n/12 (-20) wire while Python code keeps id-iomatic names. \T1/lmtt/m/
+n/12 populate_by_name=True
+
+Overfull \hbox (75.48892pt too wide) in paragraph at lines 503--516
+\T1/lmtt/m/n/12 Settings(repository_backend="memory") \T1/lmr/m/n/12 (-20) ex-p
+lic-itly; pro-duc-tion sets \T1/lmtt/m/n/12 NWR_SQLITE_PATH\T1/lmr/m/n/12 (-20)
+ ;
+
+Underfull \hbox (badness 10000) in paragraph at lines 539--539
+[]|\T1/lmr/m/n/10.95 (+20) Dependencies reach-able
+
+Underfull \hbox (badness 10000) in paragraph at lines 539--539
+\T1/lmr/m/n/10.95 (+20) (repos-i-tory \T1/lmtt/m/n/10.95 ping()\T1/lmr/m/n/10.9
+5 (+20) ),
+
+Underfull \hbox (badness 2529) in paragraph at lines 539--539
+\T1/lmr/m/n/10.95 (+20) the loop runs; fail $\OMS/lmsy/m/n/10.95 )$
+[374]
+Overfull \hbox (22.00145pt too wide) in paragraph at lines 546--552
+[]\T1/lmr/bx/n/12 (-20) Graceful shut-down. \T1/lmr/m/n/12 (-20) Uvi-corn's lif
+es-pan pro-to-col sends \T1/lmtt/m/n/12 lifespan.shutdown
+
+Overfull \hbox (3.15215pt too wide) in paragraph at lines 560--563
+[]\T1/lmtt/b/n/12 response_model \T1/lmr/bx/n/12 (-20) fil-ter-ing \T1/lmr/m/n/
+12 (-20) --- the se-cu-rity bound-ary from Sec-tion [][]7.2.6[][]:
+
+Overfull \hbox (96.41252pt too wide) in paragraph at lines 569--573
+\T1/lmr/m/n/12 (-20) se-ri-al-iza-tion (the er-ror han-dlers re-turn \T1/lmtt/m
+/n/12 JSONResponse \T1/lmr/m/n/12 (-20) with \T1/lmtt/m/n/12 application/proble
+m+json\T1/lmr/m/n/12 (-20) ),
+[375]
+Underfull \hbox (badness 7869) in paragraph at lines 584--591
+[]\T1/lmr/bx/n/12 (+20) The accidental-contract trap, con-cretely. \T1/lmr/m/n/
+12 (+20) With-out
+
+Underfull \hbox (badness 5231) in paragraph at lines 584--591
+\T1/lmtt/m/n/12 response_model\T1/lmr/m/n/12 (+20) , re-turn-ing an \T1/lmtt/m/
+n/12 OrderRecord \T1/lmr/m/n/12 (+20) would se-ri-al-ize
+[376] [377]
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 665--666
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 667--670
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 685--686
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 687--690
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [378]
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 718--719
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 720--723
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [379]
+Underfull \vbox (badness 10000) has occurred while \output is active [380]
+Underfull \vbox (badness 10000) has occurred while \output is active [381]
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 826--827
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 828--831
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [382]
+Underfull \vbox (badness 10000) has occurred while \output is active [383]
+Underfull \vbox (badness 10000) has occurred while \output is active [384]
+Underfull \vbox (badness 10000) has occurred while \output is active [385]
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 968--969
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 970--973
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [386]
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 995--996
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 997--1000
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 1012--1013
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 1014--1017
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [387]
+Underfull \vbox (badness 10000) has occurred while \output is active [388]
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 1073--1074
+[][][][] 
+
+Overfull \hbox (156.69409pt too wide) in paragraph at lines 1075--1078
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [389]
+Overfull \hbox (67.01282pt too wide) in paragraph at lines 1116--1118
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [390]
+Underfull \vbox (badness 10000) has occurred while \output is active [391]
+Overfull \hbox (4.92578pt too wide) in paragraph at lines 1178--1180
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [392]
+Overfull \hbox (2.56737pt too wide) in paragraph at lines 1220--1225
+[]\T1/lmr/bx/n/12 (-20) The fac-tory, not the mod-ule global. \T1/lmtt/m/n/12 c
+reate_app \T1/lmr/m/n/12 (-20) takes a \T1/lmtt/m/n/12 Settings
+[393] [394]
+Underfull \vbox (badness 10000) has occurred while \output is active [395]
+Underfull \vbox (badness 10000) has occurred while \output is active [396]
+Underfull \vbox (badness 10000) has occurred while \output is active [397]
+Underfull \hbox (badness 10000) in paragraph at lines 1406--1414
+[]\T1/lmtt/b/n/12 BaseHTTPMiddleware \T1/lmr/bx/n/12 (+20) vs. pure ASGI. \T1/l
+mr/m/n/12 (+20) Star-lette's
+
+Underfull \hbox (badness 5504) in paragraph at lines 1406--1414
+\T1/lmtt/m/n/12 BaseHTTPMiddleware \T1/lmr/m/n/12 (+20) is con-ve-nient (re-que
+st/response ob-jects
+
+Underfull \hbox (badness 1701) in paragraph at lines 1406--1414
+\T1/lmr/m/n/12 (+20) in-stead of raw mes-sages) but his-tor-i-cally buffered st
+ream-ing
+
+Overfull \hbox (17.5036pt too wide) in paragraph at lines 1416--1416
+[]\T1/lmr/bx/n/14.4 (-20) The DI Show-case: Chains, Yield-Cleanup, Caching,
+[398]
+Underfull \vbox (badness 10000) has occurred while \output is active [399]
+Underfull \vbox (badness 10000) has occurred while \output is active [400]
+[401]
+Underfull \vbox (badness 10000) has occurred while \output is active [402]
+Overfull \hbox (39.41858pt too wide) in paragraph at lines 1605--1608
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [403]
+Underfull \vbox (badness 10000) has occurred while \output is active [404]
+Overfull \hbox (87.7085pt too wide) in paragraph at lines 1696--1699
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [405]
+Overfull \hbox (53.2157pt too wide) in paragraph at lines 1710--1713
+[][][][] 
+
+Overfull \hbox (108.40417pt too wide) in paragraph at lines 1727--1730
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [406]
+Overfull \hbox (60.11426pt too wide) in paragraph at lines 1742--1745
+[][][][] 
+
+Overfull \hbox (25.62146pt too wide) in paragraph at lines 1757--1760
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [407]
+Underfull \hbox (badness 10000) in paragraph at lines 1797--1805
+\T1/lmr/m/n/12 (+20) --- \T1/lmtt/m/n/12 create_app(Settings(repository_backend
+="memory"))
+
+Underfull \hbox (badness 10000) in paragraph at lines 1797--1805
+\T1/lmr/m/n/12 (+20) --- which is the right choice when the whole en-vi-ron-
+
+Underfull \hbox (badness 10000) in paragraph at lines 1797--1805
+\T1/lmr/m/n/12 (+20) ment changes. The over-ride tests use the \T1/lmr/m/it/12 
+(+20) over-ride
+
+Underfull \hbox (badness 10000) in paragraph at lines 1797--1805
+\T1/lmr/m/it/12 (+20) seam \T1/lmr/m/n/12 (+20) --- \T1/lmtt/m/n/12 app.depende
+ncy_overrides[get_repository] =
+[408]
+Overfull \hbox (7.14615pt too wide) in paragraph at lines 1833--1840
+\T1/lmtt/m/n/12 def endpoint(cache: dict = {}) \T1/lmr/m/n/12 (-20) and module-
+level de-pen-dency in-stances
+[409]
+Underfull \vbox (badness 5924) has occurred while \output is active [410]
+[411]
+Overfull \hbox (40.29593pt too wide) in paragraph at lines 1934--1941
+[]\T1/lmr/m/n/12 (-20) Open \T1/lmtt/m/n/12 openapi.json \T1/lmr/m/n/12 (-20) a
+nd lo-cate: the \T1/lmtt/m/n/12 servers \T1/lmr/m/n/12 (-20) ar-ray in-jected b
+y \T1/lmtt/m/n/12 custom_openapi\T1/lmr/m/n/12 (-20) ;
+
+Overfull \hbox (27.91653pt too wide) in paragraph at lines 1934--1941
+\T1/lmr/m/n/12 (-20) sponse on \T1/lmtt/m/n/12 POST /orders\T1/lmr/m/n/12 (-20)
+ ; and the \T1/lmtt/m/n/12 OrderRead \T1/lmr/m/n/12 (-20) schema --- con-firm \
+T1/lmtt/m/n/12 warehouse_hint
+
+Overfull \hbox (35.63477pt too wide) in paragraph at lines 1934--1941
+\T1/lmr/m/n/12 (-20) and \T1/lmtt/m/n/12 fraud_score \T1/lmr/m/n/12 (-20) ap-pe
+ar nowhere in it. Then open \T1/lmtt/m/n/12 http://localhost:8000/docs
+
+Overfull \hbox (108.50203pt too wide) in paragraph at lines 1942--1948
+[]\T1/lmr/bx/n/12 (-20) Step 5 --- flip the back-end. \T1/lmr/m/n/12 (-20) Stop
+ the server, set \T1/lmtt/m/n/12 $env:NWR_REPOSITORY_BACKEND="sqlite"
+[412]
+Overfull \hbox (37.02919pt too wide) in paragraph at lines 2010--2014
+[]\T1/lmr/bx/n/12 (-20) Idempotent cre-ate. \T1/lmr/m/n/12 (-20) Ex-tend \T1/lm
+tt/m/n/12 POST /orders \T1/lmr/m/n/12 (-20) to ac-cept an \T1/lmtt/m/n/12 Idemp
+otency-Key
+
+Overfull \hbox (22.61171pt too wide) in paragraph at lines 2018--2024
+\T1/lmr/m/n/12 (-20) counts re-quests per path and ex-poses the counts on \T1/l
+mtt/m/n/12 /metrics \T1/lmr/m/n/12 (-20) (Prometheus
+[413]
+Overfull \hbox (38.9036pt too wide) in paragraph at lines 2066--2077
+\T1/lmtt/m/n/12 http.response.start \T1/lmr/m/n/12 (-20) (sta-tus + head-ers) f
+ol-lowed by \T1/lmtt/m/n/12 http.response.body
+
+Overfull \hbox (1.11871pt too wide) in paragraph at lines 2066--2077
+\T1/lmr/m/n/12 (-20) chunks. Ev-ery header mu-ta-tion must hap-pen be-fore \T1/
+lmtt/m/n/12 response.start
+[414]
+Overfull \hbox (207.81018pt too wide) in paragraph at lines 2102--2108
+\T1/lmr/m/n/12 (-20) pan via anyio's thread lim-iter API (\T1/lmtt/m/n/12 anyio
+.to_thread.current_default_thread_limiter().total_tokens
+
+Underfull \vbox (badness 10000) has occurred while \output is active [415]
+Overfull \hbox (2.21915pt too wide) in paragraph at lines 2164--2172
+\T1/lmtt/m/n/12 @validator\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 @root_validator
+\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 model_dump()\T1/lmr/m/n/12 (-20) / \T1/l
+mtt/m/n/12 model_validate()
+
+Overfull \hbox (1.07959pt too wide) in paragraph at lines 2164--2172
+\T1/lmr/m/n/12 (-20) re-place \T1/lmtt/m/n/12 .dict()\T1/lmr/m/n/12 (-20) /\T1/
+lmtt/m/n/12 parse_obj()\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 model_config = Co
+nfigDict(...)
+
+Underfull \vbox (badness 10000) has occurred while \output is active [416]
+Overfull \hbox (4.97592pt too wide) in paragraph at lines 2182--2188
+\T1/lmr/m/n/12 (-20) code uses \T1/lmtt/m/n/12 customer_id\T1/lmr/m/n/12 (-20) 
+; the JSON body car-ries \T1/lmtt/m/n/12 customerId\T1/lmr/m/n/12 (-20) . FastA
+PI
+
+Underfull \vbox (badness 10000) has occurred while \output is active [417]
+Underfull \vbox (badness 10000) has occurred while \output is active [418]
+Overfull \hbox (1.9136pt too wide) in paragraph at lines 2273--2280
+[]\T1/lmr/bx/n/12 (-20) Explain 12-factor con-fig-u-ra-tion and pydantic-settin
+gs' source
+
+Underfull \vbox (badness 10000) has occurred while \output is active [419]
+Underfull \vbox (badness 10000) has occurred while \output is active [420]
+Overfull \hbox (5.53653pt too wide) in paragraph at lines 2339--2348
+\T1/lmr/m/n/12 (-20) It takes an it-er-a-tor of byte chunks and sends one \T1/l
+mtt/m/n/12 http.response.body
+[421]
+Overfull \hbox (100.52322pt too wide) in paragraph at lines 2416--2420
+\T1/lmr/m/n/12 (-20) syn-thetic North-wind Robotics data. Place de-liv-er-ables
+ un-der \T1/lmtt/m/n/12 capstones\capstone_NN_<slug>\
+[422]
+Overfull \hbox (0.87823pt too wide) in paragraph at lines 2447--2447
+[]\T1/lmr/bx/n/14.4 (-20) Capstone 2: In-ven-tory API with a SQLite Repos-
+
+Overfull \hbox (49.48958pt too wide) in paragraph at lines 2448--2465
+\T1/lmr/bx/n/12 (-20) Inputs/Datasets. \T1/lmr/m/n/12 (-20) A gen-er-ated fix-t
+ure of 500 syn-thetic parts (\T1/lmtt/m/n/12 NWR-0001\T1/lmr/m/n/12 (-20) ...\T
+1/lmtt/m/n/12 NWR-0500\T1/lmr/m/n/12 (-20) )
+[423] [424]
+Overfull \hbox (11.0204pt too wide) in paragraph at lines 2536--2555
+\T1/lmr/bx/n/12 (-20) Steps. \T1/lmr/m/n/12 (-20) (1) Au-thor the 3.1 spec with
+ \T1/lmtt/m/n/12 servers\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 components\T1/lm
+r/m/n/12 (-20) , \T1/lmtt/m/n/12 securitySchemes\T1/lmr/m/n/12 (-20) ,
+[425]
+Overfull \hbox (7.38022pt too wide) in paragraph at lines 2605--2617
+\T1/lmr/bx/n/12 (-20) Installation. \T1/lmtt/m/n/12 pip install "uvicorn[standa
+rd]>=0.29" \T1/lmr/m/n/12 (-20) (quote the brack-
+[426]
+Overfull \hbox (3.68674pt too wide) in paragraph at lines 2619--2631
+\T1/lmr/bx/n/12 (-20) Alternatives. at-trs + cat-trs \T1/lmr/m/n/12 (-20) (clas
+s au-thor-ing plus ex-plicit (de)serialization;
+
+Overfull \hbox (37.9065pt too wide) in paragraph at lines 2645--2655
+\T1/lmr/bx/n/12 (-20) Description. \T1/lmr/m/n/12 (-20) The HTTP client whose \
+T1/lmtt/m/n/12 ASGITransport \T1/lmr/m/n/12 (-20) pow-ers \T1/lmtt/m/n/12 TestC
+lient \T1/lmr/m/n/12 (-20) [[][]Enc24[][]]:
+[427] [428]
+Underfull \hbox (badness 10000) in paragraph at lines 2740--2740
+[]|\T1/lmtt/m/n/10.95 app.dependency_overrides[original] =
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[429]
+Overfull \hbox (29.63187pt too wide) in paragraph at lines 2753--2755
+[]\T1/lmr/m/n/12 (-20) Middleware un-winds (head-ers al-ready com-mit-ted at \T
+1/lmtt/m/n/12 http.response.start\T1/lmr/m/n/12 (-20) ). 
+(chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+[430]
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+[431]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+[432])) (chapters/chapter_07_errors_validation_problem_details.tex [433]
+[434]
+Chapter 8.
+[435] [436] [437] [438]
+Overfull \hbox (5.31888pt too wide) in paragraph at lines 193--202
+\T1/lmr/m/n/12 (-20) Before RFC 7807 (2016), ev-ery API in-vented its own er-ro
+r pay-load: \T1/lmtt/m/n/12 {"error":
+
+Overfull \hbox (0.97101pt too wide) in paragraph at lines 193--202
+\T1/lmtt/m/n/12 "oops"}\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 {"message": ..., 
+"code": 1234}\T1/lmr/m/n/12 (-20) , bare strings, HTML pages
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[439]
+Overfull \hbox (170.66672pt too wide) in paragraph at lines 258--265
+\T1/lmr/m/it/12 (-20) contract\T1/lmr/m/n/12 (-20) . When a client deref-er-enc
+es \T1/lmtt/m/n/12 https://docs.example.invalid/problems/validation-failed\T1/l
+mr/m/n/12 (-20) ,
+[440]
+Overfull \hbox (5.7743pt too wide) in paragraph at lines 275--285
+\T1/lmr/m/n/12 (-20) un-der your do-main can-not col-lide with an-other ven-dor
+'s ``\T1/lmtt/m/n/12 validation_error\T1/lmr/m/n/12 (-20) .''
+[441]
+Overfull \hbox (5.49129pt too wide) in paragraph at lines 324--334
+[]\T1/lmtt/m/n/12 422 Unprocessable Content \T1/lmr/m/n/12 (-20) means the re-q
+uest \T1/lmr/m/it/12 (-20) was \T1/lmr/m/n/12 (-20) syn-tac-ti-cally valid---
+[442]
+Overfull \hbox (10.20906pt too wide) in paragraph at lines 399--401
+[]\T1/lmtt/m/n/12 500 Internal Server Error\T1/lmr/m/n/12 (-20) : your code fau
+lted. Generic, uncatchable-
+
+Overfull \hbox (1.4078pt too wide) in paragraph at lines 403--407
+[]\T1/lmtt/m/n/12 503 Service Unavailable\T1/lmr/m/n/12 (-20) : de-lib-er-ate u
+navailability--- over-load shed-
+[443]
+Overfull \hbox (189.23158pt too wide) in paragraph at lines 463--466
+ [][] 
+[444] [445]
+Overfull \hbox (9.46692pt too wide) in paragraph at lines 547--547
+ \T1/lmtt/m/n/10.95 ProblemException 
+
+Overfull \hbox (55.45679pt too wide) in paragraph at lines 550--550
+ [][]\T1/lmtt/m/n/10.95 application/problem+json 
+
+Overfull \hbox (50.70389pt too wide) in paragraph at lines 560--563
+ [][] 
+
+Overfull \hbox (19.10478pt too wide) in paragraph at lines 580--588
+\T1/lmtt/m/n/12 title \T1/lmr/m/n/12 (-20) and \T1/lmtt/m/n/12 detail \T1/lmr/m
+/n/12 (-20) are human-facing and may be lo-cal-ized via \T1/lmtt/m/n/12 Accept-
+Language\T1/lmr/m/n/12 (-20) ;
+[446]
+Overfull \hbox (5.5846pt too wide) in paragraph at lines 593--602
+\T1/lmr/m/n/12 (-20) Every re-quest car-ries a trace iden-ti-fier: ac-cepted fr
+om an in-bound \T1/lmtt/m/n/12 X-Trace-Id
+
+Overfull \hbox (80.91652pt too wide) in paragraph at lines 605--614
+\T1/lmr/m/n/12 (-20) The er-ror con-tract is your ob-serv-abil-ity tax-on-omy: 
+emit met-rics as \T1/lmtt/m/n/12 errors_total{endpoint,
+[447]
+Overfull \hbox (42.89793pt too wide) in paragraph at lines 659--669
+\T1/lmr/m/n/12 (-20) ker-nel plus our ex-ten-sion mem-bers (\T1/lmtt/m/n/12 cod
+e\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 trace_id\T1/lmr/m/n/12 (-20) , \T1/lmtt
+/m/n/12 errors[]\T1/lmr/m/n/12 (-20) ). \T1/lmtt/m/n/12 ProblemException
+
+Overfull \hbox (57.90286pt too wide) in paragraph at lines 659--669
+\T1/lmr/m/n/12 (-20) man-ti-cally named sub-classes; one han-dler ren-ders them
+. The \T1/lmtt/m/n/12 RequestValidationError
+[448]
+Underfull \vbox (badness 10000) has occurred while \output is active [449]
+Underfull \vbox (badness 10000) has occurred while \output is active [450]
+Underfull \vbox (badness 10000) has occurred while \output is active [451]
+Underfull \vbox (badness 10000) has occurred while \output is active [452]
+Underfull \vbox (badness 10000) has occurred while \output is active [453]
+[454]
+Underfull \vbox (badness 10000) has occurred while \output is active [455]
+Underfull \vbox (badness 10000) has occurred while \output is active [456]
+Underfull \vbox (badness 10000) has occurred while \output is active [457]
+Overfull \hbox (36.55658pt too wide) in paragraph at lines 1046--1056
+\T1/lmr/m/n/12 (-20) han-dlers can read \T1/lmtt/m/n/12 request.state.trace_id\
+T1/lmr/m/n/12 (-20) ), and \T1/lmtt/m/n/12 ProblemRedactionMiddleware
+[458]
+Underfull \vbox (badness 10000) has occurred while \output is active [459]
+Underfull \vbox (badness 10000) has occurred while \output is active [460]
+[461]
+Underfull \vbox (badness 10000) has occurred while \output is active [462]
+Underfull \vbox (badness 10000) has occurred while \output is active [463]
+Overfull \hbox (39.546pt too wide) in paragraph at lines 1280--1284
+\T1/lmr/m/n/12 (-20) net-work, de-ter-min-is-tic on a fresh ma-chine. Note \T1/
+lmtt/m/n/12 raise_server_exceptions=False\T1/lmr/m/n/12 (-20) :
+[464]
+Underfull \vbox (badness 10000) has occurred while \output is active [465]
+Underfull \vbox (badness 10000) has occurred while \output is active [466]
+Underfull \vbox (badness 10000) has occurred while \output is active [467]
+Overfull \hbox (67.01282pt too wide) in paragraph at lines 1442--1443
+[][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [468]
+[469]
+Underfull \vbox (badness 10000) has occurred while \output is active [470]
+Underfull \vbox (badness 10000) has occurred while \output is active [471]
+Overfull \hbox (24.27238pt too wide) in paragraph at lines 1602--1608
+\T1/lmr/m/it/12 (-20) Symptom: \T1/lmtt/m/n/12 /orders \T1/lmr/m/n/12 (-20) re-
+turns \T1/lmtt/m/n/12 {"error": ...}\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 /shi
+pments \T1/lmr/m/n/12 (-20) re-turns \T1/lmtt/m/n/12 {"message":
+[472]
+Overfull \hbox (21.55644pt too wide) in paragraph at lines 1611--1617
+\T1/lmr/m/it/12 (-20) Symptom: \T1/lmr/m/n/12 (-20) con-sumer code does \T1/lmt
+t/m/n/12 if "insufficient" in response["message"]\T1/lmr/m/n/12 (-20) .
+
+Underfull \vbox (badness 4036) has occurred while \output is active [473]
+Overfull \hbox (12.6352pt too wide) in paragraph at lines 1667--1670
+[]\T1/lmr/bx/n/12 (-20) Install the pipeline. \T1/lmr/m/n/12 (-20) Drop in \T1/
+lmtt/m/n/12 problem_details.py \T1/lmr/m/n/12 (-20) and \T1/lmtt/m/n/12 redacti
+on.py
+
+Overfull \hbox (34.10843pt too wide) in paragraph at lines 1670--1674
+[]\T1/lmr/bx/n/12 (-20) Convert do-main fail-ures. \T1/lmr/m/n/12 (-20) Re-plac
+e ad-hoc re-turns with \T1/lmtt/m/n/12 ProblemException
+
+Overfull \hbox (28.8721pt too wide) in paragraph at lines 1677--1679
+[]\T1/lmr/bx/n/12 (-20) Write the con-tract tests first, per end-point, \T1/lmr
+/m/n/12 (-20) us-ing the \T1/lmtt/m/n/12 PROBLEM_SCHEMA
+[474] [475]
+Overfull \hbox (21.19809pt too wide) in paragraph at lines 1739--1742
+[]\T1/lmr/m/n/12 (-20) Design the JSON Pointer for a fail-ure in-side \T1/lmtt/
+m/n/12 lines[2].dimensions.width\T1/lmr/m/n/12 (-20) .
+[476] [477]
+Overfull \hbox (52.65034pt too wide) in paragraph at lines 1860--1865
+\T1/lmr/m/n/12 (-20) RFC 6901), so client tool-ing can high-light the of-fend-i
+ng field programmatically---
+
+Underfull \vbox (badness 10000) has occurred while \output is active [478]
+Underfull \vbox (badness 10000) has occurred while \output is active [479]
+Overfull \hbox (55.94011pt too wide) in paragraph at lines 1928--1934
+\T1/lmr/m/n/12 (-20) Schema-validate ev-ery er-ror path in con-tract tests with
+ \T1/lmtt/m/n/12 additionalProperties:
+[480]
+Underfull \vbox (badness 10000) has occurred while \output is active [481]
+Overfull \hbox (64.88432pt too wide) in paragraph at lines 2042--2045
+[]\T1/lmr/bx/n/12 (-20) OpenAPI 3.1 spec-i-fi-ca-tion \T1/lmr/m/n/12 (-20) [[][
+]Ope21[][]]. Doc-u-ment-ing \T1/lmtt/m/n/12 application/problem+json
+
+Underfull \vbox (badness 2837) has occurred while \output is active [482]
+Overfull \hbox (29.17668pt too wide) in paragraph at lines 2054--2057
+\T1/lmr/m/n/12 (-20) sec-ond in-dus-trial ref-er-ence point, use-ful for the \T
+1/lmtt/m/n/12 error.code\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 error.details
+
+Overfull \hbox (1.12323pt too wide) in paragraph at lines 2074--2077
+[]\T1/lmr/bx/n/12 (-20) Inputs/Datasets. \T1/lmr/m/n/12 (-20) The lab ser-vice;
+ this chap-ter's \T1/lmtt/m/n/12 problem_details.py\T1/lmr/m/n/12 (-20) ;
+
+Overfull \hbox (21.83313pt too wide) in paragraph at lines 2081--2083
+[]\T1/lmr/m/n/12 (-20) Register the prob-lem han-dlers; con-vert ad-hoc er-rors
+ to \T1/lmtt/m/n/12 ProblemException
+
+Overfull \hbox (5.45822pt too wide) in paragraph at lines 2083--2085
+[]\T1/lmr/m/n/12 (-20) Write one con-tract test per er-ror path us-ing the shar
+ed \T1/lmtt/m/n/12 PROBLEM_SCHEMA\T1/lmr/m/n/12 (-20) . 
+
+Overfull \hbox (113.12991pt too wide) in paragraph at lines 2091--2093
+[]\T1/lmr/m/n/12 (-20) Every er-ror re-sponse (in-clud-ing frame-work \T1/lmtt/
+m/n/12 404\T1/lmr/m/n/12 (-20) ) is schema-valid \T1/lmtt/m/n/12 application/pr
+oblem+json\T1/lmr/m/n/12 (-20) . 
+[483] [484]
+Overfull \hbox (18.3782pt too wide) in paragraph at lines 2182--2184
+[]\T1/lmr/m/n/12 (-20) Define the met-ric tax-on-omy (\T1/lmtt/m/n/12 errors_to
+tal{endpoint, status, code}\T1/lmr/m/n/12 (-20) )
+[485] [486]
+Overfull \hbox (5.52077pt too wide) in paragraph at lines 2236--2238
+[]\T1/lmr/m/n/12 (-20) Matrix re-viewed: ev-ery fault class has at least one fa
+iling-before/passing-
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2265.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2265.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2265.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2277.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2277.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2277.
+
+
+Overfull \hbox (5.8072pt too wide) in paragraph at lines 2279--2288
+\T1/lmr/m/n/12 (-20) Strict-mode en-force-ment, \T1/lmtt/m/n/12 field_validator
+ \T1/lmr/m/n/12 (-20) / \T1/lmtt/m/n/12 model_validator\T1/lmr/m/n/12 (-20) , \
+T1/lmtt/m/n/12 Annotated
+[487]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2289.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2289.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2289.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2301.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2301.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2301.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2311.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2311.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2311.
+
+[488]
+Overfull \hbox (67.15538pt too wide) in paragraph at lines 2329--2334
+[]\T1/lmr/bx/n/12 (-20) RFC 9457 is the shape. \T1/lmtt/m/n/12 application/prob
+lem+json \T1/lmr/m/n/12 (-20) with \T1/lmtt/m/n/12 type\T1/lmr/m/n/12 (-20) /\T
+1/lmtt/m/n/12 title\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 status\T1/lmr/m/n/12 (
+-20) /
+
+Underfull \hbox (badness 10000) in paragraph at lines 2382--2382
+[]|\T1/lmr/m/n/10.95 (+20) missing/failed cre-den-tials; send
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[489] (chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+[490] [491]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+[492])) (chapters/chapter_08_pagination_filtering_sorting.tex [493] [494]
+Chapter 9.
+[495] [496]
+Overfull \hbox (6.5497pt too wide) in paragraph at lines 83--86
+[]\T1/lmr/m/n/12 (-20) Design cur-sor to-kens that are opaque, tamper-evident (
+HMAC-SHA256),
+
+Overfull \hbox (75.70418pt too wide) in paragraph at lines 89--93
+[]\T1/lmr/m/n/12 (-20) Build an allow-listed fil-ter gram-mar (op-er-a-tors \T1
+/lmtt/m/n/12 eq/ne/gt/gte/lt/lte/in/contains\T1/lmr/m/n/12 (-20) )
+
+Overfull \hbox (18.17825pt too wide) in paragraph at lines 120--125
+[]\T1/lmr/bx/n/12 (-20) Working knowl-edge of SQL: \T1/lmtt/m/n/12 SELECT\T1/lm
+r/m/n/12 (-20) , \T1/lmtt/m/n/12 WHERE\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 OR
+DER BY\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 LIMIT\T1/lmr/m/n/12 (-20) /\T1/lmt
+t/m/n/12 OFFSET\T1/lmr/m/n/12 (-20) ,
+[497] [498] [499] [500]
+Overfull \hbox (2.24718pt too wide) in paragraph at lines 309--316
+\T1/lmtt/m/n/12 unit_cost_cents) \T1/lmr/m/n/12 (-20) is use-less for this quer
+y; an in-dex on \T1/lmtt/m/n/12 (unit_cost_cents)
+[501]
+Underfull \hbox (badness 10000) in paragraph at lines 370--370
+[]|\T1/lmr/m/n/10.95 (+20) Keyset flat within
+
+Underfull \hbox (badness 10000) in paragraph at lines 370--370
+[]|\T1/lmr/m/n/10.95 (+20) Offset super-linear:
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (116.11606pt too wide) in paragraph at lines 453--456
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[502] [503] [504]
+Overfull \hbox (88.78044pt too wide) in paragraph at lines 557--561
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[505] [506] [507]
+Overfull \hbox (0.15498pt too wide) in paragraph at lines 724--731
+\T1/lmtt/m/n/12 ?sort=-cost,sku \T1/lmr/m/n/12 (-20) parses to \T1/lmtt/m/n/12 
+ORDER BY unit_cost_cents DESC, sku
+
+Overfull \hbox (15.31961pt too wide) in paragraph at lines 745--751
+\T1/lmtt/m/n/12 cost DESC, id DESC \T1/lmr/m/n/12 (-20) pages for-ward with \T1
+/lmtt/m/n/12 (cost, id) < (?, ?)\T1/lmr/m/n/12 (-20) . Mixed
+[508]
+Overfull \hbox (3.42155pt too wide) in paragraph at lines 805--805
+[]\T1/lmr/bx/n/14.4 (-20) Database In-ter-ac-tion: In-dexes, EX-PLAIN, Cov-
+[509]
+Overfull \hbox (10.8705pt too wide) in paragraph at lines 811--819
+\T1/lmtt/m/n/12 id)\T1/lmr/m/n/12 (-20) , the in-dex \T1/lmtt/m/n/12 idx_parts_
+cost_id ON parts(unit_cost_cents, id)
+
+Overfull \hbox (77.40727pt too wide) in paragraph at lines 819--829
+\T1/lmr/m/n/12 (-20) ports \T1/lmtt/m/n/12 SEARCH parts USING INDEX idx_parts_c
+ost_id (unit_cost_cents>?...)
+
+Overfull \hbox (34.42285pt too wide) in paragraph at lines 829--836
+[]\T1/lmr/bx/n/12 (-20) Covering in-dexes. \T1/lmr/m/n/12 (-20) If the page pro
+-jec-tion is \T1/lmtt/m/n/12 (id, sku, unit_cost_cents)\T1/lmr/m/n/12 (-20) ,
+[510]
+Overfull \hbox (22.6154pt too wide) in paragraph at lines 863--874
+\T1/lmtt/m/n/12 idx_parts_cost_id \T1/lmr/m/n/12 (-20) for the un-fil-tered key
+-set walk and \T1/lmtt/m/n/12 idx_parts_cat_cost_id
+[511]
+Underfull \vbox (badness 10000) has occurred while \output is active [512]
+Underfull \vbox (badness 10000) has occurred while \output is active [513]
+Overfull \hbox (42.4202pt too wide) in paragraph at lines 998--1003
+[]\T1/lmtt/m/n/12 GET /parts/keyset \T1/lmr/m/n/12 (-20) --- trans-par-ent key-
+set pag-i-na-tion: \T1/lmtt/m/n/12 after_cost\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n
+/12 after_id
+
+Overfull \hbox (6.57124pt too wide) in paragraph at lines 998--1003
+\T1/lmtt/m/n/12 (?, ?)\T1/lmr/m/n/12 (-20) , and the \T1/lmtt/m/n/12 LIMIT p+1 
+\T1/lmr/m/n/12 (-20) trick driv-ing \T1/lmtt/m/n/12 has_more \T1/lmr/m/n/12 (-2
+0) and the \T1/lmtt/m/n/12 rel="next"
+[514]
+Underfull \vbox (badness 10000) has occurred while \output is active [515]
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1093--1094
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [516]
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1095--1096
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [517]
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1134--1135
+[][][][] 
+
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1136--1137
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [518]
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1182--1183
+[][][][] 
+
+Overfull \hbox (149.79553pt too wide) in paragraph at lines 1184--1185
+[][][][] 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [519]
+Underfull \vbox (badness 10000) has occurred while \output is active [520]
+Underfull \vbox (badness 10000) has occurred while \output is active [521]
+Underfull \vbox (badness 10000) has occurred while \output is active [522]
+[523] [524]
+Underfull \vbox (badness 10000) has occurred while \output is active [525]
+Underfull \vbox (badness 10000) has occurred while \output is active [526]
+Underfull \vbox (badness 10000) has occurred while \output is active [527]
+Underfull \vbox (badness 10000) has occurred while \output is active [528]
+Underfull \vbox (badness 10000) has occurred while \output is active [529]
+Underfull \hbox (badness 10000) in paragraph at lines 1616--1616
+[]\T1/lmr/m/n/12 (+20) Listing 9.4: Offset-versus-keyset la-tency bench-mark ha
+r-ness
+[530]
+Underfull \vbox (badness 10000) has occurred while \output is active [531]
+Underfull \vbox (badness 10000) has occurred while \output is active [532]
+[533]
+Underfull \vbox (badness 10000) has occurred while \output is active [534]
+Underfull \vbox (badness 10000) has occurred while \output is active [535]
+Underfull \vbox (badness 10000) has occurred while \output is active [536]
+[537]
+Overfull \hbox (0.40028pt too wide) in paragraph at lines 1920--1926
+\T1/lmr/bx/n/12 (-20) Failure: \T1/lmr/m/n/12 (-20) the server hon-ors \T1/lmtt
+/m/n/12 ?limit=1000000\T1/lmr/m/n/12 (-20) ; one client al-lo-cates a megabyte-
+
+
+Overfull \hbox (11.32703pt too wide) in paragraph at lines 1928--1935
+\T1/lmr/bx/n/12 (-20) Failure: \T1/lmtt/m/n/12 f"WHERE col >= {param}" \T1/lmr/
+m/n/12 (-20) or, worse, \T1/lmtt/m/n/12 f"ORDER BY {sort_param}"\T1/lmr/m/n/12 
+(-20) .
+[538] [539]
+Overfull \hbox (4.56213pt too wide) in paragraph at lines 2001--2004
+\T1/lmr/m/n/12 (-20) state which re-la-tions ap-pear and why (\T1/lmtt/m/n/12 l
+ast \T1/lmr/m/n/12 (-20) only un-der \T1/lmtt/m/n/12 include_total=true\T1/lmr/
+m/n/12 (-20) ;
+[540]
+Overfull \hbox (16.04799pt too wide) in paragraph at lines 2056--2063
+\T1/lmr/m/n/12 (-20) pos-ite anti-pattern in-car-nate: \T1/lmtt/m/n/12 GET /api
+/ledger?offset=&limit=1000\T1/lmr/m/n/12 (-20) , sorted
+[541]
+Overfull \hbox (77.45341pt too wide) in paragraph at lines 2140--2146
+ [][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[542]
+Overfull \hbox (87.81308pt too wide) in paragraph at lines 2191--2195
+[]\T1/lmr/m/n/12 (-20) [design] De-sign the ex-pan-sion pol-icy for \T1/lmtt/m/
+n/12 GET /orders ?expand=customer,lines.part\T1/lmr/m/n/12 (-20) :
+[543]
+Underfull \vbox (badness 10000) has occurred while \output is active [544]
+Underfull \vbox (badness 10000) has occurred while \output is active [545]
+Underfull \vbox (badness 10000) has occurred while \output is active [546]
+Underfull \vbox (badness 10000) has occurred while \output is active [547]
+Underfull \vbox (badness 10000) has occurred while \output is active [548]
+Underfull \vbox (badness 10000) has occurred while \output is active [549]
+Overfull \hbox (19.47118pt too wide) in paragraph at lines 2512--2516
+[]\T1/lmr/bx/n/12 (-20) Markus Winand, \T1/lmr/bx/it/12 (-20) Use The In-dex, L
+uke \T1/lmr/bx/n/12 (-20) (\T1/lmtt/b/n/12 use-the-index-luke.com\T1/lmr/bx/n/1
+2 (-20) )
+
+Overfull \hbox (25.3384pt too wide) in paragraph at lines 2533--2536
+\T1/lmr/bx/n/12 (-20) pro-files \T1/lmr/m/n/12 (-20) --- a widely adopted con-v
+en-tion fam-ily (\T1/lmtt/m/n/12 page[size]\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/
+12 page[after]\T1/lmr/m/n/12 (-20) ,
+
+Overfull \hbox (47.26727pt too wide) in paragraph at lines 2536--2541
+\T1/lmr/m/n/12 (-20) im-ple-men-ta-tion of opaque cur-sor pag-i-na-tion (\T1/lm
+tt/m/n/12 starting_after\T1/lmr/m/n/12 (-20) /\T1/lmtt/m/n/12 ending_before\T1/
+lmr/m/n/12 (-20) ,
+
+Underfull \vbox (badness 10000) has occurred while \output is active [550]
+Overfull \hbox (11.28758pt too wide) in paragraph at lines 2568--2571
+[]\T1/lmr/bx/n/12 (-20) Inputs/Datasets. \T1/lmtt/m/n/12 gen_dataset.py \T1/lmr
+/m/n/12 (-20) ex-tended with a \T1/lmtt/m/n/12 ledger(posted_at,
+[551] [552]
+Overfull \hbox (3.4516pt too wide) in paragraph at lines 2636--2636
+[]\T1/lmr/bx/n/14.4 (-20) Capstone 3: Pag-i-na-tion Bench-mark Re-port [mid] 
+[553]
+Overfull \hbox (5.67854pt too wide) in paragraph at lines 2724--2727
+\T1/lmtt/m/n/12 unit_cost_cents, id)\T1/lmr/m/n/12 (-20) ; prove ev-ery ten-ant
+'s walk stays a lo-cal \T1/lmtt/m/n/12 SEARCH\T1/lmr/m/n/12 (-20) . 
+[554] [555] [556] [557]
+
+Package tabularx Warning: X Columns too narrow (table too wide)
+(tabularx)                 on input line 2902.
+
+
+Overfull \hbox (9.06757pt too wide) in paragraph at lines 2902--2902
+[]|\T1/lmr/bx/n/10.95 (-20) Use
+
+Overfull \hbox (16.92078pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/bx/n/10.95 (-20) when| 
+
+Overfull \hbox (54.58488pt too wide) in paragraph at lines 2902--2902
+[]|\T1/lmr/m/n/10.95 (-20) Small/shallow
+
+Overfull \hbox (3.91405pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) col-
+
+Overfull \hbox (3.31795pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) lec-
+
+Overfull \hbox (13.22276pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) tions;
+
+Overfull \hbox (2.12544pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ad-
+
+Overfull \hbox (6.93452pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) min
+
+Overfull \hbox (13.25246pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) grids;
+
+Overfull \hbox (22.14323pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) capped
+
+Overfull \hbox (18.85826pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) depth.| 
+
+Overfull \hbox (15.46022pt too wide) in paragraph at lines 2902--2902
+[]|\T1/lmr/m/n/10.95 (-20) Large
+
+Overfull \hbox (3.91405pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) col-
+
+Overfull \hbox (3.31795pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) lec-
+
+Overfull \hbox (13.22276pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) tions;
+
+Overfull \hbox (1.23157pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ex-
+
+Overfull \hbox (14.7491pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ports;
+
+Overfull \hbox (13.52083pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) feeds;
+
+Underfull \hbox (badness 10000) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 in-
+
+Overfull \hbox (3.944pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ter-
+
+Overfull \hbox (3.3579pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) nal
+
+Overfull \hbox (15.08466pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) APIs.| 
+
+Overfull \hbox (19.00717pt too wide) in paragraph at lines 2902--2902
+[]|\T1/lmr/m/n/10.95 (-20) Public
+
+Overfull \hbox (13.5626pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) APIs:
+
+Overfull \hbox (22.78665pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) schema
+
+Overfull \hbox (5.70235pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) hid-
+
+Overfull \hbox (4.81665pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ing,
+
+Overfull \hbox (1.23157pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ex-
+
+Overfull \hbox (8.40544pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) piry,
+
+Overfull \hbox (9.27925pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) tam-
+
+Overfull \hbox (4.06914pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) per
+
+Overfull \hbox (1.23157pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) ev-
+
+Underfull \hbox (badness 10000) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (+20) i-
+
+Overfull \hbox (18.26218pt too wide) in paragraph at lines 2902--2902
+\T1/lmr/m/n/10.95 (-20) dence.| 
+
+Overfull \hbox (98.34868pt too wide) in alignment at lines 2902--2902
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[558] (chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[559]
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+)) (chapters/chapter_09_versioning_evolution.tex [560] [561] [562] [563]
+[564]
+Chapter 10.
+[565] [566]
+Overfull \hbox (12.92485pt too wide) in paragraph at lines 109--113
+\T1/lmr/m/n/12 (-20) reusing names, enum ex-ten-si-bil-ity with fall-back val-u
+es, unknown-
+
+Underfull \vbox (badness 10000) has occurred while \output is active [567]
+Overfull \hbox (36.10625pt too wide) in paragraph at lines 137--141
+\T1/lmr/m/n/12 (-20) Pro-to-col Buffers tag rules, con-tent ne-go-ti-a-tion, an
+d the back-ward/forward/full
+
+Overfull \hbox (52.01886pt too wide) in paragraph at lines 141--144
+\T1/lmr/m/n/12 (-20) build-ing APIs with FastAPI: rout-ing, Py-dan-tic mod-els,
+ and \T1/lmtt/m/n/12 TestClient \T1/lmr/m/n/12 (-20) [[][]Ram24[][]]. 
+
+Underfull \vbox (badness 10000) has occurred while \output is active [568]
+Underfull \hbox (badness 4096) in paragraph at lines 232--232
+[]|\T1/lmr/m/n/10.95 (+20) Clients read-ing the field
+
+Underfull \hbox (badness 5316) in paragraph at lines 232--232
+[]|\T1/lmr/m/n/10.95 (+20) Same name, same type,
+
+Underfull \hbox (badness 1132) in paragraph at lines 232--232
+\T1/lmr/m/n/10.95 (+20) switches from on-hand to
+
+Underfull \hbox (badness 2726) in paragraph at lines 232--232
+\T1/lmr/m/n/10.95 (+20) available-to-promise): old
+
+Underfull \hbox (badness 10000) in paragraph at lines 232--232
+\T1/lmr/m/n/10.95 (+20) clients silently com-pute
+
+Underfull \hbox (badness 2334) in paragraph at lines 232--232
+[]|\T1/lmr/m/n/10.95 (+20) Nothing ex-ist-ing changed;
+
+Underfull \hbox (badness 2772) in paragraph at lines 232--232
+[]|\T1/lmr/m/n/10.95 (+20) Clients branch on sta-tus
+
+Underfull \hbox (badness 4765) in paragraph at lines 232--232
+\T1/lmr/m/n/10.95 (+20) codes and problem-detail
+
+Underfull \hbox (badness 2790) in paragraph at lines 232--232
+\T1/lmr/m/n/10.95 (+20) mem-bers; chang-ing them
+
+LaTeX Warning: Float too large for page by 46.33087pt on input line 235.
+
+[569]
+Overfull \hbox (21.86108pt too wide) in paragraph at lines 290--300
+ []\T1/lmr/bx/n/12 (-20) URI path ver-sion-ing.[] \T1/lmr/m/n/12 (-20) The ver-
+sion is a path seg-ment: \T1/lmtt/m/n/12 /v1/catalog/WR-1042\T1/lmr/m/n/12 (-20
+) .
+
+Overfull \hbox (1.3386pt too wide) in paragraph at lines 301--306
+ []\T1/lmr/bx/n/12 (-20) Query-parameter ver-sion-ing.[] \T1/lmtt/m/n/12 /catal
+og/WR-1042?version=2\T1/lmr/m/n/12 (-20) . Largely
+[570]
+Overfull \hbox (149.4868pt too wide) in paragraph at lines 317--327
+ []\T1/lmr/bx/n/12 (-20) Media-type (\T1/lmtt/b/n/12 Accept \T1/lmr/bx/n/12 (-2
+0) header) ver-sion-ing.[] \T1/lmtt/m/n/12 Accept: application/vnd.northwind.ca
+talog+json;
+
+Package tabularx Warning: X Columns too narrow (table too wide)
+(tabularx)                 on input line 346.
+
+
+Overfull \hbox (38.50766pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/bx/n/10.95 (-20) Criterion| 
+
+Overfull \hbox (17.36162pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Cache
+
+Overfull \hbox (5.13622pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) cor-
+
+Overfull \hbox (8.7134pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) rect-
+
+Overfull \hbox (8.24666pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) ness| 
+
+Overfull \hbox (49.62276pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Gateway/LB
+
+Overfull \hbox (10.5017pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) rout-
+
+Overfull \hbox (3.3579pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) ing| 
+
+Overfull \hbox (54.06824pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Debuggability
+
+Overfull \hbox (29.5819pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) (browser,
+
+Overfull \hbox (11.16791pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) logs)| 
+
+Overfull \hbox (17.06596pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Client
+
+Overfull \hbox (5.70235pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) pin-
+
+Overfull \hbox (9.31949pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) ning
+
+Overfull \hbox (3.0196pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) dif-
+
+Underfull \hbox (badness 10000) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (+20) fi-
+
+Overfull \hbox (12.29471pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) culty| 
+
+Overfull \hbox (46.0196pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Hypermedia
+
+Overfull \hbox (45.54909pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Doc/tooling
+
+Overfull \hbox (6.95438pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) sup-
+
+Overfull \hbox (9.05751pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) port| 
+
+Overfull \hbox (17.56937pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) REST
+
+Overfull \hbox (18.35168pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) source
+
+Overfull \hbox (2.72154pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) pu-
+
+Overfull \hbox (5.7667pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) rity| 
+
+Overfull \hbox (23.69884pt too wide) in paragraph at lines 346--346
+[]|\T1/lmr/m/n/10.95 (-20) Version
+
+Overfull \hbox (11.69391pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) gran-
+
+Underfull \hbox (badness 10000) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (+20) u-
+
+Overfull \hbox (3.34763pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) lar-
+
+Overfull \hbox (1.56372pt too wide) in paragraph at lines 346--346
+\T1/lmr/m/n/10.95 (-20) ity| 
+
+Overfull \hbox (11.54277pt too wide) in alignment at lines 346--346
+[][][][][] 
+
+Overfull \hbox (252.93364pt too wide) in paragraph at lines 374--377
+ [][] 
+[571]
+Overfull \hbox (76.38226pt too wide) in paragraph at lines 450--453
+ [][] 
+[572]
+Overfull \hbox (300.50616pt too wide) in paragraph at lines 510--513
+ [][] 
+[573]
+Overfull \hbox (28.61462pt too wide) in paragraph at lines 555--557
+[]\T1/lmtt/m/n/12 Deprecation: @1788220800 \T1/lmr/m/n/12 (-20) --- the mo-ment
+ dep-re-ca-tion be-gan (RFC 9745
+
+Overfull \hbox (43.87701pt too wide) in paragraph at lines 560--563
+[]\T1/lmtt/m/n/12 Link: <https://api.example/v2/catalog>; rel="successor-versio
+n"
+[574] [575] [576] [577]
+Underfull \vbox (badness 10000) has occurred while \output is active [578]
+Underfull \vbox (badness 10000) has occurred while \output is active [579]
+Underfull \vbox (badness 10000) has occurred while \output is active [580]
+[581]
+Underfull \vbox (badness 10000) has occurred while \output is active [582]
+Underfull \vbox (badness 10000) has occurred while \output is active [583]
+Underfull \vbox (badness 10000) has occurred while \output is active [584]
+Underfull \vbox (badness 10000) has occurred while \output is active [585]
+Underfull \vbox (badness 10000) has occurred while \output is active [586]
+[587] [588]
+Underfull \vbox (badness 10000) has occurred while \output is active [589]
+Overfull \hbox (31.96518pt too wide) in paragraph at lines 1171--1176
+\T1/lmr/m/n/12 (-20) A cor-rect ne-go-tia-tor for \T1/lmtt/m/n/12 Accept: appli
+cation/vnd.northwind.catalog+json;
+[590]
+Underfull \vbox (badness 10000) has occurred while \output is active [591]
+Underfull \vbox (badness 10000) has occurred while \output is active [592]
+Underfull \vbox (badness 1033) has occurred while \output is active [593]
+[594]
+Underfull \vbox (badness 10000) has occurred while \output is active [595]
+[596]
+Underfull \vbox (badness 10000) has occurred while \output is active [597]
+Underfull \vbox (badness 10000) has occurred while \output is active [598]
+Underfull \vbox (badness 10000) has occurred while \output is active [599]
+Overfull \hbox (44.58305pt too wide) in paragraph at lines 1561--1568
+\T1/lmr/m/n/12 (-20) their own ver-sions in-de-pen-dently (\T1/lmtt/m/n/12 /v1/
+orders\T1/lmr/m/n/12 (-20) , \T1/lmtt/m/n/12 /v3/customers\T1/lmr/m/n/12 (-20) 
+, \T1/lmtt/m/n/12 /v2/orders/items\T1/lmr/m/n/12 (-20) )
+[600]
+Overfull \hbox (10.2003pt too wide) in paragraph at lines 1594--1598
+ []\T1/lmr/bx/n/12 (-20) 5. Ver-sion in both URI and header.[] \T1/lmtt/m/n/12 
+/v1/catalog \T1/lmr/m/n/12 (-20) with \T1/lmtt/m/n/12 X-API-Version:
+
+Overfull \hbox (9.1266pt too wide) in paragraph at lines 1608--1608
+[]\T1/lmr/bx/n/17.28 (-20) Hands-On Pro-duc-tion Lab & Real-World
+
+Underfull \vbox (badness 1082) has occurred while \output is active [601]
+Overfull \hbox (49.47469pt too wide) in paragraph at lines 1637--1641
+[]\T1/lmr/bx/n/12 (-20) Prove con-sumer sur-vival. \T1/lmr/m/n/12 (-20) Save Li
+st-ing 9.4 as \T1/lmtt/m/n/12 test_consumer_tolerance.py
+
+Underfull \vbox (badness 2799) has occurred while \output is active [602]
+Overfull \hbox (13.57144pt too wide) in paragraph at lines 1692--1696
+[]\T1/lmr/bx/n/12 (-20) Extend the gate. \T1/lmr/m/n/12 (-20) List-ing 9.2 ig-n
+ores path and query \T1/lmtt/m/n/12 parameters\T1/lmr/m/n/12 (-20) .
+[603]
+Overfull \hbox (21.06401pt too wide) in paragraph at lines 1735--1738
+\T1/lmr/bx/n/12 (-20) adding an op-tional re-quest field; re-nam-ing \T1/lmtt/b
+/n/12 price \T1/lmr/bx/n/12 (-20) to \T1/lmtt/b/n/12 unit_price\T1/lmr/bx/n/12 
+(-20) ;
+[604]
+Underfull \vbox (badness 2726) has occurred while \output is active [605]
+Underfull \vbox (badness 10000) has occurred while \output is active [606]
+[607] [608]
+Overfull \hbox (14.14859pt too wide) in paragraph at lines 1943--1946
+[]\T1/lmr/m/n/12 (-20) RFC 8594, \T1/lmr/m/it/12 (-20) The Sun-set HTTP Header 
+Field \T1/lmr/m/n/12 (-20) (and its orig-i-nal \T1/lmtt/m/n/12 Deprecation
+
+Overfull \hbox (8.02455pt too wide) in paragraph at lines 1946--1949
+\T1/lmtt/m/n/12 Deprecation \T1/lmr/m/n/12 (-20) to the \T1/lmtt/m/n/12 @\T1/lm
+r/m/it/12 (-20) <unix-timestamp> \T1/lmr/m/n/12 (-20) form; read along-side RFC
+ 8594. 
+[609]
+Overfull \hbox (2.45807pt too wide) in paragraph at lines 1957--1959
+[]\T1/lmr/m/n/12 (-20) J. Gehl, \T1/lmr/m/it/12 (-20) API De-sign Pat-terns \T1
+/lmr/m/n/12 (-20) --- ver-sion-ing and backward-compatibility
+
+Overfull \hbox (1.32147pt too wide) in paragraph at lines 1959--1962
+[]\T1/lmr/m/n/12 (-20) M. Klepp-mann, \T1/lmr/m/it/12 (-20) De-sign-ing Data-In
+tensive Ap-pli-ca-tions\T1/lmr/m/n/12 (-20) , ch. 4 --- schema
+[610] [611]
+Overfull \hbox (98.97444pt too wide) in paragraph at lines 2039--2045
+\T1/lmr/m/n/12 (-20) readable JSON re-port along-side the text one. (5) Add a \
+T1/lmtt/m/n/12 --allow-breaking-with=VERSION_BUMP
+[612] [613]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2135.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2135.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2135.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2143.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2143.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2143.
+
+
+Overfull \hbox (3.02435pt too wide) in paragraph at lines 2144--2150
+\T1/lmr/m/n/12 (-20) checks; at-trs; marsh-mal-low. \T1/lmr/bx/n/12 (-20) In-st
+al-la-tion: \T1/lmtt/m/n/12 pip install "pydantic>=2.7"\T1/lmr/m/n/12 (-20) . 
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2151.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2151.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2151.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2158.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2158.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2158.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2165.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2165.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2165.
+
+[614]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2172.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\geq' on input line 2172.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 2172.
+
+
+Overfull \hbox (5.50638pt too wide) in paragraph at lines 2173--2177
+\T1/lmr/bx/n/12 (-20) na-tives: \T1/lmr/m/n/12 (-20) unittest (stdlib); nose2. 
+\T1/lmr/bx/n/12 (-20) In-stal-la-tion: \T1/lmtt/m/n/12 pip install "pytest>=8"\
+T1/lmr/m/n/12 (-20) . 
+
+Overfull \hbox (5.66037pt too wide) in paragraph at lines 2200--2204
+[]\T1/lmr/m/n/12 (-20) Deprecation is en-gi-neered, not an-nounced: \T1/lmtt/m/
+n/12 Deprecation\T1/lmr/m/n/12 (-20) / \T1/lmtt/m/n/12 Sunset\T1/lmr/m/n/12 (-2
+0) /\T1/lmtt/m/n/12 Link
+[615] (chapters/_standard_addendum.tex
+Underfull \hbox (badness 10000) in alignment at lines 14--14
+[][][][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[616]
+Overfull \hbox (55.38057pt too wide) in alignment at lines 39--39
+[][][] 
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+
+Underfull \hbox (badness 2285) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Choose this ap-proach
+
+Underfull \hbox (badness 5064) in paragraph at lines 86--86
+[]|\T1/lmr/bx/n/10.95 (+20) Prefer an al-ter-na-tive
+[617]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+)) (chapters/chapter_10_idempotency_caching_concurrency.tex [618] [619]
+[620] [621] [622]
+Chapter 11.
+
+Overfull \hbox (150.14903pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_10_idempotency_caching_concurrency  
+) (chapters/chapter_11_async_event_driven_apis.tex [623] [624]
+Chapter 12.
+
+Overfull \hbox (37.13498pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_11_async_event_driven_apis  
+) (chapters/chapter_12_graphql.tex [625] [626]
+Chapter 13.
+) (chapters/chapter_13_grpc_high_performance_rpc.tex [627] [628]
+Chapter 14.
+
+Overfull \hbox (78.21007pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_13_grpc_high_performance_rpc  
+) (chapters/chapter_14_rate_limiting_throttling.tex [629] [630]
+Chapter 15.
+
+Overfull \hbox (21.00293pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_14_rate_limiting_throttling  
+) (chapters/chapter_15_microservices_resilience.tex [631] [632]
+Chapter 16.
+
+Overfull \hbox (12.87039pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_15_microservices_resilience  
+) (chapters/chapter_16_api_security_engineering.tex [633] [634]
+Chapter 17.
+
+Overfull \hbox (31.25847pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_16_api_security_engineering  
+) (chapters/chapter_17_deployment_infrastructure.tex [635] [636]
+Chapter 18.
+
+Overfull \hbox (47.31499pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_17_deployment_infrastructure  
+) (chapters/chapter_18_observability_sre.tex [637] [638]
+Chapter 19.
+) (chapters/chapter_19_testing_quality_engineering.tex [639] [640]
+Chapter 20.
+
+Overfull \hbox (65.00977pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_19_testing_quality_engineering  
+) (chapters/chapter_20_lifecycle_governance_dx.tex [641] [642]
+Chapter 21.
+
+Overfull \hbox (20.68298pt too wide) in paragraph at lines 2--2
+\T1/lmr/bx/n/24.88 (-20) ter_20_lifecycle_governance_dx  
+) (chapters/chapter_21_synthesis_future.tex [643] [644]
+Chapter 22.
+) [645] [646]
+Appendix A.
+[647] [648]
+Overfull \hbox (6.89008pt too wide) in paragraph at lines 338--338
+[]\T1/lmr/m/n/12 (-20) Colvin, Samuel and con-trib-u-tors. \T1/lmr/m/it/12 (-20
+) Py-dan-tic Doc-u-men-ta-tion\T1/lmr/m/n/12 (-20) . [][]$\T1/lmtt/m/n/12 https
+ :
+[649]
+Overfull \hbox (16.75302pt too wide) in paragraph at lines 338--338
+[]\T1/lmr/m/n/12 (-20) Martin Klepp-mann. \T1/lmr/m/it/12 (-20) De-sign-ing Dat
+a-Intensive Ap-pli-ca-tions\T1/lmr/m/n/12 (-20) . O'Reilly
+
+Overfull \hbox (0.71544pt too wide) in paragraph at lines 338--338
+[]\T1/lmr/m/n/12 (-20) Ram�rez, Se-basti�n. \T1/lmr/m/it/12 (-20) FastAPI Doc-u
+-men-ta-tion\T1/lmr/m/n/12 (-20) . [][]$\T1/lmtt/m/n/12 https : / / fastapi .
+[650] [651] (main.aux) )
+(see the transcript file for additional information)<C:/Users/aned.esquerra/App
+Data/Local/Programs/MiKTeX/fonts/type1/public/lm/lmbx10.pfb><C:/Users/aned.esqu
+erra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmbx12.pfb><C:/Users/a
+ned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmbxi10.pfb><C
+:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmex1
+0.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/
+lm/lmmi10.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1
+/public/lm/lmmi12.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fon
+ts/type1/public/lm/lmmi7.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiK
+TeX/fonts/type1/public/lm/lmmi8.pfb><C:/Users/aned.esquerra/AppData/Local/Progr
+ams/MiKTeX/fonts/type1/public/lm/lmr10.pfb><C:/Users/aned.esquerra/AppData/Loca
+l/Programs/MiKTeX/fonts/type1/public/lm/lmr12.pfb><C:/Users/aned.esquerra/AppDa
+ta/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr17.pfb><C:/Users/aned.esquerr
+a/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr6.pfb><C:/Users/aned.e
+squerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr7.pfb><C:/Users/
+aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr8.pfb><C:/
+Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmri10.
+pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm
+/lmri12.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/p
+ublic/lm/lmri8.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/
+type1/public/lm/lmsy10.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTe
+X/fonts/type1/public/lm/lmsy7.pfb><C:/Users/aned.esquerra/AppData/Local/Program
+s/MiKTeX/fonts/type1/public/lm/lmsy8.pfb><C:/Users/aned.esquerra/AppData/Local/
+Programs/MiKTeX/fonts/type1/public/lm/lmtk10.pfb><C:/Users/aned.esquerra/AppDat
+a/Local/Programs/MiKTeX/fonts/type1/public/lm/lmtt10.pfb><C:/Users/aned.esquerr
+a/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmtt12.pfb><C:/Users/aned
+.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmtt8.pfb><C:/Use
+rs/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmtti10.pf
+b><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/fonts/type1/public/amsf
+onts/symbols/msam10.pfb><C:/Users/aned.esquerra/AppData/Local/Programs/MiKTeX/f
+onts/type1/public/amsfonts/symbols/msbm10.pfb>
+Output written on main.pdf (677 pages, 4700833 bytes).
+Transcript written on main.log.

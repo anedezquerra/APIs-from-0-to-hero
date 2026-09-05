@@ -1,0 +1,207 @@
+"""Listing 5.3 -- Hardened JWT (RFC 7519) verifier with adversarial tests.
+
+Stdlib-only HS256 implementation built on ``hmac.compare_digest``, plus a
+``SignatureVerifier`` protocol showing exactly where an RS256 backend (e.g.
+``cryptography``) plugs in. The verifier:
+
+  1. rejects ``alg=none`` and any algorithm outside an explicit allow-list;
+  2. selects the verification key by *configured* algorithm, never by the
+     token's ``alg`` header alone (defeats RS256->HS256 confusion);
+  3. verifies the signature BEFORE trusting a single claim;
+  4. validates exp/nbf/iat with a bounded clock-skew leeway, plus iss/aud.
+
+All keys are synthetic test fixtures for the fictional Northwind Robotics
+universe. The embedded adversarial tokens are for education only.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import time
+from typing import Callable, Mapping, Protocol
+
+# --- Synthetic test fixtures (NOT real keys) ---------------------------------
+HS256_SECRET = b"nwr-test-hs256-secret-do-not-use-in-production"
+ISSUER = "https://idp.northwind-robotics.example/"
+AUDIENCE = "nwr-parts-api"
+ALLOWED_ALGS = frozenset({"HS256"})
+LEEWAY_SECONDS = 30
+
+
+class JWTError(Exception):
+    """Base class for all token validation failures."""
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def b64url_decode(segment: str) -> bytes:
+    if not segment or "=" in segment:
+        raise JWTError("malformed base64url segment")
+    padding = "=" * (-len(segment) % 4)
+    try:
+        return base64.urlsafe_b64decode(segment + padding)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise JWTError("malformed base64url segment") from exc
+
+
+def encode_jwt(header: Mapping[str, object], payload: Mapping[str, object], key: bytes) -> str:
+    """Sign a compact JWS with HS256 (test helper / fixture factory)."""
+    signing_input = f"{b64url_encode(json.dumps(header, separators=(',', ':')).encode())}." \
+                    f"{b64url_encode(json.dumps(payload, separators=(',', ':')).encode())}"
+    signature = hmac.new(key, signing_input.encode("ascii"), hashlib.sha256).digest()
+    return f"{signing_input}.{b64url_encode(signature)}"
+
+
+class SignatureVerifier(Protocol):
+    """Pluggable crypto backend. An RS256 implementation would call
+    ``cryptography.hazmat.primitives.asymmetric.rsa`` verify with PSS/PKCS1v15
+    here; the HS256 implementation below uses stdlib HMAC."""
+
+    def verify(self, signing_input: bytes, signature: bytes) -> bool: ...
+
+
+class HS256Verifier:
+    def __init__(self, secret: bytes) -> None:
+        if len(secret) < 32:
+            raise ValueError("HS256 keys must be >= 256 bits")
+        self._secret = secret
+
+    def verify(self, signing_input: bytes, signature: bytes) -> bool:
+        expected = hmac.new(self._secret, signing_input, hashlib.sha256).digest()
+        return hmac.compare_digest(expected, signature)  # constant time
+
+
+class JWTVerifier:
+    def __init__(
+        self,
+        verifiers: Mapping[str, SignatureVerifier],
+        issuer: str,
+        audience: str,
+        leeway: int = LEEWAY_SECONDS,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        self._verifiers = dict(verifiers)
+        self._issuer = issuer
+        self._audience = audience
+        self._leeway = leeway
+        self._now = now
+
+    def decode(self, token: str) -> dict[str, object]:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise JWTError("token must have exactly three segments")
+        header_b64, payload_b64, signature_b64 = parts
+        try:
+            header = json.loads(b64url_decode(header_b64))
+            payload = json.loads(b64url_decode(payload_b64))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise JWTError("unparsable header or payload") from exc
+        if not isinstance(header, dict) or not isinstance(payload, dict):
+            raise JWTError("header and payload must be JSON objects")
+
+        # --- Step 1: algorithm allow-list, BEFORE touching anything else. ---
+        alg = header.get("alg")
+        if not isinstance(alg, str) or alg == "none" or alg not in self._verifiers:
+            raise JWTError(f"algorithm not allowed: {alg!r}")
+        if header.get("crit"):
+            raise JWTError("unsupported critical extensions")
+
+        # --- Step 2: verify the signature with the CONFIGURED algorithm. ---
+        signature = b64url_decode(signature_b64)
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+        if not self._verifiers[alg].verify(signing_input, signature):
+            raise JWTError("invalid signature")
+
+        # --- Step 3: only now are claims trustworthy enough to evaluate. ---
+        self._validate_claims(payload)
+        return payload
+
+    def _validate_claims(self, claims: Mapping[str, object]) -> None:
+        now = int(self._now())
+        exp = claims.get("exp")
+        if not isinstance(exp, int):
+            raise JWTError("missing or non-numeric exp")
+        if now > exp + self._leeway:
+            raise JWTError("token expired")
+        nbf = claims.get("nbf")
+        if nbf is not None and (not isinstance(nbf, int) or now + self._leeway < nbf):
+            raise JWTError("token not yet valid")
+        iat = claims.get("iat")
+        if iat is not None and (not isinstance(iat, int) or iat > now + self._leeway):
+            raise JWTError("iat is in the future")
+        if claims.get("iss") != self._issuer:
+            raise JWTError("issuer mismatch")
+        aud = claims.get("aud")
+        audiences = aud if isinstance(aud, list) else [aud]
+        if self._audience not in audiences:
+            raise JWTError("audience mismatch")
+
+
+def _fixture_claims(now: int) -> dict[str, object]:
+    return {
+        "iss": ISSUER,
+        "sub": "svc-parts-cli@northwind-robotics.example",
+        "aud": AUDIENCE,
+        "exp": now + 300,
+        "nbf": now - 5,
+        "iat": now - 10,
+        "jti": "nwr-jti-0001-synthetic",
+    }
+
+
+def main() -> None:
+    FIXED_NOW = 1_800_000_000  # deterministic clock for the demo
+    verifier = JWTVerifier(
+        verifiers={"HS256": HS256Verifier(HS256_SECRET)},
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        now=lambda: FIXED_NOW,
+    )
+
+    def attempt(label: str, token: str) -> None:
+        try:
+            claims = verifier.decode(token)
+            print(f"[{label}] ACCEPTED  sub={claims['sub']}")
+        except JWTError as exc:
+            print(f"[{label}] rejected  ({exc})")
+
+    good = encode_jwt({"alg": "HS256", "typ": "JWT"}, _fixture_claims(FIXED_NOW), HS256_SECRET)
+    attempt("1 valid           ", good)
+
+    # Adversarial 1: alg=none with an empty signature.
+    none_token = (
+        b64url_encode(json.dumps({"alg": "none", "typ": "JWT"}).encode())
+        + "." + b64url_encode(json.dumps(_fixture_claims(FIXED_NOW)).encode()) + "."
+    )
+    attempt("2 alg=none        ", none_token)
+
+    # Adversarial 2: expired by one hour.
+    expired = _fixture_claims(FIXED_NOW)
+    expired["exp"] = FIXED_NOW - 3600
+    attempt("3 expired         ", encode_jwt({"alg": "HS256"}, expired, HS256_SECRET))
+
+    # Adversarial 3: minted for a different audience (token confused deputy).
+    wrong_aud = _fixture_claims(FIXED_NOW)
+    wrong_aud["aud"] = "nwr-billing-api"
+    attempt("4 wrong audience  ", encode_jwt({"alg": "HS256"}, wrong_aud, HS256_SECRET))
+
+    # Adversarial 4: payload tampered after signing (privilege escalation).
+    header_b64, payload_b64, signature_b64 = good.split(".")
+    evil = _fixture_claims(FIXED_NOW)
+    evil["scope"] = "admin"
+    tampered = f"{header_b64}.{b64url_encode(json.dumps(evil).encode())}.{signature_b64}"
+    attempt("5 tampered payload", tampered)
+
+    # Adversarial 5: not-before in the future (pre-played token).
+    future = _fixture_claims(FIXED_NOW)
+    future["nbf"] = FIXED_NOW + 3600
+    attempt("6 future nbf      ", encode_jwt({"alg": "HS256"}, future, HS256_SECRET))
+
+
+if __name__ == "__main__":
+    main()

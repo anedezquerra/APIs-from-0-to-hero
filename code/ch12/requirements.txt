@@ -1,0 +1,5 @@
+# requirements.txt -- Chapter 12 GraphQL lab
+strawberry-graphql[fastapi]>=0.230
+fastapi>=0.110
+httpx>=0.27
+pytest>=8

@@ -1,0 +1,979 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{nyt/global//global/global/global}
+    \entry{asyncapi}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=ae7bc7aee44dc56ec04d16e190ba5d35}{%
+           family={{AsyncAPI Initiative}},
+           familyi={A\bibinitperiod}}}%
+      }
+      \strng{namehash}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{fullhash}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{fullhashraw}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{bibnamehash}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{authorbibnamehash}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{authornamehash}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{authorfullhash}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \strng{authorfullhashraw}{ae7bc7aee44dc56ec04d16e190ba5d35}
+      \field{labelalpha}{Asy23}
+      \field{sortinit}{A}
+      \field{sortinithash}{2f401846e2029bad6b3ecc16d50031e2}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://www.asyncapi.com/docs/reference/specification/latest}}
+      \field{title}{{AsyncAPI Specification}}
+      \field{year}{2023}
+    \endentry
+    \entry{beyer2016sre}{book}{}{}
+      \name{editor}{4}{}{%
+        {{hash=804009dd6ea3185359156e228afc3f35}{%
+           family={Beyer},
+           familyi={B\bibinitperiod},
+           given={Betsy},
+           giveni={B\bibinitperiod}}}%
+        {{hash=f5e3bc5ee6025ef3a58750c6498c5553}{%
+           family={Jones},
+           familyi={J\bibinitperiod},
+           given={Chris},
+           giveni={C\bibinitperiod}}}%
+        {{hash=1e5b9f6a7c8eeb221b19889433ae21a3}{%
+           family={Petoff},
+           familyi={P\bibinitperiod},
+           given={Jennifer},
+           giveni={J\bibinitperiod}}}%
+        {{hash=a07a7a3144d96f35e13fdc8d88a76f72}{%
+           family={Murphy},
+           familyi={M\bibinitperiod},
+           given={Niall\bibnamedelima Richard},
+           giveni={N\bibinitperiod\bibinitdelim R\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {O'Reilly Media}%
+      }
+      \strng{namehash}{1935d8b85de3cefa8cd9d7b767730ec7}
+      \strng{fullhash}{8b6ad8d483b2b55b622328efa5b8dca7}
+      \strng{fullhashraw}{8b6ad8d483b2b55b622328efa5b8dca7}
+      \strng{bibnamehash}{1935d8b85de3cefa8cd9d7b767730ec7}
+      \strng{editorbibnamehash}{1935d8b85de3cefa8cd9d7b767730ec7}
+      \strng{editornamehash}{1935d8b85de3cefa8cd9d7b767730ec7}
+      \strng{editorfullhash}{8b6ad8d483b2b55b622328efa5b8dca7}
+      \strng{editorfullhashraw}{8b6ad8d483b2b55b622328efa5b8dca7}
+      \field{labelalpha}{Bey+16}
+      \field{sortinit}{B}
+      \field{sortinithash}{d7095fff47cda75ca2589920aae98399}
+      \field{labelnamesource}{editor}
+      \field{labeltitlesource}{title}
+      \field{title}{{Site Reliability Engineering: How Google Runs Production Systems}}
+      \field{year}{2016}
+    \endentry
+    \entry{rfc9114}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=cb901093054452f7b7b92f05d28794eb}{%
+           family={{Bishop, Mike}},
+           familyi={B\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{cb901093054452f7b7b92f05d28794eb}
+      \strng{fullhash}{cb901093054452f7b7b92f05d28794eb}
+      \strng{fullhashraw}{cb901093054452f7b7b92f05d28794eb}
+      \strng{bibnamehash}{cb901093054452f7b7b92f05d28794eb}
+      \strng{authorbibnamehash}{cb901093054452f7b7b92f05d28794eb}
+      \strng{authornamehash}{cb901093054452f7b7b92f05d28794eb}
+      \strng{authorfullhash}{cb901093054452f7b7b92f05d28794eb}
+      \strng{authorfullhashraw}{cb901093054452f7b7b92f05d28794eb}
+      \field{labelalpha}{Bis22}
+      \field{sortinit}{B}
+      \field{sortinithash}{d7095fff47cda75ca2589920aae98399}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 9114}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc9114}}
+      \field{title}{{HTTP/3}}
+      \field{year}{2022}
+    \endentry
+    \entry{rfc8259}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=666978ce0ac9d6e848d0949d72b6df2e}{%
+           family={{Bray, Tim}},
+           familyi={B\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{fullhash}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{fullhashraw}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{bibnamehash}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{authorbibnamehash}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{authornamehash}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{authorfullhash}{666978ce0ac9d6e848d0949d72b6df2e}
+      \strng{authorfullhashraw}{666978ce0ac9d6e848d0949d72b6df2e}
+      \field{labelalpha}{Bra17}
+      \field{sortinit}{B}
+      \field{sortinithash}{d7095fff47cda75ca2589920aae98399}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 8259}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc8259}}
+      \field{title}{{The JavaScript Object Notation (JSON) Data Interchange Format}}
+      \field{year}{2017}
+    \endentry
+    \entry{pydanticdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=72070581e0858af9034d5ad0ad92f086}{%
+           family={{Colvin, Samuel and contributors}},
+           familyi={C\bibinitperiod}}}%
+      }
+      \strng{namehash}{72070581e0858af9034d5ad0ad92f086}
+      \strng{fullhash}{72070581e0858af9034d5ad0ad92f086}
+      \strng{fullhashraw}{72070581e0858af9034d5ad0ad92f086}
+      \strng{bibnamehash}{72070581e0858af9034d5ad0ad92f086}
+      \strng{authorbibnamehash}{72070581e0858af9034d5ad0ad92f086}
+      \strng{authornamehash}{72070581e0858af9034d5ad0ad92f086}
+      \strng{authorfullhash}{72070581e0858af9034d5ad0ad92f086}
+      \strng{authorfullhashraw}{72070581e0858af9034d5ad0ad92f086}
+      \field{labelalpha}{Col24}
+      \field{sortinit}{C}
+      \field{sortinithash}{4d103a86280481745c9c897c925753c0}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://docs.pydantic.dev/}}
+      \field{title}{{Pydantic Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{httpxdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=a79a682f66f0f9b8aa2ca16816883717}{%
+           family={{Encode}},
+           familyi={E\bibinitperiod}}}%
+      }
+      \strng{namehash}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{fullhash}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{fullhashraw}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{bibnamehash}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{authorbibnamehash}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{authornamehash}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{authorfullhash}{a79a682f66f0f9b8aa2ca16816883717}
+      \strng{authorfullhashraw}{a79a682f66f0f9b8aa2ca16816883717}
+      \field{labelalpha}{Enc24}
+      \field{sortinit}{E}
+      \field{sortinithash}{8da8a182d344d5b9047633dfc0cc9131}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://www.python-httpx.org/}}
+      \field{title}{{HTTPX Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{fielding2000rest}{thesis}{}{}
+      \name{author}{1}{}{%
+        {{hash=87dbbd44b3977c28b71d826a931add3e}{%
+           family={Fielding},
+           familyi={F\bibinitperiod},
+           given={Roy\bibnamedelima Thomas},
+           giveni={R\bibinitperiod\bibinitdelim T\bibinitperiod}}}%
+      }
+      \list{institution}{1}{%
+        {University of California, Irvine}%
+      }
+      \strng{namehash}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{fullhash}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{fullhashraw}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{bibnamehash}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{authorbibnamehash}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{authornamehash}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{authorfullhash}{87dbbd44b3977c28b71d826a931add3e}
+      \strng{authorfullhashraw}{87dbbd44b3977c28b71d826a931add3e}
+      \field{labelalpha}{Fie00}
+      \field{sortinit}{F}
+      \field{sortinithash}{2638baaa20439f1b5a8f80c6c08a13b4}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://www.ics.uci.edu/~fielding/pubs/dissertation/top.htm}}
+      \field{title}{{Architectural Styles and the Design of Network-based Software Architectures}}
+      \field{type}{phdthesis}
+      \field{year}{2000}
+    \endentry
+    \entry{rfc9110}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=69cc8f258b20032011b7f98d6b719c01}{%
+           family={{Fielding, Roy T. and Nottingham, Mark and Reschke, Julian}},
+           familyi={F\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{fullhash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{fullhashraw}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{bibnamehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authorbibnamehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authornamehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authorfullhash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authorfullhashraw}{69cc8f258b20032011b7f98d6b719c01}
+      \field{extraname}{1}
+      \field{labelalpha}{Fie22}
+      \field{sortinit}{F}
+      \field{sortinithash}{2638baaa20439f1b5a8f80c6c08a13b4}
+      \field{extraalpha}{1}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 9110}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc9110}}
+      \field{title}{{HTTP Semantics}}
+      \field{year}{2022}
+    \endentry
+    \entry{rfc9112}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=69cc8f258b20032011b7f98d6b719c01}{%
+           family={{Fielding, Roy T. and Nottingham, Mark and Reschke, Julian}},
+           familyi={F\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{fullhash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{fullhashraw}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{bibnamehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authorbibnamehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authornamehash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authorfullhash}{69cc8f258b20032011b7f98d6b719c01}
+      \strng{authorfullhashraw}{69cc8f258b20032011b7f98d6b719c01}
+      \field{extraname}{2}
+      \field{labelalpha}{Fie22}
+      \field{sortinit}{F}
+      \field{sortinithash}{2638baaa20439f1b5a8f80c6c08a13b4}
+      \field{extraalpha}{2}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 9112}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc9112}}
+      \field{title}{{HTTP/1.1}}
+      \field{year}{2022}
+    \endentry
+    \entry{gehl2021apidesign}{book}{}{}
+      \name{author}{2}{}{%
+        {{hash=15a482d2aca129ae687a97b6d180fbce}{%
+           family={Gehl},
+           familyi={G\bibinitperiod},
+           given={Matthias},
+           giveni={M\bibinitperiod}}}%
+        {{hash=810934035548cd2c9ae98d2af6cca2a9}{%
+           family={Higginbotham},
+           familyi={H\bibinitperiod},
+           given={Daniel},
+           giveni={D\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Manning}%
+      }
+      \strng{namehash}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{fullhash}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{fullhashraw}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{bibnamehash}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{authorbibnamehash}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{authornamehash}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{authorfullhash}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \strng{authorfullhashraw}{2772f7a4a98bdd13d87c1dd3359c49d1}
+      \field{labelalpha}{GH21}
+      \field{sortinit}{G}
+      \field{sortinithash}{32d67eca0634bf53703493fb1090a2e8}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{See also: JJ Geewax, \emph{API Design Patterns}, Manning, 2021}
+      \field{title}{{API Design Patterns}}
+      \field{year}{2021}
+    \endentry
+    \entry{protobufdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=8b36e9207c24c76e6719268e49201d94}{%
+           family={{Google}},
+           familyi={G\bibinitperiod}}}%
+      }
+      \strng{namehash}{8b36e9207c24c76e6719268e49201d94}
+      \strng{fullhash}{8b36e9207c24c76e6719268e49201d94}
+      \strng{fullhashraw}{8b36e9207c24c76e6719268e49201d94}
+      \strng{bibnamehash}{8b36e9207c24c76e6719268e49201d94}
+      \strng{authorbibnamehash}{8b36e9207c24c76e6719268e49201d94}
+      \strng{authornamehash}{8b36e9207c24c76e6719268e49201d94}
+      \strng{authorfullhash}{8b36e9207c24c76e6719268e49201d94}
+      \strng{authorfullhashraw}{8b36e9207c24c76e6719268e49201d94}
+      \field{labelalpha}{Goo24}
+      \field{sortinit}{G}
+      \field{sortinithash}{32d67eca0634bf53703493fb1090a2e8}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://protobuf.dev/}}
+      \field{title}{{Protocol Buffers Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{graphqlspec}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=f1c9b8a1db233f245c9e6aee46073c54}{%
+           family={{GraphQL Foundation}},
+           familyi={G\bibinitperiod}}}%
+      }
+      \strng{namehash}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{fullhash}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{fullhashraw}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{bibnamehash}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{authorbibnamehash}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{authornamehash}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{authorfullhash}{f1c9b8a1db233f245c9e6aee46073c54}
+      \strng{authorfullhashraw}{f1c9b8a1db233f245c9e6aee46073c54}
+      \field{labelalpha}{Gra21}
+      \field{sortinit}{G}
+      \field{sortinithash}{32d67eca0634bf53703493fb1090a2e8}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://spec.graphql.org/}}
+      \field{title}{{GraphQL Specification}}
+      \field{year}{2021}
+    \endentry
+    \entry{grpcdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=a3a4dde425c214175e79ec479deea1fa}{%
+           family={{gRPC Authors}},
+           familyi={g\bibinitperiod}}}%
+      }
+      \strng{namehash}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{fullhash}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{fullhashraw}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{bibnamehash}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{authorbibnamehash}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{authornamehash}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{authorfullhash}{a3a4dde425c214175e79ec479deea1fa}
+      \strng{authorfullhashraw}{a3a4dde425c214175e79ec479deea1fa}
+      \field{labelalpha}{gRP24}
+      \field{sortinit}{g}
+      \field{sortinithash}{32d67eca0634bf53703493fb1090a2e8}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://grpc.io/docs/}}
+      \field{title}{{gRPC Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{rfc6749}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=ac119b299edd42949eb95fa0a569a72f}{%
+           family={{Hardt, Dick}},
+           familyi={H\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{fullhash}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{fullhashraw}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{bibnamehash}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{authorbibnamehash}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{authornamehash}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{authorfullhash}{ac119b299edd42949eb95fa0a569a72f}
+      \strng{authorfullhashraw}{ac119b299edd42949eb95fa0a569a72f}
+      \field{labelalpha}{Har12}
+      \field{sortinit}{H}
+      \field{sortinithash}{23a3aa7c24e56cfa16945d55545109b5}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 6749}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc6749}}
+      \field{title}{{The OAuth 2.0 Authorization Framework}}
+      \field{year}{2012}
+    \endentry
+    \entry{rfc9000}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=317b1f35b02cf80edf213fa4cd0826fb}{%
+           family={{Iyengar, Jana and Thomson, Martin}},
+           familyi={I\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{fullhash}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{fullhashraw}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{bibnamehash}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{authorbibnamehash}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{authornamehash}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{authorfullhash}{317b1f35b02cf80edf213fa4cd0826fb}
+      \strng{authorfullhashraw}{317b1f35b02cf80edf213fa4cd0826fb}
+      \field{labelalpha}{Iye21}
+      \field{sortinit}{I}
+      \field{sortinithash}{8d291c51ee89b6cd86bf5379f0b151d8}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 9000}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc9000}}
+      \field{title}{{QUIC: A UDP-Based Multiplexed and Secure Transport}}
+      \field{year}{2021}
+    \endentry
+    \entry{rfc7519}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=2659edcd4222e24ec4492f74cf8cf69a}{%
+           family={{Jones, Michael and Bradley, John and Sakimura, Nat}},
+           familyi={J\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{fullhash}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{fullhashraw}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{bibnamehash}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{authorbibnamehash}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{authornamehash}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{authorfullhash}{2659edcd4222e24ec4492f74cf8cf69a}
+      \strng{authorfullhashraw}{2659edcd4222e24ec4492f74cf8cf69a}
+      \field{labelalpha}{Jon15}
+      \field{sortinit}{J}
+      \field{sortinithash}{b2f54a9081ace9966a7cb9413811edb4}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 7519}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc7519}}
+      \field{title}{{JSON Web Token (JWT)}}
+      \field{year}{2015}
+    \endentry
+    \entry{jsonschemadocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=c017318fb0d1e2bba7c77bdaa15adc37}{%
+           family={{JSON Schema Team}},
+           familyi={J\bibinitperiod}}}%
+      }
+      \strng{namehash}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{fullhash}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{fullhashraw}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{bibnamehash}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{authorbibnamehash}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{authornamehash}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{authorfullhash}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \strng{authorfullhashraw}{c017318fb0d1e2bba7c77bdaa15adc37}
+      \field{labelalpha}{JSO22}
+      \field{sortinit}{J}
+      \field{sortinithash}{b2f54a9081ace9966a7cb9413811edb4}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://json-schema.org/specification}}
+      \field{title}{{JSON Schema Specification (2020-12)}}
+      \field{year}{2022}
+    \endentry
+    \entry{kleppmann2017ddia}{book}{}{}
+      \name{author}{1}{}{%
+        {{hash=34b8d5b1d29d175527a6642f3ec8a76d}{%
+           family={Kleppmann},
+           familyi={K\bibinitperiod},
+           given={Martin},
+           giveni={M\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {O'Reilly Media}%
+      }
+      \strng{namehash}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{fullhash}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{fullhashraw}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{bibnamehash}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{authorbibnamehash}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{authornamehash}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{authorfullhash}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \strng{authorfullhashraw}{34b8d5b1d29d175527a6642f3ec8a76d}
+      \field{labelalpha}{Kle17}
+      \field{sortinit}{K}
+      \field{sortinithash}{c02bf6bff1c488450c352b40f5d853ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{{Designing Data-Intensive Applications}}
+      \field{year}{2017}
+    \endentry
+    \entry{newman2021microservices}{book}{}{}
+      \name{author}{1}{}{%
+        {{hash=b6be43602c2787d279f8522a7d9713db}{%
+           family={Newman},
+           familyi={N\bibinitperiod},
+           given={Sam},
+           giveni={S\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {O'Reilly Media}%
+      }
+      \strng{namehash}{b6be43602c2787d279f8522a7d9713db}
+      \strng{fullhash}{b6be43602c2787d279f8522a7d9713db}
+      \strng{fullhashraw}{b6be43602c2787d279f8522a7d9713db}
+      \strng{bibnamehash}{b6be43602c2787d279f8522a7d9713db}
+      \strng{authorbibnamehash}{b6be43602c2787d279f8522a7d9713db}
+      \strng{authornamehash}{b6be43602c2787d279f8522a7d9713db}
+      \strng{authorfullhash}{b6be43602c2787d279f8522a7d9713db}
+      \strng{authorfullhashraw}{b6be43602c2787d279f8522a7d9713db}
+      \field{labelalpha}{New21}
+      \field{sortinit}{N}
+      \field{sortinithash}{22369a73d5f88983a108b63f07f37084}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{edition}{2}
+      \field{title}{{Building Microservices: Designing Fine-Grained Systems}}
+      \field{year}{2021}
+    \endentry
+    \entry{rfc8288}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=5306dfcc512067b3ca303a423799b402}{%
+           family={{Nottingham, Mark}},
+           familyi={N\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{5306dfcc512067b3ca303a423799b402}
+      \strng{fullhash}{5306dfcc512067b3ca303a423799b402}
+      \strng{fullhashraw}{5306dfcc512067b3ca303a423799b402}
+      \strng{bibnamehash}{5306dfcc512067b3ca303a423799b402}
+      \strng{authorbibnamehash}{5306dfcc512067b3ca303a423799b402}
+      \strng{authornamehash}{5306dfcc512067b3ca303a423799b402}
+      \strng{authorfullhash}{5306dfcc512067b3ca303a423799b402}
+      \strng{authorfullhashraw}{5306dfcc512067b3ca303a423799b402}
+      \field{labelalpha}{Not17}
+      \field{sortinit}{N}
+      \field{sortinithash}{22369a73d5f88983a108b63f07f37084}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 8288}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc8288}}
+      \field{title}{{Web Linking}}
+      \field{year}{2017}
+    \endentry
+    \entry{rfc9457}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=97d7ffa377c3f79653dd58c628abbf4e}{%
+           family={{Nottingham, Mark and Wilde, Erik and Dalal, Sanjay}},
+           familyi={N\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{fullhash}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{fullhashraw}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{bibnamehash}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{authorbibnamehash}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{authornamehash}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{authorfullhash}{97d7ffa377c3f79653dd58c628abbf4e}
+      \strng{authorfullhashraw}{97d7ffa377c3f79653dd58c628abbf4e}
+      \field{labelalpha}{Not23}
+      \field{sortinit}{N}
+      \field{sortinithash}{22369a73d5f88983a108b63f07f37084}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 9457}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc9457}}
+      \field{title}{{Problem Details for HTTP APIs}}
+      \field{year}{2023}
+    \endentry
+    \entry{nygard2018releaseit}{book}{}{}
+      \name{author}{1}{}{%
+        {{hash=7517211d7d5cad5693ec6ca951302ccc}{%
+           family={Nygard},
+           familyi={N\bibinitperiod},
+           given={Michael\bibnamedelima T.},
+           giveni={M\bibinitperiod\bibinitdelim T\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {Pragmatic Bookshelf}%
+      }
+      \strng{namehash}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{fullhash}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{fullhashraw}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{bibnamehash}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{authorbibnamehash}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{authornamehash}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{authorfullhash}{7517211d7d5cad5693ec6ca951302ccc}
+      \strng{authorfullhashraw}{7517211d7d5cad5693ec6ca951302ccc}
+      \field{labelalpha}{Nyg18}
+      \field{sortinit}{N}
+      \field{sortinithash}{22369a73d5f88983a108b63f07f37084}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{edition}{2}
+      \field{title}{{Release It!: Design and Deploy Production-Ready Software}}
+      \field{year}{2018}
+    \endentry
+    \entry{openapi31}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=2140293a9301207642312840ece53671}{%
+           family={{OpenAPI Initiative}},
+           familyi={O\bibinitperiod}}}%
+      }
+      \strng{namehash}{2140293a9301207642312840ece53671}
+      \strng{fullhash}{2140293a9301207642312840ece53671}
+      \strng{fullhashraw}{2140293a9301207642312840ece53671}
+      \strng{bibnamehash}{2140293a9301207642312840ece53671}
+      \strng{authorbibnamehash}{2140293a9301207642312840ece53671}
+      \strng{authornamehash}{2140293a9301207642312840ece53671}
+      \strng{authorfullhash}{2140293a9301207642312840ece53671}
+      \strng{authorfullhashraw}{2140293a9301207642312840ece53671}
+      \field{labelalpha}{Ope21}
+      \field{sortinit}{O}
+      \field{sortinithash}{2cd7140a07aea5341f9e2771efe90aae}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://spec.openapis.org/oas/v3.1.0}}
+      \field{title}{{OpenAPI Specification v3.1.0}}
+      \field{year}{2021}
+    \endentry
+    \entry{opentelemetrydocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=0eb461beebb1085099be94b0796ad6d3}{%
+           family={{OpenTelemetry Authors}},
+           familyi={O\bibinitperiod}}}%
+      }
+      \strng{namehash}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{fullhash}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{fullhashraw}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{bibnamehash}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{authorbibnamehash}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{authornamehash}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{authorfullhash}{0eb461beebb1085099be94b0796ad6d3}
+      \strng{authorfullhashraw}{0eb461beebb1085099be94b0796ad6d3}
+      \field{labelalpha}{Ope24}
+      \field{sortinit}{O}
+      \field{sortinithash}{2cd7140a07aea5341f9e2771efe90aae}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://opentelemetry.io/docs/}}
+      \field{title}{{OpenTelemetry Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{owaspapisecurity}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=24b95a7fdad5a850196cd87546dcc70b}{%
+           family={{OWASP}},
+           familyi={O\bibinitperiod}}}%
+      }
+      \strng{namehash}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{fullhash}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{fullhashraw}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{bibnamehash}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{authorbibnamehash}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{authornamehash}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{authorfullhash}{24b95a7fdad5a850196cd87546dcc70b}
+      \strng{authorfullhashraw}{24b95a7fdad5a850196cd87546dcc70b}
+      \field{labelalpha}{OWA23}
+      \field{sortinit}{O}
+      \field{sortinithash}{2cd7140a07aea5341f9e2771efe90aae}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://owasp.org/API-Security/editions/2023/en/0x11-t10/}}
+      \field{title}{{OWASP API Security Top 10 -- 2023}}
+      \field{year}{2023}
+    \endentry
+    \entry{pactdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=ffe1e6f847160bd276993cf1ac670e5f}{%
+           family={{Pact Foundation}},
+           familyi={P\bibinitperiod}}}%
+      }
+      \strng{namehash}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{fullhash}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{fullhashraw}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{bibnamehash}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{authorbibnamehash}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{authornamehash}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{authorfullhash}{ffe1e6f847160bd276993cf1ac670e5f}
+      \strng{authorfullhashraw}{ffe1e6f847160bd276993cf1ac670e5f}
+      \field{labelalpha}{Pac24}
+      \field{sortinit}{P}
+      \field{sortinithash}{ff3bcf24f47321b42cb156c2cc8a8422}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://docs.pact.io/}}
+      \field{title}{{Pact Contract Testing Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{rfc7541}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=3d265ca6ac2cfda6dc77dc305749292b}{%
+           family={{Peon, Roberto and Ruellan, Herve}},
+           familyi={P\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{fullhash}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{fullhashraw}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{bibnamehash}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{authorbibnamehash}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{authornamehash}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{authorfullhash}{3d265ca6ac2cfda6dc77dc305749292b}
+      \strng{authorfullhashraw}{3d265ca6ac2cfda6dc77dc305749292b}
+      \field{labelalpha}{Peo15}
+      \field{sortinit}{P}
+      \field{sortinithash}{ff3bcf24f47321b42cb156c2cc8a8422}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 7541}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc7541}}
+      \field{title}{{HPACK: Header Compression for HTTP/2}}
+      \field{year}{2015}
+    \endentry
+    \entry{ietf_ratelimit_headers}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=3c7f9c4ab787798e5b30c8f780cbcc66}{%
+           family={{Polli, Roberto and Pario, Alejandro Martinez}},
+           familyi={P\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{fullhash}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{fullhashraw}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{bibnamehash}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{authorbibnamehash}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{authornamehash}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{authorfullhash}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \strng{authorfullhashraw}{3c7f9c4ab787798e5b30c8f780cbcc66}
+      \field{labelalpha}{Pol24}
+      \field{sortinit}{P}
+      \field{sortinithash}{ff3bcf24f47321b42cb156c2cc8a8422}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/}}
+      \field{title}{{RateLimit Header Fields for HTTP (Internet-Draft)}}
+      \field{year}{2024}
+    \endentry
+    \entry{requestsdocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=c7b5508dc5e59a2846d22617276cc27c}{%
+           family={{Python Software Foundation}},
+           familyi={P\bibinitperiod}}}%
+      }
+      \strng{namehash}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{fullhash}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{fullhashraw}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{bibnamehash}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{authorbibnamehash}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{authornamehash}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{authorfullhash}{c7b5508dc5e59a2846d22617276cc27c}
+      \strng{authorfullhashraw}{c7b5508dc5e59a2846d22617276cc27c}
+      \field{labelalpha}{Pyt24}
+      \field{sortinit}{P}
+      \field{sortinithash}{ff3bcf24f47321b42cb156c2cc8a8422}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://requests.readthedocs.io/}}
+      \field{title}{{Requests: HTTP for Humans}}
+      \field{year}{2024}
+    \endentry
+    \entry{fastapidocs}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=0be055a17f9e48ca636c5d9be1256de1}{%
+           family={{Ramírez, Sebastián}},
+           familyi={R\bibinitperiod}}}%
+      }
+      \strng{namehash}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{fullhash}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{fullhashraw}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{bibnamehash}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{authorbibnamehash}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{authornamehash}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{authorfullhash}{0be055a17f9e48ca636c5d9be1256de1}
+      \strng{authorfullhashraw}{0be055a17f9e48ca636c5d9be1256de1}
+      \field{labelalpha}{Ram24}
+      \field{sortinit}{R}
+      \field{sortinithash}{5e1c39a9d46ffb6bebd8f801023a9486}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://fastapi.tiangolo.com/}}
+      \field{title}{{FastAPI Documentation}}
+      \field{year}{2024}
+    \endentry
+    \entry{rfc8446}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=f18771ab908bb15ac379be707659de0f}{%
+           family={{Rescorla, Eric}},
+           familyi={R\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{f18771ab908bb15ac379be707659de0f}
+      \strng{fullhash}{f18771ab908bb15ac379be707659de0f}
+      \strng{fullhashraw}{f18771ab908bb15ac379be707659de0f}
+      \strng{bibnamehash}{f18771ab908bb15ac379be707659de0f}
+      \strng{authorbibnamehash}{f18771ab908bb15ac379be707659de0f}
+      \strng{authornamehash}{f18771ab908bb15ac379be707659de0f}
+      \strng{authorfullhash}{f18771ab908bb15ac379be707659de0f}
+      \strng{authorfullhashraw}{f18771ab908bb15ac379be707659de0f}
+      \field{labelalpha}{Res18}
+      \field{sortinit}{R}
+      \field{sortinithash}{5e1c39a9d46ffb6bebd8f801023a9486}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 8446}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc8446}}
+      \field{title}{{The Transport Layer Security (TLS) Protocol Version 1.3}}
+      \field{year}{2018}
+    \endentry
+    \entry{richardson2013restful}{book}{}{}
+      \name{author}{3}{}{%
+        {{hash=1d85fbf65464db3ffcf0c108192462b8}{%
+           family={Richardson},
+           familyi={R\bibinitperiod},
+           given={Leonard},
+           giveni={L\bibinitperiod}}}%
+        {{hash=d1ff4cc9d5727a5f76ad7bf041390a1b}{%
+           family={Amundsen},
+           familyi={A\bibinitperiod},
+           given={Mike},
+           giveni={M\bibinitperiod}}}%
+        {{hash=4fe2b4735d8d0a44dacec923a762c191}{%
+           family={Ruby},
+           familyi={R\bibinitperiod},
+           given={Sam},
+           giveni={S\bibinitperiod}}}%
+      }
+      \list{publisher}{1}{%
+        {O'Reilly Media}%
+      }
+      \strng{namehash}{d948cce950de67e316a36e2d0c95e204}
+      \strng{fullhash}{d948cce950de67e316a36e2d0c95e204}
+      \strng{fullhashraw}{d948cce950de67e316a36e2d0c95e204}
+      \strng{bibnamehash}{d948cce950de67e316a36e2d0c95e204}
+      \strng{authorbibnamehash}{d948cce950de67e316a36e2d0c95e204}
+      \strng{authornamehash}{d948cce950de67e316a36e2d0c95e204}
+      \strng{authorfullhash}{d948cce950de67e316a36e2d0c95e204}
+      \strng{authorfullhashraw}{d948cce950de67e316a36e2d0c95e204}
+      \field{labelalpha}{RAR13}
+      \field{sortinit}{R}
+      \field{sortinithash}{5e1c39a9d46ffb6bebd8f801023a9486}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{title}{{RESTful Web APIs}}
+      \field{year}{2013}
+    \endentry
+    \entry{rfc7636}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=97f58851fbc193f2b4102ab2afc4678e}{%
+           family={{Sakimura, Nat and Bradley, John and Agarwal, Naveen}},
+           familyi={S\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{fullhash}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{fullhashraw}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{bibnamehash}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{authorbibnamehash}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{authornamehash}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{authorfullhash}{97f58851fbc193f2b4102ab2afc4678e}
+      \strng{authorfullhashraw}{97f58851fbc193f2b4102ab2afc4678e}
+      \field{labelalpha}{Sak15}
+      \field{sortinit}{S}
+      \field{sortinithash}{b164b07b29984b41daf1e85279fbc5ab}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 7636}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc7636}}
+      \field{title}{{Proof Key for Code Exchange by OAuth Public Clients}}
+      \field{year}{2015}
+    \endentry
+    \entry{rfc9113}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=1f9638a25cebeb99999631f52dc7e6c6}{%
+           family={{Thomson, Martin and Benfield, Cory}},
+           familyi={T\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{fullhash}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{fullhashraw}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{bibnamehash}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{authorbibnamehash}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{authornamehash}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{authorfullhash}{1f9638a25cebeb99999631f52dc7e6c6}
+      \strng{authorfullhashraw}{1f9638a25cebeb99999631f52dc7e6c6}
+      \field{labelalpha}{Tho22}
+      \field{sortinit}{T}
+      \field{sortinithash}{9af77f0292593c26bde9a56e688eaee9}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 9113}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc9113}}
+      \field{title}{{HTTP/2}}
+      \field{year}{2022}
+    \endentry
+    \entry{twelvefactor}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=f80816006b206d4a892a17a12a075b97}{%
+           family={{Wiggins, Adam}},
+           familyi={W\bibinitperiod}}}%
+      }
+      \strng{namehash}{f80816006b206d4a892a17a12a075b97}
+      \strng{fullhash}{f80816006b206d4a892a17a12a075b97}
+      \strng{fullhashraw}{f80816006b206d4a892a17a12a075b97}
+      \strng{bibnamehash}{f80816006b206d4a892a17a12a075b97}
+      \strng{authorbibnamehash}{f80816006b206d4a892a17a12a075b97}
+      \strng{authornamehash}{f80816006b206d4a892a17a12a075b97}
+      \strng{authorfullhash}{f80816006b206d4a892a17a12a075b97}
+      \strng{authorfullhashraw}{f80816006b206d4a892a17a12a075b97}
+      \field{labelalpha}{Wig17}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{\url{https://12factor.net/}}
+      \field{title}{{The Twelve-Factor App}}
+      \field{year}{2017}
+    \endentry
+    \entry{rfc8594}{misc}{}{}
+      \name{author}{1}{}{%
+        {{hash=16240947c9c38923d2381777f742fcd9}{%
+           family={{Wilde, Erik}},
+           familyi={W\bibinitperiod}}}%
+      }
+      \list{organization}{1}{%
+        {IETF}%
+      }
+      \strng{namehash}{16240947c9c38923d2381777f742fcd9}
+      \strng{fullhash}{16240947c9c38923d2381777f742fcd9}
+      \strng{fullhashraw}{16240947c9c38923d2381777f742fcd9}
+      \strng{bibnamehash}{16240947c9c38923d2381777f742fcd9}
+      \strng{authorbibnamehash}{16240947c9c38923d2381777f742fcd9}
+      \strng{authornamehash}{16240947c9c38923d2381777f742fcd9}
+      \strng{authorfullhash}{16240947c9c38923d2381777f742fcd9}
+      \strng{authorfullhashraw}{16240947c9c38923d2381777f742fcd9}
+      \field{labelalpha}{Wil19}
+      \field{sortinit}{W}
+      \field{sortinithash}{4315d78024d0cea9b57a0c6f0e35ed0d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{RFC 8594}
+      \field{note}{\url{https://www.rfc-editor.org/rfc/rfc8594}}
+      \field{title}{{The Sunset HTTP Header Field}}
+      \field{year}{2019}
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+

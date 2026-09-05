@@ -1,0 +1,3 @@
+jsonschema>=4.21,<5.0
+msgpack>=1.0,<2.0
+orjson>=3.9,<4.0   # optional: fast JSON for the benchmark's extra row

@@ -1,0 +1,5 @@
+# Chapter 5 production stack (chapter listings themselves are stdlib-only)
+pyjwt>=2.8,<3          # JWT encode/decode with JWKS support
+cryptography>=42       # real RSA/EC signatures (RS256/ES256 verification)
+httpx>=0.27,<1         # modern HTTP client with timeouts and auth middleware
+keyring>=25            # optional: OS keychain storage for tokens

@@ -1,0 +1,4 @@
+opentelemetry-sdk>=1.25
+opentelemetry-instrumentation-fastapi>=0.46b0
+fastapi>=0.110
+pytest>=8

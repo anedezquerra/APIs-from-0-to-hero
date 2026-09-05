@@ -1,0 +1,17 @@
+asyncapi: "2.6.0"
+info:
+  title: Northwind Telemetry Events
+  version: "1.0.0"
+channels:
+  robot.readings:
+    publish:
+      message:
+        name: RobotReading
+        payload:
+          type: object
+          properties:
+            event_id: { type: string }
+            occurred_at: { type: string, format: date-time }
+            robot_id: { type: string }
+            motor_temp_c: { type: number }
+            cycles: { type: integer }

@@ -1,0 +1,2937 @@
+\chapter{Pagination, Filtering, Sorting \& Field Selection}
+\label{ch:pagination}
+
+\section*{Executive Summary}
+\addcontentsline{toc}{section}{Executive Summary}
+
+Every list endpoint you will ever ship is a liability until you answer four
+questions precisely: \emph{how does the client walk the collection, how does
+the client narrow it, how does the client order it, and how much of each
+resource does the client actually need?} These are the questions of
+pagination, filtering, sorting, and field selection, and they are deceptively
+deep. The naive answers --- \texttt{OFFSET 100000}, a \texttt{WHERE} clause
+string-concatenated from query parameters, an \texttt{ORDER BY} on whatever
+column name the client sent, and a response body containing every column the
+ORM happened to load --- are the four horsemen of the reporting-API apocalypse
+that this chapter's case study reconstructs in painful detail.
+
+The chapter's spine is a single idea with three incarnations:
+\textbf{position is fragile, value is stable}. Offset pagination addresses
+rows by their \emph{position} in an ordering; positions shift under
+concurrent writes, and reaching a deep position costs work proportional to
+the position itself. Cursor and keyset pagination address rows by their
+\emph{value} at the boundary of the previous page; values are stable under
+inserts and deletes elsewhere in the ordering, and reaching a boundary value
+costs an index lookup --- $O(\log n)$, not $O(n)$. We derive both costs
+formally, then demonstrate the concurrency anomaly with a deterministic,
+scripted writer/reader interleaving that reproduces duplicates and skips
+under offset pagination while keyset pagination remains exact.
+
+The second half of the chapter treats the query surface around pagination:
+filtering and sorting. Here the governing principle is \textbf{never let the
+client speak SQL}. Clients speak a small, documented, allow-listed grammar of
+fields and operators; the server parses that grammar into a typed abstract
+syntax tree and compiles the tree into parameterized SQL, rejecting unknown
+fields, unknown operators, and type mismatches with a clean 400. Sorting gets
+the same treatment, plus one iron rule: \emph{every ordering ends with a
+unique tie-breaker}, because a non-deterministic \texttt{ORDER BY} silently
+corrupts every pagination strategy built on top of it. We close with field
+selection (\texttt{?fields=}) and expansion (\texttt{?expand=}), where the
+naive implementation reintroduces the $N{+}1$ query problem at the API
+boundary, and with the database craft that makes all of it fast: composite
+indexes aligned with keyset predicates, covering indexes, and how to read an
+\texttt{EXPLAIN} plan well enough to know whether you got the index right.
+
+Everything is runnable offline. Five complete Python listings --- a seeded
+dataset generator for the fictional Northwind Robotics parts catalog, a
+FastAPI service implementing all three pagination strategies with correct
+headers and HMAC-signed cursors, an allow-listed filter/sort compiler, a
+benchmark harness, and the concurrency-anomaly demo --- form a laboratory you
+can execute end to end on a Windows workstation with PowerShell in under a
+minute.
+
+\begin{keyconceptbox}
+A page is not a \emph{place} in a list; it is a \emph{predicate} on values.
+\texttt{OFFSET 150000} asks the database to compute and discard 150{,}000
+rows and breaks when the list shifts. \texttt{WHERE (cost, id) > (4200,
+918273)} asks the index to seek directly to a stable boundary and is immune
+to writes anywhere else in the ordering. Design list endpoints around
+boundary values, and design filter and sort surfaces around allow-lists
+compiled to bound parameters --- never around client-supplied SQL fragments.
+\end{keyconceptbox}
+
+%% ============================================================================
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch8-objectives}
+
+\subsection{Learning Objectives}
+
+After completing this chapter and its lab, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}]
+  \item Derive the asymptotic cost of offset pagination ($O(k)$ scanned rows
+        at depth $k$) and of keyset pagination ($O(\log n)$ seek plus $O(p)$
+        page fetch), and predict latency growth qualitatively from first
+        principles.
+  \item Formalize the offset-pagination concurrency anomaly --- duplicates
+        and skips caused by inserts or deletes ahead of the reader's window
+        --- and explain why keyset pagination is immune to it.
+  \item Implement all three pagination strategies (offset, transparent
+        keyset, opaque signed cursor) in FastAPI with correct HTTP semantics,
+        including RFC~8288 \texttt{Link} headers with \texttt{rel} values
+        \texttt{next}, \texttt{prev}, \texttt{first}, and \texttt{last}.
+  \item Design cursor tokens that are opaque, tamper-evident (HMAC-SHA256),
+        versioned, and expiring, and choose deliberately between
+        \texttt{has\_more} and \texttt{total\_count} page metadata.
+  \item Write a keyset predicate using tuple comparison ---
+        \texttt{WHERE (sort\_col, id) > (?, ?)} --- and align a composite
+        index with it so the predicate stays sargable.
+  \item Build an allow-listed filter grammar (operators
+        \texttt{eq/ne/gt/gte/lt/lte/in/contains}) that parses into a typed
+        AST and compiles to parameterized SQL, rejecting anything outside
+        the grammar.
+  \item Enforce deterministic ordering: multi-key sorts, explicit NULL
+        ordering, and a unique tie-breaker column appended to every sort.
+  \item Implement sparse fieldsets and resource expansion without the
+        $N{+}1$ query problem, using DataLoader-style batching at the API
+        boundary.
+  \item Read an \texttt{EXPLAIN QUERY PLAN} output and judge whether a
+        composite or covering index actually serves a keyset query.
+  \item Measure and report offset-versus-keyset latency growth with a
+        reproducible benchmark protocol, and interpret the resulting curve.
+\end{enumerate}
+
+\subsection{Prerequisites}
+
+This chapter assumes Chapters~0--6. Concretely:
+
+\begin{itemize}
+  \item \textbf{Chapter~0:} the latency-measurement discipline (percentiles,
+        reproducible benchmark protocols, synthetic Northwind Robotics data).
+  \item \textbf{Chapters~1--2:} HTTP request/response mechanics, header
+        semantics, and consuming APIs from Python clients.
+  \item \textbf{Chapter~3:} REST resource modeling --- collections,
+        identifiers, and why representations are projections of state.
+  \item \textbf{Chapter~4:} serialization contracts; the response shapes here
+        are exactly the JSON contracts of that chapter under pagination.
+  \item \textbf{Chapters~5--6:} client-side security hygiene and building
+        FastAPI services with dependency-injected configuration, which this
+        chapter's reference service extends \cite{fastapidocs,pydanticdocs}.
+  \item \textbf{Working knowledge of SQL:} \texttt{SELECT}, \texttt{WHERE},
+        \texttt{ORDER BY}, \texttt{LIMIT}/\texttt{OFFSET}, and what a B-tree
+        index is. We teach \emph{index alignment} for pagination, but not
+        index internals from zero; \emph{Designing Data-Intensive
+        Applications} \cite{kleppmann2017ddia} is the recommended companion.
+  \item \textbf{Environment:} Python 3.11+ on Windows with PowerShell, a
+        virtual environment, and the dependencies from this chapter's
+        appendix installed.
+\end{itemize}
+
+%% ============================================================================
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch8-mechanics}
+
+\subsection{The Four Dimensions of Collection Design}
+\label{subsec:ch8-four-dimensions}
+
+A collection endpoint such as \texttt{GET /parts} is a function from client
+intent to a projected, ordered, bounded subset of a relation. Decompose that
+function into four orthogonal dimensions and every design decision in this
+chapter has a home:
+
+\begin{enumerate}
+  \item \textbf{Pagination} --- which \emph{window} of the ordered
+        collection? (offset, cursor, keyset)
+  \item \textbf{Filtering} --- which \emph{subset} of the relation?
+        (allow-listed predicates)
+  \item \textbf{Sorting} --- which \emph{order}? (multi-key, deterministic)
+  \item \textbf{Field selection} --- which \emph{projection} of each
+        resource? (sparse fieldsets, expansion)
+\end{enumerate}
+
+The dimensions are orthogonal in design but \emph{not} in implementation:
+filtering changes the relation being paginated, sorting defines what
+``next'' means, and field selection changes what each row costs to
+serialize. A change to any dimension between page one and page two of a
+client's walk invalidates the walk --- a consistency requirement we will
+formalize in Section~\ref{subsec:ch8-filter-consistency}.
+
+\subsection{Offset Pagination and Its True Cost}
+\label{subsec:ch8-offset-cost}
+
+Offset pagination is the strategy everyone reaches for first:
+
+\begin{minted}{sql}
+SELECT id, sku, name, unit_cost_cents
+FROM parts
+ORDER BY unit_cost_cents, id
+LIMIT 50 OFFSET 100000;
+\end{minted}
+
+The semantics are simple: sort the relation, discard the first $k$ rows,
+return the next $p$. The problem is the word \emph{discard}. A B-tree index
+on \texttt{(unit\_cost\_cents, id)} lets the engine find the \emph{start} of
+the ordering in $O(\log n)$, but it provides no random access to the
+$k$-th entry: index leaf entries do not carry their ordinal position. The
+engine must therefore \textbf{visit} entries $1 \ldots k$ to count its way to
+entry $k{+}1$, and in the general case --- when the query selects columns
+not present in the index --- each visited entry costs a heap or clustered-index
+lookup to fetch the row, only for the row to be thrown away.
+
+\begin{definition}[Offset page-fetch cost]
+Let $n$ be the number of rows matching the filter, $k$ the offset, $p$ the
+page size, $c_s$ the per-row cost of scanning (and, where required, fetching)
+a row that will be discarded, and $c_f$ the per-row cost of fetching and
+returning a row that will be emitted. Then the expected cost of one offset
+page fetch is
+\[
+T_{\mathrm{offset}}(k, p) \;=\; c_{\mathrm{seek}} \;+\; k \cdot c_s \;+\; p \cdot c_f
+\;=\; O(\log n) + O(k) + O(p).
+\]
+With $k$ up to $n$, worst-case page cost is $O(n)$: \emph{the deepest page
+costs as much as reading the entire table.}
+\end{definition}
+
+Two consequences follow. First, latency \emph{grows linearly with depth}, so
+the pagination API has a built-in denial-of-wallet vector: a crawler (or a
+buggy retry loop) walking to depth $n$ consumes
+$\sum_{k} O(k) = O(n^2 / p)$ total row visits. Second, aggregate user
+experience degrades exactly where your most valuable queries live ---
+auditors, backfill jobs, and reporting exports are the clients that walk
+deep.
+
+\begin{examplebox}
+Northwind Robotics ships 200{,}000 parts. A page of 50 at offset 0 costs one
+index seek and 50 row fetches --- sub-millisecond on any hardware. The same
+page at offset 150{,}000 must first scan past 150{,}000 index entries (and,
+without a covering index, fetch 150{,}000 rows that are immediately
+discarded). On the reference hardware used for this chapter's benchmark that
+page costs ${\sim}6$~ms against ${\sim}0.07$~ms for the equivalent keyset
+seek --- a ${\sim}90\times$ gap that widens linearly with depth.
+Section~\ref{subsec:ch8-benchmark} gives the full measured table.
+\end{examplebox}
+
+\subsection{The Concurrency Anomaly, Formalized}
+\label{subsec:ch8-anomaly-theory}
+
+Cost is only half the indictment. Offset pagination is also \emph{incorrect}
+under concurrent writes, in a way that no isolation level fixes, because the
+anomaly spans multiple transactions (one per page request).
+
+Model the collection as a sequence $S = \langle r_1, r_2, \ldots, r_n
+\rangle$ ordered by the sort key. A reader requests pages of size $p$:
+page $j$ is $S[jp \ldots jp{+}p{-}1]$. Between two page requests, a writer
+commits. Define $\Delta_{\mathrm{ins}}(j)$ as the number of rows inserted
+at positions $\le jp$ (ahead of or inside the window boundary) and
+$\Delta_{\mathrm{del}}(j)$ the number of such rows deleted.
+
+\begin{definition}[Offset window drift]
+After writer activity ahead of the boundary, the next offset page returns
+\[
+S'\big[jp \ldots jp{+}p{-}1\big]
+\;=\;
+S\big[jp - \Delta \ldots jp - \Delta + p - 1\big],
+\qquad \Delta = \Delta_{\mathrm{ins}}(j) - \Delta_{\mathrm{del}}(j).
+\]
+Every insertion ahead of the boundary ($\Delta > 0$) replays $\Delta$ rows
+the reader already saw (\textbf{duplicates}); every deletion ($\Delta < 0$)
+conceals $|\Delta|$ rows the reader never saw (\textbf{skips}).
+\end{definition}
+
+The reader did nothing wrong; each individual page was a correct answer to
+the query as executed. The anomaly is a property of \emph{positional
+addressing}: an offset is a coordinate in a coordinate system that the writer
+keeps renumbering. Section~\ref{subsec:ch8-anomaly-demo} proves this with a
+deterministic interleaving in which three concurrent front-of-list inserts
+cause the offset walker to emit rows 5, 9, and 13 twice and never emit rows
+18, 19, and 20 at all.
+
+\begin{warningbox}
+Read-committed isolation --- the default in PostgreSQL, and effectively what
+SQLite gives each statement --- makes this \emph{worse} to reason about, not
+better: every page request sees the latest committed state, so the window
+boundary moves underneath the reader between every pair of requests.
+Snapshot isolation across the whole walk would fix consistency but requires
+holding a transaction (and its snapshot) open across an unbounded number of
+HTTP requests --- an operational anti-pattern of its own. Keyset pagination
+sidesteps the entire dilemma.
+\end{warningbox}
+
+\subsection{Cursor and Keyset (Seek) Pagination}
+\label{subsec:ch8-keyset}
+
+Keyset pagination replaces the positional coordinate with a \emph{value
+coordinate}: the sort-key values of the last row of the previous page. The
+next page is defined by a predicate, not a position:
+
+\begin{minted}{sql}
+SELECT id, sku, name, unit_cost_cents
+FROM parts
+WHERE (unit_cost_cents, id) > (4200, 918273)   -- the keyset
+ORDER BY unit_cost_cents, id
+LIMIT 50;
+\end{minted}
+
+\subsubsection{Tuple comparison semantics}
+
+The predicate \texttt{(a, b) > (x, y)} is a \emph{row-value} (tuple)
+comparison with lexicographic semantics:
+\[
+(a, b) > (x, y) \;\equiv\; a > x \;\lor\; \big(a = x \land b > y\big).
+\]
+This is exactly the condition ``strictly after the boundary row in the
+$(a,b)$ ordering,'' including rows that tie on $a$ but follow on $b$. The
+second disjunct is why the tie-breaker column is not optional: without
+\texttt{id}, all rows sharing the boundary value of
+\texttt{unit\_cost\_cents} would be either replayed or skipped. SQL
+standardizes row-value comparison and both SQLite (3.15+) and PostgreSQL
+implement it; where a dialect lacks it, the expanded disjunction above is
+the portable equivalent --- write it exactly, because a hand-rolled
+\texttt{a >= x AND b > y} is subtly wrong (it drops the $a = x \land b > y$
+survivors of the tie on one side and replays $a > x$ ties on the other).
+
+\subsubsection{Why the seek is O(log n)}
+
+Given a composite index on \texttt{(unit\_cost\_cents, id)} whose column
+order matches the sort order, the keyset predicate is \emph{sargable}: the
+engine descends the B-tree directly to the first entry satisfying the tuple
+predicate --- $O(\log n)$ comparisons --- then reads $p$ consecutive leaf
+entries, already in order:
+
+\begin{definition}[Keyset page-fetch cost]
+\[
+T_{\mathrm{keyset}}(p) \;=\; c_{\mathrm{seek}} \;+\; p \cdot c_f
+\;=\; O(\log n) + O(p),
+\]
+\emph{independent of depth.} Page 1 and page 10{,}000 cost the same.
+\end{definition}
+
+The index-alignment requirement is precise: the index's leading columns must
+equal the \texttt{ORDER BY} columns in the same order and direction (or all
+reversed, which a B-tree can scan backward). An index on
+\texttt{(id, unit\_cost\_cents)} is useless for this query; an index on
+\texttt{(unit\_cost\_cents)} alone serves the seek on the first column but
+forces an in-memory sort for the tie-break --- check with
+\texttt{EXPLAIN} (Section~\ref{subsec:ch8-indexes}).
+
+\subsubsection{Stable ordering is a correctness requirement}
+
+Both strategies presuppose a \emph{total} order. If the sort key is not
+unique, rows that tie can be emitted in different orders by different
+executions of the same query (the optimizer is free to choose), and neither
+offsets nor keysets mean anything stable. The rule is absolute:
+
+\begin{keyconceptbox}
+\textbf{Every paginated ordering must end in a unique, immutable tie-breaker
+column} --- almost always the primary key. \texttt{ORDER BY unit\_cost\_cents}
+is a bug waiting for a tie; \texttt{ORDER BY unit\_cost\_cents, id} is a
+contract. The same rule makes keyset predicates total, makes offset walks at
+least deterministic, and makes multi-column sorts (Section
+\ref{subsec:ch8-sorting}) composable.
+\end{keyconceptbox}
+
+\subsubsection{Cursor pagination: keyset with an envelope}
+
+\emph{Cursor pagination} is keyset pagination with the boundary values
+packaged into an opaque token the server hands to the client:
+\texttt{next\_cursor} in, \texttt{cursor} out. The underlying seek is
+identical; what changes is the encapsulation. The server can now hide
+internal column names, version the payload, sign it against tampering, and
+expire it --- Section~\ref{subsec:ch8-cursor-design} develops the full
+design space. Stripe, Slack, and most large public APIs converge on this
+shape precisely because it decouples the client contract from the storage
+schema.
+
+\subsection{Measured Performance: Offset vs.\ Keyset}
+\label{subsec:ch8-benchmark}
+
+Theory predicts linear-versus-constant growth; measurement confirms it.
+Listing~\ref{lst:ch8-benchmark} benchmarks single-page fetches (page size
+50, median of 15 repetitions) at increasing depths over a 200{,}000-row
+Northwind Robotics parts table in SQLite, backed by the composite index
+\texttt{idx\_parts\_cost\_id}. Results from one run on the reference
+workstation (Windows, Python 3.13, warm page cache):
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{r r r r X}
+    \toprule
+    \textbf{Depth} & \textbf{Offset (ms)} & \textbf{Keyset (ms)} &
+    \textbf{Speedup} & \textbf{Observation} \\
+    \midrule
+    0       & 0.060 & 0.062 & 1.0x  & Identical: offset 0 \emph{is} a seek. \\
+    1{,}000   & 0.074 & 0.065 & 1.1x  & Scan cost still below timer noise. \\
+    10{,}000  & 0.214 & 0.069 & 3.1x  & Linear regime clearly visible. \\
+    50{,}000  & 0.937 & 0.079 & 11.9x & Offset now dominated by discards. \\
+    100{,}000 & 1.853 & 0.076 & 24.4x & Keyset flat within noise. \\
+    150{,}000 & 5.908 & 0.065 & 91.5x & Offset super-linear: cache pressure. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Measured single-page latency by strategy and depth
+           (median of 15; illustrative, machine-dependent; page size 50,
+           $n = 200{,}000$ rows, SQLite with composite index).}
+  \label{tab:ch8-benchmark}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+        width=0.86\textwidth,
+        height=7.2cm,
+        xlabel={Page depth (rows skipped)},
+        ylabel={Median page-fetch latency (ms)},
+        xmin=0, xmax=160000,
+        ymin=0, ymax=6.5,
+        xtick={0, 25000, 50000, 75000, 100000, 125000, 150000},
+        scaled x ticks=false,
+        x tick label style={/pgf/number format/fixed},
+        legend pos=north west,
+        legend style={font=\footnotesize},
+        grid=major,
+        grid style={gray!20},
+      ]
+      \addplot[color=packtorange, mark=*, thick] coordinates {
+        (0, 0.060) (1000, 0.074) (10000, 0.214)
+        (50000, 0.937) (100000, 1.853) (150000, 5.908)
+      };
+      \addlegendentry{OFFSET / LIMIT (linear growth)}
+      \addplot[color=darkblue, mark=square*, thick] coordinates {
+        (0, 0.062) (1000, 0.065) (10000, 0.069)
+        (50000, 0.079) (100000, 0.076) (150000, 0.065)
+      };
+      \addlegendentry{Keyset seek (depth-independent)}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Offset versus keyset page-fetch latency at increasing depth.
+           Measured values from Listing~\ref{lst:ch8-benchmark}; illustrative
+           and machine-dependent --- the \emph{shape}, not the absolute
+           numbers, is the finding.}
+  \label{fig:ch8-latency-curve}
+\end{figure}
+
+Read the curve as the two cost formulas made visible:
+$T_{\mathrm{offset}}$ is the line $k \cdot c_s$, and $T_{\mathrm{keyset}}$
+is the constant $c_{\mathrm{seek}} + p \cdot c_f$. The slight super-linearity
+at depth 150{,}000 is cache behavior --- discarded rows still flow through
+the buffer pool --- which makes the production case \emph{worse} than the
+asymptotic one, since production offset queries rarely enjoy a covering
+index.
+
+\subsection{Choosing a Strategy: A Decision Tree}
+\label{subsec:ch8-decision-tree}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\footnotesize,
+      decision/.style={diamond, draw=darkblue, thick, align=center,
+                       inner sep=1.2pt, text width=2.9cm},
+      outcome/.style={rectangle, rounded corners, draw=packtorange, thick,
+                      align=center, text width=3.4cm, fill=packtorange!8},
+      lbl/.style={note, midway},
+      >=stealth,
+      node distance=1.05cm and 1.5cm,
+    ]
+    \node[decision] (random) {Client needs random page access?\\(``jump to page 47'')};
+    \node[decision, below left=of random] (shallow) {Depth bounded \& small?\\(admin UI, $<$ few 1000 rows)};
+    \node[outcome, below=of shallow] (offok) {\textbf{Offset}\\ LIMIT/OFFSET + total\_count; simplest contract};
+    \node[decision, below right=of random] (stable) {Writes concurrent with walks?\\(feeds, ledgers, exports)};
+    \node[decision, below=of stable] (opaque) {Hide schema internals / expire sessions?};
+    \node[outcome, below left=of opaque] (cursor) {\textbf{Opaque cursor}\\ signed, versioned keyset token};
+    \node[outcome, below right=of opaque] (keyset) {\textbf{Transparent keyset}\\ after\_cost / after\_id params};
+    \node[outcome, right=1.6cm of opaque] (offcap) {\textbf{Offset, capped}\\ enforce max depth, offer export job instead};
+
+    \draw[->, thick] (random) -- node[lbl, above left] {no} (stable);
+    \draw[->, thick] (random) -- node[lbl, above right] {yes} (shallow);
+    \draw[->, thick] (shallow) -- node[lbl, left] {yes} (offok);
+    \draw[->, thick] (shallow.east) to[out=0,in=110] node[lbl, right, pos=0.35] {no} (offcap.north);
+    \draw[->, thick] (stable) -- node[lbl, left] {yes / any} (opaque);
+    \draw[->, thick] (opaque) -- node[lbl, above left] {yes} (cursor);
+    \draw[->, thick] (opaque) -- node[lbl, above right] {no} (keyset);
+  \end{tikzpicture}
+  \caption{Pagination-strategy decision tree. Random access is the only
+           property offset provides that keyset cannot; it is also the
+           property that costs $O(k)$ and drifts under writes.}
+  \label{fig:ch8-decision-tree}
+\end{figure}
+
+The honest summary: offset is acceptable when the collection is small,
+walks are shallow, and random access is a genuine product requirement ---
+an internal admin grid is the canonical case. Everything user-facing,
+machine-consumed, exported, or infinite-scrolled should be keyset, and the
+cursor envelope should be opaque the moment the API is public
+\cite{gehl2021apidesign}.
+
+\subsection{Cursor Token Design}
+\label{subsec:ch8-cursor-design}
+
+\subsubsection{Opaque versus transparent}
+
+A \emph{transparent} cursor exposes the boundary values as ordinary query
+parameters (\texttt{?after\_cost=4200\&after\_id=918273}). Clients can
+construct them, debug them, and bookmark them --- and they couple your public
+contract to your physical schema forever. An \emph{opaque} cursor wraps the
+same values in an encoded, signed token. The client treats it as an
+unanalyzable string; the server retains freedom to rename columns, change
+the sort, or rotate the encoding. For public APIs, opacity is the default
+recommendation; for internal APIs where debuggability dominates, transparent
+keysets are defensible.
+
+\subsubsection{A reference token format}
+
+The token used by the reference service (Listing~\ref{lst:ch8-service}) is
+\[
+\underbrace{\texttt{base64url}(\mathrm{JSON})}_{\text{payload}}
+\;\texttt{.}\;
+\underbrace{\operatorname{HMAC\text{-}SHA256}_{\text{32 hex chars}}(\text{payload})}_{\text{truncated tag}}
+\]
+with payload
+\begin{minted}{json}
+{"v":1,"exp":1735686000,"cost":4200,"id":918273}
+\end{minted}
+
+\begin{itemize}
+  \item \textbf{Version (\texttt{v}).} Cursors outlive deploys. A version
+        field lets the server reject (or migrate) tokens minted by a previous
+        contract instead of misinterpreting them as corrupt.
+  \item \textbf{Expiry (\texttt{exp}).} A cursor is a capability: it encodes
+        a position in a potentially sensitive ordering. Expiry bounds replay
+        windows, bounds how long a leaked token is useful, and gives you a
+        principled answer to ``how long may a client pause mid-walk?''
+  \item \textbf{Signature.} HMAC-SHA256 over the payload, truncated to 128
+        bits, verified with a constant-time comparison
+        (\texttt{hmac.compare\_digest}). Verification runs \emph{before} any
+        payload field is trusted. Tamper handling is uniform: any malformed,
+        forged, expired, or wrong-version token receives the same 400
+        problem-details response, revealing nothing about which check failed
+        beyond what the legitimate client needs to recover (restart the
+        walk).
+  \item \textbf{Key management.} The signing key is server-side
+        configuration loaded from the environment (a secrets manager in
+        production), never committed, never logged. The demo key in
+        Listing~\ref{lst:ch8-service} is explicitly marked demo-only.
+\end{itemize}
+
+\begin{warningbox}
+Unsigned or merely \emph{encoded} cursors (plain base64 JSON) are guessable
+and forgeable: a client can mint a cursor pointing anywhere in your
+ordering, bypassing any access control you keyed off earlier pages, and can
+probe field values by binary-searching the boundary. Signing is not
+hardening; it is the minimum bar. Similarly, never put user-input-derived
+SQL fragments in the token --- the payload is decoded into a typed
+structure and re-bound as parameters, exactly like any other external input.
+\end{warningbox}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\footnotesize,
+      stage/.style={rectangle, draw=darkblue, thick, align=center,
+                    minimum width=2.35cm, minimum height=1.05cm, fill=blue!4},
+      decision/.style={diamond, draw=packtorange, thick, align=center,
+                       inner sep=1pt, text width=1.9cm},
+      >=stealth,
+      node distance=0.55cm and 0.8cm,
+    ]
+    \node[stage] (fetch) {Fetch page $j$\\(\texttt{LIMIT p+1})};
+    \node[stage, right=of fetch] (build) {Build payload\\$v$, $\exp$, boundary values};
+    \node[stage, right=of build] (sign) {Sign\\HMAC-SHA256};
+    \node[stage, right=of sign] (emit) {Emit token\\body + \texttt{Link} header};
+    \node[stage, below=1.2cm of emit] (recv) {Client returns\\token verbatim};
+    \node[decision, left=of recv] (verify) {Signature, version, expiry OK?};
+    \node[stage, left=of verify] (seek) {Keyset seek from\\boundary values};
+    \node[stage, fill=packtorange!12, draw=packtorange, below=0.7cm of verify]
+      (reject) {400 problem-details\\``invalid cursor''};
+
+    \draw[->, thick] (fetch) -- (build);
+    \draw[->, thick] (build) -- (sign);
+    \draw[->, thick] (sign) -- (emit);
+    \draw[->, thick] (emit) -- (recv);
+    \draw[->, thick] (recv) -- (verify);
+    \draw[->, thick] (verify) -- node[note, above] {yes} (seek);
+    \draw[->, thick] (verify) -- node[note, right] {no} (reject);
+    \draw[->, thick, dashed] (seek.west) to[out=180,in=210]
+      node[note, left, align=center] {next iteration\\(page $j{+}1$)} (fetch.south west);
+  \end{tikzpicture}
+  \caption{Cursor lifecycle: minting (top row) and redemption (bottom row).
+           Verification precedes any use of payload fields; the one-extra-row
+           fetch (\texttt{LIMIT p+1}) computes \texttt{has\_more} without a
+           \texttt{COUNT(*)} query.}
+  \label{fig:ch8-cursor-lifecycle}
+\end{figure}
+
+\subsection{Hypermedia Controls: RFC 8288 Link Headers}
+\label{subsec:ch8-link-headers}
+
+Page navigation is a hypermedia concern, and HTTP already has a standard
+surface for it: the \texttt{Link} header \cite{rfc8288}. Each link is a
+target URI plus a relation type:
+
+\begin{minted}{http}
+HTTP/1.1 200 OK
+Link: </parts/offset?limit=50&offset=100>; rel="next",
+      </parts/offset?limit=50&offset=0>; rel="first",
+      </parts/offset?limit=50&offset=50>; rel="prev"
+Content-Type: application/json
+\end{minted}
+
+The registered relations that matter here are \texttt{next}, \texttt{prev},
+\texttt{first}, and \texttt{last}. Emitting them buys three things:
+clients can be \emph{driven by the hypermedia} instead of constructing URLs
+(a client that follows \texttt{rel="next"} never needs to know whether you
+paginate by offset, keyset, or opaque cursor --- strategy migration becomes
+a server-side decision); intermediaries and crawlers understand the
+semantics; and the absence of \texttt{rel="next"} is an unambiguous,
+parseable end-of-collection signal. Body-level fields (\texttt{next\_cursor})
+and \texttt{Link} headers coexist peacefully --- the reference service emits
+both --- but if you implement only one, prefer the header: it is the
+standard, content-negotiation-friendly surface \cite{rfc9110}.
+
+Two construction rules matter. First, links must be \emph{complete and
+self-contained}: the \texttt{next} URI reproduces every parameter that
+defined the current page (limit, filters, sort) so the walk is resumable
+without client-side state. Second, \texttt{rel="last"} requires knowing the
+total, which ties it to the cost discussion that follows --- many APIs
+deliberately omit it.
+
+\subsection{Page Metadata: \texttt{has\_more} versus \texttt{total\_count}}
+\label{subsec:ch8-metadata}
+
+Clients want to know two different things: ``is there another page?'' and
+``how many rows are there in total?'' The first is cheap; the second is not.
+
+\textbf{\texttt{has\_more}} costs one row: fetch \texttt{LIMIT p + 1}, emit
+$p$ rows, and set \texttt{has\_more = true} if a $(p{+}1)$-th row exists.
+The cursor lifecycle in Figure~\ref{fig:ch8-cursor-lifecycle} builds this in.
+
+\textbf{\texttt{total\_count}} costs a \texttt{COUNT(*)} over the full
+filtered relation. At small scale that is a fast index scan; at scale it is
+an $O(n)$ operation \emph{per page request}, executed again and again by
+every client on every page --- the database recomputes a number almost no
+client acts upon, while holding buffer-pool pages that latency-sensitive
+queries need. On a 200{,}000-row SQLite table the count alone costs
+multiples of a page fetch; on a 200-million-row PostgreSQL table under
+concurrent load it is the query your on-call learns to hate (Section
+\ref{sec:ch8-casestudy}).
+
+When product requirements genuinely need a total, choose deliberately:
+
+\begin{itemize}
+  \item \textbf{Opt-in counting} --- \texttt{?include\_total=true}, as in the
+        reference service --- so casual clients never pay for it.
+  \item \textbf{Count once, not per page} --- return the total only on page
+        one of a walk, or in a separate \texttt{/parts/stats} resource.
+  \item \textbf{Estimate} --- PostgreSQL's planner keeps reltuples estimates;
+        \texttt{EXPLAIN} row estimates, or a periodically refreshed
+        \texttt{COUNT} materialized into a stats table, give
+        ``${\sim}200{,}000$ results'' good enough for UI badges.
+  \item \textbf{Exact counts only over small filtered sets} --- enforce a
+        threshold: compute the exact count only when a capped probe
+        (\texttt{SELECT ... LIMIT 10001}) returns few enough rows.
+\end{itemize}
+
+\subsection{Filtering: A Safe Query-Parameter Grammar}
+\label{subsec:ch8-filtering}
+
+Filtering is where list endpoints most often become injection vehicles. The
+failure pattern is always the same shape: the server treats query parameters
+as \emph{SQL text} rather than as \emph{values}:
+
+\begin{minted}{python}
+# NEVER do this. One crafted ?min_cost=1 OR 1=1-- later...
+sql = f"SELECT * FROM parts WHERE unit_cost_cents >= {min_cost}"
+\end{minted}
+
+The defense has three layers, all present in
+Listing~\ref{lst:ch8-filter-compiler}:
+
+\subsubsection{Layer 1: an explicit, allow-listed grammar}
+
+Define the public surface as a mini-grammar, not as SQL:
+
+\begin{minted}{text}
+filter   := clause (";" clause)*
+clause   := field ":" op ":" value
+field    := "sku" | "name" | "category" | "cost" | "weight" | "active"
+op       := "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "contains"
+value    := scalar | scalar ("," scalar)*        ; comma list for "in"
+sort     := ["-"] field ("," ["-"] field)*       ; "-" = descending
+\end{minted}
+
+Note what the grammar achieves by construction. The field set is a
+\emph{public naming layer}: clients say \texttt{cost}; the column is
+\texttt{unit\_cost\_cents}. Internal columns that must never be filtered or
+leaked (password hashes, tenant keys, margin data) simply do not exist in
+the grammar. The operator set is closed and semantics are documented:
+\texttt{in} takes a comma list, \texttt{contains} is case-insensitive
+substring on text fields only, ordering operators reject text fields, and
+\texttt{contains} escapes \texttt{LIKE} wildcards in user input so
+\texttt{\%} in a search string is data, not a pattern.
+
+\subsubsection{Layer 2: parse to a typed AST, then validate}
+
+Each clause becomes a typed node --- \texttt{Comparison},
+\texttt{InList}, \texttt{Contains} --- with the value already coerced to the
+field's declared Python type. Anything unparseable, unknown, or mistyped
+raises \texttt{FilterError}, which the HTTP layer maps to a 400
+problem-details response \cite{rfc9110}. Validation happens on the AST,
+where context is rich, rather than on the SQL string, where context is gone.
+
+\subsubsection{Layer 3: compile the AST to parameterized SQL}
+
+Compilation resolves each public field name to its column via the allow-list
+mapping --- \emph{never} via the input string --- emits a fixed skeleton of
+SQL with \texttt{?} placeholders, and returns the values as a bound parameter
+list. User input never touches SQL text; an \texttt{OR '1'='1} probe becomes
+a string literal compared against a column and matches nothing. This is the
+AST-based translation pattern: the grammar bounds what can be expressed, the
+AST bounds what can be validated, and parameter binding bounds what can be
+executed.
+
+\begin{keyconceptbox}
+Filter safety is an architecture, not a regex. \textbf{Allow-list the
+grammar} (fields and operators), \textbf{parse to a typed AST} (validate
+with full context, reject with 400s), and \textbf{compile with bound
+parameters} (user values never become SQL text). Any one layer alone has a
+bypass; the composition is robust.
+\end{keyconceptbox}
+
+\subsubsection{Filter consistency with pagination}
+\label{subsec:ch8-filter-consistency}
+
+A page is only meaningful relative to the filter and sort that defined the
+walk. Two rules follow. First, the filter and sort parameters are part of
+the \emph{cursor}: either they travel verbatim in every \texttt{Link} target
+and the server rejects a mid-walk change, or their hash is embedded in the
+signed cursor payload so a mismatched continuation fails fast instead of
+silently returning pages from a different query. Second, keyset predicates
+and filters compose by conjunction --- \texttt{WHERE <filters> AND
+(unit\_cost\_cents, id) > (?, ?)} --- which keeps the composite index
+usable when the filter's leading column aligns with the index (the
+\texttt{idx\_parts\_cat\_cost\_id} index exists precisely so that
+\texttt{category = ? AND (cost, id) > (?, ?)} seeks instead of scans).
+Filtering by a column you did not index and then keyset-paginating the
+result reintroduces the scan you worked to eliminate; check the plan.
+
+\subsection{Sorting: Multi-Key Orderings Done Safely}
+\label{subsec:ch8-sorting}
+
+Sorting composes with everything above, so its rules are short and strict:
+
+\begin{itemize}
+  \item \textbf{Allow-list sortable fields and directions}, exactly as for
+        filters. \texttt{?sort=-cost,sku} parses to
+        \texttt{ORDER BY unit\_cost\_cents DESC, sku ASC}; an unknown field
+        is a 400, and direction accepts only the two documented tokens.
+        Direction must be a parsed token, not interpolated text ---
+        \texttt{ORDER BY \{user\_input\}} is SQL injection wearing a trench
+        coat.
+  \item \textbf{Append the unique tie-breaker automatically.} The compiler
+        in Listing~\ref{lst:ch8-filter-compiler} always ends the key list
+        with \texttt{id ASC}. A client asking for \texttt{-cost} receives
+        \texttt{ORDER BY unit\_cost\_cents DESC, id ASC}: deterministic,
+        total, and keyset-compatible (the keyset tuple then spans
+        \emph{all} sort keys: \texttt{(cost, sku, id) > (?, ?, ?)}).
+  \item \textbf{Pin NULL ordering explicitly.} SQL leaves NULL placement in
+        \texttt{ORDER BY} implementation-defined (SQLite: NULLs first on
+        \texttt{ASC}; PostgreSQL: NULLs last). If any sortable column is
+        nullable, state it: \texttt{ORDER BY discontinued\_at ASC NULLS
+        LAST, id ASC} --- and make the keyset predicate NULL-aware
+        (\texttt{(col IS NULL)} disjuncts), or exclude NULL rows from
+        cursored endpoints. Ambiguous NULL handling is a silent
+        page-boundary corruptor.
+  \item \textbf{Descending keysets invert the predicate.} Walking
+        \texttt{ORDER BY cost DESC, id DESC} pages forward with
+        \texttt{(cost, id) < (?, ?)}. Mixed directions
+        (\texttt{cost DESC, id ASC}) are legal but the tuple predicate no
+        longer maps to one comparison --- expand to the disjunctive form.
+        Prefer uniform direction for cursor endpoints.
+  \item \textbf{Multi-column sorts need multi-column indexes.} The index
+        column order must match the \texttt{ORDER BY} order left-to-right;
+        an index on \texttt{(cost, sku, id)} cannot serve
+        \texttt{ORDER BY sku, cost, id}.
+\end{itemize}
+
+\subsection{Field Selection and Expansion}
+\label{subsec:ch8-field-selection}
+
+\subsubsection{Sparse fieldsets}
+
+\texttt{?fields=sku,name,cost} lets the client declare the projection it
+actually uses. The win is threefold: smaller payloads (egress cost,
+mobile bandwidth), less serialization CPU, and --- the quiet giant ---
+\emph{covering-index eligibility}: \texttt{SELECT sku, unit\_cost\_cents}
+with a restricted projection can be answered entirely from an index without
+touching the table heap. The safety rules mirror filtering: allow-list
+selectable fields, resolve through the public-name mapping, default to a
+documented field set when the parameter is absent, and always include
+\texttt{id} (clients need identity even when they forget to ask).
+
+\subsubsection{Expansion and the N+1 boundary problem}
+
+\texttt{?expand=category\_detail,supplier} asks the server to embed related
+resources inline. The naive implementation issues one query for the page of
+50 parts and then \emph{one supplier query per part} --- 51 round trips for
+one HTTP request, the classic $N{+}1$ transplanted from ORM-land to the API
+boundary. The fix is DataLoader-style batching applied to REST: collect the
+distinct foreign keys of the page, issue \emph{one} \texttt{WHERE id IN
+(...)} query per expanded relation, and stitch results in memory:
+
+\begin{minted}{python}
+def expand_suppliers(conn: sqlite3.Connection,
+                     parts: list[dict]) -> dict[int, dict]:
+    """One batched query for all suppliers referenced by this page."""
+    keys = sorted({p["supplier_id"] for p in parts})
+    placeholders = ", ".join("?" for _ in keys)
+    rows = conn.execute(
+        f"SELECT id, name, lead_time_days FROM suppliers "
+        f"WHERE id IN ({placeholders})", keys,
+    ).fetchall()
+    return {r["id"]: dict(r) for r in rows}
+\end{minted}
+
+Batching converts $1 + N \cdot k$ queries into $1 + k$ for $k$ expanded
+relations. Guard the expansion surface with the same allow-list discipline
+(expandable relations are enumerated; each has a bounded batch size), cap
+expansion depth (no \texttt{expand=a.b.c} transitive graphs in a REST
+endpoint --- that way lies GraphQL, Chapter~12), and remember the trade-off:
+expansion couples cacheability and payload size to the \emph{largest}
+consumer's needs. Sparse fieldsets shrink responses; expansion grows them.
+Offer both, and let \texttt{Vary} and your cache keys reflect the parameters
+\cite{rfc9110}.
+
+\subsection{Database Interaction: Indexes, EXPLAIN, Covering}
+\label{subsec:ch8-indexes}
+
+All of the above stands or falls on physical design:
+
+\begin{itemize}
+  \item \textbf{Composite index alignment.} For the ordering
+        \texttt{(unit\_cost\_cents, id)}, the index
+        \texttt{idx\_parts\_cost\_id ON parts(unit\_cost\_cents, id)} makes
+        both the seek and the ordered page read index-native. The column
+        order in the index must match the sort order; equality-prefixed
+        filters extend the rule: \texttt{category = ? AND (cost, id) > (?,?)}
+        wants \texttt{(category, unit\_cost\_cents, id)} --- equality columns
+        first, range/sort columns after.
+  \item \textbf{Reading EXPLAIN.} \texttt{EXPLAIN QUERY PLAN} on the keyset
+        query reports \texttt{SEARCH parts USING INDEX idx\_parts\_cost\_id
+        (unit\_cost\_cents>?...)} --- a \texttt{SEARCH}, i.e.\ a B-tree seek.
+        The offset variant reports the same index but \emph{scans} through
+        $k$ entries; at scale a planner may even choose
+        \texttt{SCAN parts} plus an in-memory sort, which is the
+        ``wrong index'' smell. Words to fear in any plan for a paginated
+        endpoint: \texttt{SCAN} (full), \texttt{USE TEMP B-TREE FOR ORDER
+        BY} (sort not served by an index), and a rows-examined estimate that
+        grows with your offset.
+  \item \textbf{Covering indexes.} If the page projection is
+        \texttt{(id, sku, unit\_cost\_cents)}, an index on
+        \texttt{(unit\_cost\_cents, id)} \emph{covering} \texttt{sku} (via
+        \texttt{INCLUDE} in PostgreSQL, or a third index column in SQLite)
+        answers the whole page from the index --- \texttt{USING COVERING
+        INDEX} in the plan --- eliminating $p$ heap fetches per page and,
+        for offset, $k$ wasted heap fetches per deep page.
+  \item \textbf{Write amplification is the bill.} Every index is paid for on
+        every insert and update. The two indexes in the reference schema are
+        justified by two real query shapes; index-per-hope is how write
+        latency dies.
+\end{itemize}
+
+%% ============================================================================
+\section{Production-Ready Code Implementation}
+\label{sec:ch8-code}
+
+Five complete, runnable listings form the chapter's laboratory. All are
+Python 3.11+, fully typed, PEP~8, and offline-first: the only datastore is
+local SQLite (stdlib \texttt{sqlite3}); the only third-party packages are
+FastAPI and its test client (which needs \texttt{httpx}). Everything runs on
+Windows PowerShell in seconds. Setup:
+
+\begin{minted}{powershell}
+cd "C:\Training\Training Areas\Data jobs learning\APIs - Usage and development\code"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi pydantic httpx pytest
+python gen_dataset.py --rows 200000 --db parts.db
+\end{minted}
+
+\subsection{Listing 1: Deterministic Dataset Generator}
+\label{subsec:ch8-code-generator}
+
+The generator (Listing~\ref{lst:ch8-generator}) builds the Northwind Robotics
+parts catalog: 200{,}000 synthetic rows with a skewed cost distribution
+(many cheap fasteners, few expensive actuators), deterministic per-row
+content derived from a seeded PRNG, and the two composite indexes that
+Section~\ref{subsec:ch8-indexes} justified: \texttt{idx\_parts\_cost\_id}
+for the unfiltered keyset walk and \texttt{idx\_parts\_cat\_cost\_id} for
+category-filtered walks. \texttt{ANALYZE} gives the query planner real
+statistics. Generation is pure CPU and one bulk insert --- about 3.5 seconds
+for 200{,}000 rows on the reference workstation; scale to a million rows by
+passing \texttt{-{}-rows 1000000} if you want the benchmark's linear region
+to hurt properly.
+
+\begin{minted}[caption={Deterministic synthetic dataset generator (\texttt{gen\_dataset.py}).},label={lst:ch8-generator}]{python}
+"""Deterministic synthetic dataset generator for Chapter 8.
+
+Generates the fictional *Northwind Robotics* parts catalog into a local
+SQLite database. Offline-first: no network, no third-party packages.
+
+Usage (PowerShell):
+    python gen_dataset.py --rows 200000 --db parts.db
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sqlite3
+import time
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS parts (
+    id              INTEGER PRIMARY KEY,
+    sku             TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    unit_cost_cents INTEGER NOT NULL,
+    weight_grams    INTEGER NOT NULL,
+    active          INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+-- Composite index aligned with the keyset ordering (unit_cost_cents, id).
+CREATE INDEX IF NOT EXISTS idx_parts_cost_id
+    ON parts (unit_cost_cents, id);
+-- Composite index aligned with (category, unit_cost_cents, id) keysets.
+CREATE INDEX IF NOT EXISTS idx_parts_cat_cost_id
+    ON parts (category, unit_cost_cents, id);
+"""
+
+CATEGORIES: list[str] = [
+    "actuator", "sensor", "chassis", "drivetrain", "power",
+    "controller", "fastener", "optic",
+]
+
+NAME_PARTS: list[str] = [
+    "servo", "gyro", "lidar", "torque", "chassis", "rail", "bearing",
+    "gearbox", "battery", "inverter", "encoder", "bracket", "harness",
+]
+
+NAME_SUFFIXES: list[str] = [
+    "Alpha", "Beta", "Prime", "XL", "Micro", "HD", "Mk2", "Pro",
+]
+
+
+def generate_rows(count: int, seed: int) -> list[tuple]:
+    """Build ``count`` deterministic synthetic part rows."""
+    rng = random.Random(seed)
+    rows: list[tuple] = []
+    for i in range(1, count + 1):
+        name = f"{rng.choice(NAME_PARTS)}-{rng.choice(NAME_SUFFIXES)}"
+        category = rng.choice(CATEGORIES)
+        # Skewed cost distribution: many cheap parts, few expensive ones.
+        cost = int(rng.expovariate(1 / 4000.0)) + 50
+        weight = rng.randint(2, 25_000)
+        active = 1 if rng.random() < 0.93 else 0
+        # Deterministic pseudo-timestamp derived from the row number only.
+        minute = (i * 7) % (60 * 24 * 365)
+        updated = f"2025-01-01T00:00:00Z+{minute:07d}m"
+        rows.append((f"NWR-{i:07d}", name, category, cost, weight, active, updated))
+    return rows
+
+
+def build_database(db_path: Path, rows: int, seed: int) -> None:
+    """Create (or replace) the SQLite database with ``rows`` parts."""
+    if db_path.exists():
+        db_path.unlink()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(SCHEMA)
+        started = time.perf_counter()
+        data = generate_rows(rows, seed)
+        with conn:
+            conn.executemany(
+                "INSERT INTO parts "
+                "(sku, name, category, unit_cost_cents, weight_grams, "
+                " active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                data,
+            )
+        conn.execute("ANALYZE")
+        conn.commit()
+        elapsed = time.perf_counter() - started
+        count = conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
+        print(f"generated {count:,} rows into {db_path} in {elapsed:.2f}s")
+    finally:
+        conn.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rows", type=int, default=200_000)
+    parser.add_argument("--db", type=Path, default=Path("parts.db"))
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    if args.rows < 1:
+        raise SystemExit("--rows must be >= 1")
+    build_database(args.db, args.rows, args.seed)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 2: Three Pagination Strategies in One FastAPI Service}
+\label{subsec:ch8-code-service}
+
+The service (Listing~\ref{lst:ch8-service}) implements the full design space
+of Section~\ref{sec:ch8-mechanics} behind three endpoints that share one
+ordering --- \texttt{(unit\_cost\_cents, id)} --- so their results can be
+compared row-for-row:
+
+\begin{itemize}
+  \item \texttt{GET /parts/offset} --- \texttt{LIMIT}/\texttt{OFFSET} with
+        RFC~8288 \texttt{Link} headers (\texttt{first}/\texttt{next}/
+        \texttt{prev}, plus \texttt{last} only when the client opts into the
+        count via \texttt{include\_total=true}).
+  \item \texttt{GET /parts/keyset} --- transparent keyset pagination:
+        \texttt{after\_cost}/\texttt{after\_id} parameters, the tuple
+        predicate \texttt{WHERE (unit\_cost\_cents, id) > (?, ?)}, and the
+        \texttt{LIMIT p+1} trick driving \texttt{has\_more} and the
+        \texttt{rel="next"} link.
+  \item \texttt{GET /parts/cursor} --- opaque cursors: versioned JSON
+        payload with expiry, base64url-encoded, HMAC-SHA256-signed and
+        verified with \texttt{hmac.compare\_digest} \emph{before} any payload
+        field is read. Any malformed, forged, wrong-version, or expired
+        token receives the same 400 problem-details body.
+\end{itemize}
+
+Limits are clamped server-side (\texttt{MAX\_LIMIT = 200}): an unbounded
+\texttt{limit} is a resource-exhaustion invitation. The \texttt{\_self\_check}
+entry point pages 250 rows through all three strategies offline via
+\texttt{TestClient}, asserts byte-identical id sequences, and confirms a
+forged cursor is rejected --- run it with
+\texttt{python pagination\_service.py}.
+
+\begin{minted}[caption={FastAPI service implementing offset, keyset, and HMAC-signed cursor pagination (\texttt{pagination\_service.py}).},label={lst:ch8-service}]{python}
+"""Chapter 8 reference service: three pagination strategies over one table.
+
+FastAPI application exposing the Northwind Robotics parts catalog with:
+
+* ``GET /parts/offset``  -- classic LIMIT/OFFSET with RFC 8288 Link headers.
+* ``GET /parts/keyset``  -- keyset (seek) pagination with transparent params.
+* ``GET /parts/cursor``  -- opaque, HMAC-signed, versioned, expiring cursors.
+
+All three order by ``(unit_cost_cents, id)`` which is backed by the
+composite index ``idx_parts_cost_id`` created by ``gen_dataset.py``.
+
+Run the self-check (offline, uses FastAPI TestClient):
+
+    python gen_dataset.py --rows 50000 --db parts.db
+    python pagination_service.py
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Query, Request, Response
+from fastapi.responses import JSONResponse
+
+DB_PATH = Path(os.environ.get("PARTS_DB", "parts.db"))
+# Demo-only key. In production load from a secrets manager, never hardcode.
+CURSOR_SECRET = os.environ.get("CURSOR_SECRET", "northwind-robotics-demo-key")
+CURSOR_VERSION = 1
+CURSOR_TTL_SECONDS = 3600
+MAX_LIMIT = 200
+DEFAULT_LIMIT = 50
+
+SELECT_COLS = "id, sku, name, category, unit_cost_cents, weight_grams, active"
+ORDER_BY = "unit_cost_cents, id"
+
+app = FastAPI(title="Northwind Robotics Parts API", version="1.0.0")
+
+
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def row_to_part(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "sku": row["sku"],
+        "name": row["name"],
+        "category": row["category"],
+        "unit_cost_cents": row["unit_cost_cents"],
+        "weight_grams": row["weight_grams"],
+        "active": bool(row["active"]),
+    }
+
+
+def clamp_limit(limit: int) -> int:
+    if limit < 1:
+        return DEFAULT_LIMIT
+    return min(limit, MAX_LIMIT)
+
+
+def link_header(base_url: str, links: dict[str, str]) -> str:
+    """Render an RFC 8288 Link header value from rel -> URL mappings."""
+    return ", ".join(f'<{base_url}{target}>; rel="{rel}"' for rel, target in links.items())
+
+
+# --------------------------------------------------------------------------
+# Strategy 1: offset pagination
+# --------------------------------------------------------------------------
+@app.get("/parts/offset")
+def list_parts_offset(
+    request: Request,
+    response: Response,
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    include_total: bool = Query(False),
+) -> dict[str, Any]:
+    limit = clamp_limit(limit)
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"SELECT {SELECT_COLS} FROM parts "
+            f"ORDER BY {ORDER_BY} LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        body: dict[str, Any] = {"items": [row_to_part(r) for r in rows]}
+        if include_total:
+            # Deliberately opt-in: COUNT(*) is a full index scan at scale.
+            total = conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
+            body["total_count"] = total
+
+        base = str(request.url.path)
+        links: dict[str, str] = {"first": f"{base}?limit={limit}&offset=0"}
+        if rows:
+            links["next"] = f"{base}?limit={limit}&offset={offset + limit}"
+        if offset > 0:
+            prev_offset = max(0, offset - limit)
+            links["prev"] = f"{base}?limit={limit}&offset={prev_offset}"
+        if "total_count" in body:
+            last_offset = max(0, ((body["total_count"] - 1) // limit) * limit)
+            links["last"] = f"{base}?limit={limit}&offset={last_offset}"
+        response.headers["Link"] = link_header(base, links)
+        return body
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# Strategy 2: keyset (seek) pagination -- transparent parameters
+# --------------------------------------------------------------------------
+@app.get("/parts/keyset")
+def list_parts_keyset(
+    request: Request,
+    response: Response,
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    after_cost: int | None = Query(None, ge=0),
+    after_id: int | None = Query(None, ge=1),
+) -> dict[str, Any]:
+    limit = clamp_limit(limit)
+    conn = get_db()
+    try:
+        if after_cost is None or after_id is None:
+            rows = conn.execute(
+                f"SELECT {SELECT_COLS} FROM parts ORDER BY {ORDER_BY} LIMIT ?",
+                (limit + 1,),  # fetch one extra row to compute has_more
+            ).fetchall()
+        else:
+            # Tuple comparison keeps the predicate sargable on the
+            # composite index (unit_cost_cents, id).
+            rows = conn.execute(
+                f"SELECT {SELECT_COLS} FROM parts "
+                f"WHERE (unit_cost_cents, id) > (?, ?) "
+                f"ORDER BY {ORDER_BY} LIMIT ?",
+                (after_cost, after_id, limit + 1),
+            ).fetchall()
+
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        body: dict[str, Any] = {
+            "items": [row_to_part(r) for r in page],
+            "has_more": has_more,
+        }
+        if has_more and page:
+            last = page[-1]
+            base = str(request.url.path)
+            nxt = (
+                f"{base}?limit={limit}"
+                f"&after_cost={last['unit_cost_cents']}&after_id={last['id']}"
+            )
+            response.headers["Link"] = link_header(base, {"next": nxt})
+        return body
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# Strategy 3: opaque signed cursors (HMAC-SHA256, versioned, expiring)
+# --------------------------------------------------------------------------
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes:
+    padding = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + padding)
+
+
+def encode_cursor(last_cost: int, last_id: int) -> str:
+    payload = {
+        "v": CURSOR_VERSION,
+        "exp": int(time.time()) + CURSOR_TTL_SECONDS,
+        "cost": last_cost,
+        "id": last_id,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    body = _b64url_encode(raw)
+    tag = hmac.new(CURSOR_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}.{tag[:32]}"
+
+
+class CursorError(ValueError):
+    """Raised for any malformed, forged, or expired cursor."""
+
+
+def decode_cursor(token: str) -> tuple[int, int]:
+    try:
+        body, tag = token.rsplit(".", 1)
+    except ValueError as exc:
+        raise CursorError("cursor is malformed") from exc
+    expected = hmac.new(
+        CURSOR_SECRET.encode(), body.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    if not hmac.compare_digest(expected, tag):
+        raise CursorError("cursor signature mismatch")
+    try:
+        payload = json.loads(_b64url_decode(body))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise CursorError("cursor payload is not valid JSON") from exc
+    if payload.get("v") != CURSOR_VERSION:
+        raise CursorError("unsupported cursor version")
+    if int(payload.get("exp", 0)) < int(time.time()):
+        raise CursorError("cursor has expired")
+    return int(payload["cost"]), int(payload["id"])
+
+
+@app.get("/parts/cursor")
+def list_parts_cursor(
+    request: Request,
+    response: Response,
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    cursor: str | None = Query(None),
+) -> dict[str, Any]:
+    limit = clamp_limit(limit)
+    position: tuple[int, int] | None = None
+    if cursor is not None:
+        try:
+            position = decode_cursor(cursor)
+        except CursorError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "type": "about:blank",
+                    "title": "Invalid cursor",
+                    "status": 400,
+                    "detail": str(exc),
+                },
+            )
+
+    conn = get_db()
+    try:
+        if position is None:
+            rows = conn.execute(
+                f"SELECT {SELECT_COLS} FROM parts ORDER BY {ORDER_BY} LIMIT ?",
+                (limit + 1,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {SELECT_COLS} FROM parts "
+                f"WHERE (unit_cost_cents, id) > (?, ?) "
+                f"ORDER BY {ORDER_BY} LIMIT ?",
+                (position[0], position[1], limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        body: dict[str, Any] = {
+            "items": [row_to_part(r) for r in page],
+            "has_more": has_more,
+        }
+        if has_more and page:
+            last = page[-1]
+            token = encode_cursor(last["unit_cost_cents"], last["id"])
+            body["next_cursor"] = token
+            base = str(request.url.path)
+            response.headers["Link"] = link_header(
+                base, {"next": f"{base}?limit={limit}&cursor={token}"}
+            )
+        return body
+    finally:
+        conn.close()
+
+
+def _self_check() -> None:
+    """Offline verification: page through all three strategies and compare."""
+    from fastapi.testclient import TestClient
+
+    if not DB_PATH.exists():
+        raise SystemExit(f"database {DB_PATH} missing; run gen_dataset.py first")
+    client = TestClient(app)
+
+    expected = get_db().execute(
+        "SELECT id FROM parts ORDER BY unit_cost_cents, id LIMIT 250"
+    ).fetchall()
+    expected_ids = [r[0] for r in expected]
+
+    # Offset: walk five pages of 50.
+    seen: list[int] = []
+    offset = 0
+    for _ in range(5):
+        res = client.get(f"/parts/offset?limit=50&offset={offset}")
+        assert res.status_code == 200, res.text
+        assert "next" in res.headers["Link"]
+        seen.extend(item["id"] for item in res.json()["items"])
+        offset += 50
+    assert seen == expected_ids, "offset walk diverged"
+
+    # Keyset: walk with transparent after_* parameters.
+    seen = []
+    params: dict[str, Any] = {"limit": 50}
+    for _ in range(5):
+        res = client.get("/parts/keyset", params=params)
+        assert res.status_code == 200, res.text
+        payload = res.json()
+        seen.extend(item["id"] for item in payload["items"])
+        last = payload["items"][-1]
+        params = {
+            "limit": 50,
+            "after_cost": last["unit_cost_cents"],
+            "after_id": last["id"],
+        }
+    assert seen == expected_ids, "keyset walk diverged"
+
+    # Cursor: walk with opaque signed tokens; then tamper and expect 400.
+    seen = []
+    token: str | None = None
+    for _ in range(5):
+        params = {"limit": 50} if token is None else {"limit": 50, "cursor": token}
+        res = client.get("/parts/cursor", params=params)
+        assert res.status_code == 200, res.text
+        payload = res.json()
+        seen.extend(item["id"] for item in payload["items"])
+        token = payload["next_cursor"]
+    assert seen == expected_ids, "cursor walk diverged"
+
+    forged = token[:-2] + ("00" if not token.endswith("00") else "11")
+    res = client.get("/parts/cursor", params={"limit": 50, "cursor": forged})
+    assert res.status_code == 400, res.text
+
+    res = client.get("/parts/offset?limit=50&include_total=true")
+    assert res.json()["total_count"] > 0
+    assert "last" in res.headers["Link"]
+    print("self-check OK: offset, keyset, and cursor strategies agree;" 
+          " forged cursor rejected with 400")
+
+
+if __name__ == "__main__":
+    _self_check()
+\end{minted}
+
+\subsection{Listing 3: Allow-Listed Filter/Sort Compiler}
+\label{subsec:ch8-code-compiler}
+
+The compiler (Listing~\ref{lst:ch8-filter-compiler}) is the three-layer
+defense of Section~\ref{subsec:ch8-filtering} as working code. The public
+grammar (\texttt{field:op:value} clauses joined by \texttt{;}) parses into
+frozen dataclass AST nodes; values are coerced to the field's declared type
+at parse time; compilation resolves public names through the allow-list and
+emits \texttt{?} placeholders plus a bound parameter list. The demo exercises
+the happy path (a three-clause filter with a two-key descending sort), four
+rejection classes (unknown field, unknown operator, type mismatch, malformed
+clause), and an injection probe --- \texttt{name:eq:x' OR '1'='1} --- which
+compiles to a bound string literal and correctly matches zero rows. Note the
+public/private naming split: clients filter on \texttt{cost}, the column is
+\texttt{unit\_cost\_cents}, and internal columns are simply absent from
+\texttt{ALLOWED\_FIELDS}.
+
+\begin{minted}[caption={Filter/sort compiler: allow-listed grammar, typed AST, parameterized SQL (\texttt{filter\_compiler.py}).},label={lst:ch8-filter-compiler}]{python}
+"""Allow-listed filter/sort compiler: query params -> parameterized SQL.
+
+Grammar (public, documented surface):
+
+    ?filter=unit_cost_cents:gte:500;category:eq:sensor;name:contains:servo
+    ?sort=-unit_cost_cents,sku        (leading '-' means descending)
+
+The compiler never interpolates user input into SQL text. It builds a small
+AST of typed nodes, then renders that AST to a WHERE clause plus a bound
+parameter list. Unknown fields, unknown operators, and type mismatches are
+rejected with a descriptive ``FilterError`` -- clients get a 400, never a 500.
+
+Offline demo:  python filter_compiler.py
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+# The public allow-list: API name -> (column, python type).
+# Internal column names are deliberately *not* the public names everywhere:
+# "cost" is the public name for the internal column unit_cost_cents.
+ALLOWED_FIELDS: dict[str, tuple[str, type]] = {
+    "sku": ("sku", str),
+    "name": ("name", str),
+    "category": ("category", str),
+    "cost": ("unit_cost_cents", int),
+    "weight": ("weight_grams", int),
+    "active": ("active", bool),
+}
+
+ALLOWED_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"}
+ORDERING_OPERATORS = {"gt", "gte", "lt", "lte"}
+
+
+class FilterError(ValueError):
+    """Raised for any filter/sort input outside the documented grammar."""
+
+
+@dataclass(frozen=True)
+class Comparison:
+    field: str
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte"]
+    value: Any
+
+
+@dataclass(frozen=True)
+class InList:
+    field: str
+    values: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class Contains:
+    field: str
+    needle: str
+
+
+@dataclass(frozen=True)
+class SortKey:
+    field: str
+    descending: bool
+
+
+FilterNode = Comparison | InList | Contains
+
+
+def _coerce(field: str, raw: str) -> Any:
+    column, kind = ALLOWED_FIELDS[field]
+    del column  # coercion only needs the declared type
+    try:
+        if kind is bool:
+            if raw.lower() not in {"true", "false"}:
+                raise ValueError(raw)
+            return 1 if raw.lower() == "true" else 0
+        return kind(raw)
+    except (TypeError, ValueError) as exc:
+        raise FilterError(
+            f"value {raw!r} is not a valid {kind.__name__} for field {field!r}"
+        ) from exc
+
+
+def parse_filter(expr: str) -> list[FilterNode]:
+    """Parse the ``field:op:value[;field:op:value...]`` mini-grammar."""
+    nodes: list[FilterNode] = []
+    for clause in expr.split(";"):
+        clause = clause.strip()
+        if not clause:
+            continue
+        parts = clause.split(":", 2)
+        if len(parts) != 3:
+            raise FilterError(f"malformed clause {clause!r}; expected field:op:value")
+        field, operator, raw = parts
+        if field not in ALLOWED_FIELDS:
+            raise FilterError(f"unknown field {field!r}; allowed: {sorted(ALLOWED_FIELDS)}")
+        if operator not in ALLOWED_OPERATORS:
+            raise FilterError(
+                f"unknown operator {operator!r}; allowed: {sorted(ALLOWED_OPERATORS)}"
+            )
+        if operator == "in":
+            values = tuple(_coerce(field, v) for v in raw.split(",") if v != "")
+            if not values:
+                raise FilterError("in operator requires at least one value")
+            nodes.append(InList(field=field, values=values))
+        elif operator == "contains":
+            _, kind = ALLOWED_FIELDS[field]
+            if kind is not str:
+                raise FilterError(f"contains is only valid on text fields, not {field!r}")
+            nodes.append(Contains(field=field, needle=raw))
+        else:
+            _, kind = ALLOWED_FIELDS[field]
+            if kind is str and operator in ORDERING_OPERATORS:
+                raise FilterError(f"operator {operator!r} is not valid on text field {field!r}")
+            nodes.append(
+                Comparison(field=field, operator=operator, value=_coerce(field, raw))
+            )
+    return nodes
+
+
+def parse_sort(expr: str | None) -> list[SortKey]:
+    """Parse ``-cost,sku`` into sort keys; always append the id tie-breaker."""
+    keys: list[SortKey] = []
+    if expr:
+        for token in expr.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            descending = token.startswith("-")
+            field = token[1:] if descending else token
+            if field not in ALLOWED_FIELDS:
+                raise FilterError(f"cannot sort by unknown field {field!r}")
+            keys.append(SortKey(field=field, descending=descending))
+    # Deterministic tie-breaker: id is unique, so the total order is stable.
+    keys.append(SortKey(field="id", descending=False))
+    return keys
+
+
+def compile_where(nodes: list[FilterNode]) -> tuple[str, list[Any]]:
+    """Render filter nodes to a WHERE clause plus bound parameters."""
+    fragments: list[str] = []
+    params: list[Any] = []
+    for node in nodes:
+        column = ALLOWED_FIELDS[node.field][0]  # allow-list lookup, not input
+        if isinstance(node, Comparison):
+            symbol = {"eq": "=", "ne": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[node.operator]
+            fragments.append(f"{column} {symbol} ?")
+            params.append(node.value)
+        elif isinstance(node, InList):
+            placeholders = ", ".join("?" for _ in node.values)
+            fragments.append(f"{column} IN ({placeholders})")
+            params.extend(node.values)
+        elif isinstance(node, Contains):
+            # Escape LIKE wildcards in user input; ESCAPE clause pins the marker.
+            needle = node.needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            fragments.append(f"{column} LIKE ? ESCAPE '\\'")
+            params.append(f"%{needle}%")
+        else:  # pragma: no cover - exhaustive by construction
+            raise FilterError(f"unsupported node {node!r}")
+    clause = " AND ".join(fragments) if fragments else "1=1"
+    return clause, params
+
+
+def compile_query(
+    filter_expr: str | None,
+    sort_expr: str | None,
+    limit: int,
+) -> tuple[str, list[Any]]:
+    """Compile public params into a complete, fully parameterized SELECT."""
+    if limit < 1 or limit > 200:
+        raise FilterError("limit must be between 1 and 200")
+    nodes = parse_filter(filter_expr) if filter_expr else []
+    where, params = compile_where(nodes)
+    order = ", ".join(
+        f"{ALLOWED_FIELDS.get(k.field, ('id',))[0]} {'DESC' if k.descending else 'ASC'}"
+        for k in parse_sort(sort_expr)
+    )
+    sql = (
+        "SELECT id, sku, name, category, unit_cost_cents, weight_grams, active "
+        f"FROM parts WHERE {where} ORDER BY {order} LIMIT ?"
+    )
+    return sql, [*params, limit]
+
+
+def _demo() -> None:
+    db = Path("parts.db")
+    if not db.exists():
+        raise SystemExit("parts.db missing; run gen_dataset.py first")
+    conn = sqlite3.connect(db)
+    try:
+        sql, params = compile_query(
+            "cost:gte:500;category:in:sensor,actuator;name:contains:servo",
+            "-cost,sku",
+            limit=5,
+        )
+        print(f"SQL:    {sql}")
+        print(f"params: {params}")
+        for row in conn.execute(sql, params):
+            print(row)
+
+        for bad in (
+            "password_hash:eq:x",   # unknown field (internal column leaked?)
+            "cost:drop:1",          # unknown operator
+            "cost:gte:abc",         # type mismatch
+            "cost:eq:1;sort:evil",  # malformed clause
+        ):
+            try:
+                compile_query(bad, None, 10)
+            except FilterError as exc:
+                print(f"rejected {bad!r}: {exc}")
+            else:
+                raise SystemExit(f"input {bad!r} should have been rejected")
+
+        # Injection attempt is inert: it becomes a bound string parameter.
+        sql, params = compile_query("name:eq:x' OR '1'='1", None, 5)
+        rows = conn.execute(sql, params).fetchall()
+        assert rows == [], "injection probe must match nothing"
+        print("injection probe neutralized as bound parameter; demo OK")
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    _demo()
+\end{minted}
+
+\subsection{Listing 4: Benchmark Harness}
+\label{subsec:ch8-code-benchmark}
+
+The harness (Listing~\ref{lst:ch8-benchmark}) measures what
+Section~\ref{subsec:ch8-benchmark} plotted: median single-page latency for
+offset and keyset fetches at depths from 0 to 150{,}000, page size 50, 15
+repetitions, warm cache. Two details keep it honest. First, the keyset
+boundary for each depth is discovered with a one-off positional query
+(\texttt{boundary\_at}) so both strategies fetch the \emph{same} page.
+Second, medians rather than means suppress scheduler noise. The printed
+table is the source of Table~\ref{tab:ch8-benchmark} and
+Figure~\ref{fig:ch8-latency-curve}; per Chapter~0's discipline, the numbers
+are illustrative artifacts of one machine --- the deliverable is the curve
+shape and your ability to reproduce it.
+
+\begin{minted}[caption={Offset-versus-keyset latency benchmark harness (\texttt{benchmark.py}).},label={lst:ch8-benchmark}]{python}
+"""Benchmark harness: offset vs keyset page-fetch latency at depth.
+
+Measures the median wall-clock time to fetch one page of 50 rows at
+increasing logical depths into the (unit_cost_cents, id) ordering.
+
+Numbers are machine-dependent and therefore *illustrative*: the textbook
+reports the shape of the curve, never a promised absolute latency.
+
+Run:  python gen_dataset.py --rows 200000 --db parts.db
+      python benchmark.py
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import statistics
+import time
+from pathlib import Path
+
+PAGE_SIZE = 50
+REPEATS = 15
+DEPTHS = [0, 1_000, 10_000, 50_000, 100_000, 150_000]
+
+OFFSET_SQL = (
+    "SELECT id, sku, name FROM parts "
+    "ORDER BY unit_cost_cents, id LIMIT ? OFFSET ?"
+)
+KEYSET_SQL = (
+    "SELECT id, sku, name FROM parts "
+    "WHERE (unit_cost_cents, id) > (?, ?) "
+    "ORDER BY unit_cost_cents, id LIMIT ?"
+)
+
+
+def time_query(conn: sqlite3.Connection, sql: str, params: tuple) -> float:
+    """Return median seconds over REPEATS executions of one page fetch."""
+    samples: list[float] = []
+    for _ in range(REPEATS):
+        start = time.perf_counter()
+        rows = conn.execute(sql, params).fetchall()
+        samples.append(time.perf_counter() - start)
+    assert len(rows) == PAGE_SIZE
+    return statistics.median(samples)
+
+
+def boundary_at(conn: sqlite3.Connection, depth: int) -> tuple[int, int]:
+    """Return the (cost, id) tuple of the row at logical position ``depth``."""
+    row = conn.execute(
+        "SELECT unit_cost_cents, id FROM parts "
+        "ORDER BY unit_cost_cents, id LIMIT 1 OFFSET ?",
+        (depth,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"depth {depth} beyond table size")
+    return int(row[0]), int(row[1])
+
+
+def main() -> None:
+    db = Path("parts.db")
+    if not db.exists():
+        raise SystemExit("parts.db missing; run gen_dataset.py first")
+    conn = sqlite3.connect(db)
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
+        print(f"rows={total:,}  page_size={PAGE_SIZE}  repeats={REPEATS}")
+        print(f"{'depth':>8} | {'offset ms':>10} | {'keyset ms':>10} | speedup")
+        print("-" * 48)
+        for depth in DEPTHS:
+            if depth + PAGE_SIZE >= total:
+                continue
+            cost, pid = boundary_at(conn, depth)
+            t_offset = time_query(conn, OFFSET_SQL, (PAGE_SIZE, depth))
+            t_keyset = time_query(conn, KEYSET_SQL, (cost, pid, PAGE_SIZE))
+            ratio = t_offset / t_keyset if t_keyset else float("inf")
+            print(
+                f"{depth:>8,} | {t_offset * 1000:>10.3f} | "
+                f"{t_keyset * 1000:>10.3f} | {ratio:>6.1f}x"
+            )
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 5: Concurrency-Anomaly Demonstration}
+\label{subsec:ch8-anomaly-demo}
+
+Finally, the anomaly made tangible (Listing~\ref{lst:ch8-anomaly}). A
+single-threaded, fully deterministic script interleaves a reader walking
+four pages of five rows with a writer that inserts one \emph{cheap} part ---
+landing at the front of the \texttt{(unit\_cost\_cents, id)} ordering ---
+between every pair of page fetches. This is a schedule two real connections
+can produce; scripting it in one process makes it reproducible offline. The
+script runs both walkers against a pristine catalog (baseline) and against
+the interleaved catalog, then diffs:
+
+\begin{minted}{text}
+offset: with concurrent inserts -> duplicates=[5, 9, 13], skipped=[18, 19, 20]
+ keyset: with concurrent inserts -> duplicates=none, skipped=none
+\end{minted}
+
+Read the offset line against the drift formula of
+Section~\ref{subsec:ch8-anomaly-theory}: each front insert
+($\Delta_{\mathrm{ins}} = 1$ at every boundary) shifts the window back by
+one, replaying one previously emitted row per page (the duplicates) and
+pushing three tail rows past the final page (the skips). The keyset walk
+anchors on values; front inserts are strictly \emph{before} the anchor and
+therefore invisible to every subsequent predicate. Twenty rows, five-line
+output, one permanent intuition.
+
+\begin{minted}[caption={Deterministic writer/reader interleaving proving offset drift and keyset stability (\texttt{anomaly\_demo.py}).},label={lst:ch8-anomaly}]{python}
+"""Concurrency-anomaly demo: offset pagination duplicates, keyset does not.
+
+A deterministic, single-threaded script that *interleaves* a reader (walking
+pages of a parts list) with a writer (inserting cheap parts at the front of
+the (unit_cost_cents, id) ordering between page fetches). This is exactly the
+schedule two concurrent connections can produce; scripting it in one process
+keeps the demo reproducible and offline.
+
+Run:  python anomaly_demo.py
+"""
+
+from __future__ import annotations
+
+import random
+import sqlite3
+from dataclasses import dataclass, field
+
+DB = ":memory:"
+PAGE = 5
+TOTAL_PAGES = 4
+
+
+def seed_catalog(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE parts ("
+        " id INTEGER PRIMARY KEY, sku TEXT, unit_cost_cents INTEGER)"
+    )
+    rng = random.Random(7)
+    rows = [
+        (f"NWR-{i:05d}", 1000 + i * 100) for i in range(1, 21)
+    ]
+    del rng  # rows are literal: fully deterministic
+    conn.executemany(
+        "INSERT INTO parts (sku, unit_cost_cents) VALUES (?, ?)", rows
+    )
+    conn.commit()
+
+
+@dataclass
+class WalkResult:
+    seen_ids: list[int] = field(default_factory=list)
+
+    @property
+    def duplicates(self) -> list[int]:
+        seen: set[int] = set()
+        dupes: list[int] = []
+        for pid in self.seen_ids:
+            if pid in seen and pid not in dupes:
+                dupes.append(pid)
+            seen.add(pid)
+        return dupes
+
+
+def writer_insert_cheap_part(conn: sqlite3.Connection, n: int) -> None:
+    """Insert one part cheaper than everything else (lands at the front)."""
+    conn.execute(
+        "INSERT INTO parts (sku, unit_cost_cents) VALUES (?, ?)",
+        (f"NWR-NEW-{n:02d}", 10 + n),
+    )
+    conn.commit()
+
+
+def walk_offset(conn: sqlite3.Connection, writer: bool) -> WalkResult:
+    """Paginate with LIMIT/OFFSET while the writer shifts the window."""
+    result = WalkResult()
+    for page_no in range(TOTAL_PAGES):
+        rows = conn.execute(
+            "SELECT id FROM parts ORDER BY unit_cost_cents, id "
+            "LIMIT ? OFFSET ?",
+            (PAGE, page_no * PAGE),
+        ).fetchall()
+        result.seen_ids.extend(r[0] for r in rows)
+        if writer:
+            # Between requests, another client inserts a cheap part.
+            writer_insert_cheap_part(conn, page_no)
+    return result
+
+
+def walk_keyset(conn: sqlite3.Connection, writer: bool) -> WalkResult:
+    """Paginate with a (cost, id) seek predicate under the same writer."""
+    result = WalkResult()
+    position: tuple[int, int] | None = None
+    for page_no in range(TOTAL_PAGES):
+        if position is None:
+            rows = conn.execute(
+                "SELECT id, unit_cost_cents FROM parts "
+                "ORDER BY unit_cost_cents, id LIMIT ?",
+                (PAGE,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, unit_cost_cents FROM parts "
+                "WHERE (unit_cost_cents, id) > (?, ?) "
+                "ORDER BY unit_cost_cents, id LIMIT ?",
+                (position[0], position[1], PAGE),
+            ).fetchall()
+        result.seen_ids.extend(r[0] for r in rows)
+        if rows:
+            position = (int(rows[-1][1]), int(rows[-1][0]))
+        if writer:
+            writer_insert_cheap_part(conn, 100 + page_no)
+    return result
+
+
+def main() -> None:
+    for strategy, walker in (("offset", walk_offset), ("keyset", walk_keyset)):
+        conn = sqlite3.connect(DB)
+        seed_catalog(conn)
+        baseline = walker(conn, writer=False)
+        conn.close()
+
+        conn = sqlite3.connect(DB)
+        seed_catalog(conn)
+        shifted = walker(conn, writer=True)
+        dupes = shifted.duplicates
+        # Rows of the original catalog the reader *skipped* entirely.
+        skipped = sorted(set(baseline.seen_ids) - set(shifted.seen_ids))
+        print(
+            f"{strategy:>7}: with concurrent inserts -> "
+            f"duplicates={dupes or 'none'}, skipped={skipped or 'none'}"
+        )
+        conn.close()
+
+    print(
+        "Conclusion: offset windows are positional, so front inserts replay "
+        "rows;\nkeyset windows are value-anchored, so the walk stays stable."
+    )
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\begin{examplebox}
+\textbf{Verification record.} Every listing above was executed offline
+before this chapter shipped: dataset generation (200{,}000 rows in
+${\sim}3.5$~s), the service self-check (offset, keyset, and cursor walks
+agree on 250 ids; forged cursor rejected with 400), the compiler demo (four
+rejection classes plus a neutralized injection probe), the anomaly demo
+(output above), and the benchmark (Table~\ref{tab:ch8-benchmark}). Reproduce
+all of it with five PowerShell commands in Section~\ref{sec:ch8-lab}.
+\end{examplebox}
+
+%% ============================================================================
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch8-pitfalls}
+
+Each entry below names the failure, explains the mechanism, and states the
+fix. Most production pagination incidents are one of these seven.
+
+\subsection{Offset at Depth}
+\textbf{Failure:} a list endpoint that is fast in testing and degrades
+linearly in production as the table grows, because tests walk page 1 and
+users (or crawlers) walk page 4{,}000. \textbf{Mechanism:}
+$T_{\mathrm{offset}} = O(k)$ --- Section~\ref{subsec:ch8-offset-cost}; every
+deep page re-scans and discards everything before it. \textbf{Fix:} keyset
+or cursor pagination for any collection that can outgrow memory; if the
+product genuinely needs random access, cap the depth
+(\texttt{offset + limit <= 10000}) and route true exports to an async job.
+
+\subsection{Unsigned, Guessable Cursors}
+\textbf{Failure:} base64-encoded (but unsigned) cursors whose payload a
+curious client edits --- replaying walks, jumping arbitrarily, probing the
+ordering, or injecting unexpected types into payload fields.
+\textbf{Mechanism:} encoding is not authentication; the server trusted
+client-carried state. \textbf{Fix:} HMAC-sign the payload, verify with a
+constant-time comparison \emph{before} parsing, version the payload, expire
+it, and answer every failure mode with the same undifferentiated 400
+(Section~\ref{subsec:ch8-cursor-design}).
+
+\subsection{\texttt{total\_count} on Every Page}
+\textbf{Failure:} each page response embeds an exact \texttt{COUNT(*)}, so
+every request of every client's walk re-runs an $O(n)$ aggregate.
+\textbf{Mechanism:} the count is computed even though the client needed it
+once (or never); under concurrency it is also instantly stale, so the
+precision was illusory anyway. \textbf{Fix:} default to \texttt{has\_more}
+via \texttt{LIMIT p+1}; make totals opt-in, estimate from planner statistics
+when an approximation suffices, and never compute \texttt{rel="last"} links
+by default (Section~\ref{subsec:ch8-metadata}).
+
+\subsection{Missing Tie-Breaker}
+\textbf{Failure:} \texttt{ORDER BY unit\_cost\_cents} on a column full of
+duplicates; pagination ``mostly works'' and occasionally replays or drops
+rows near ties --- differently on each deploy, plan change, or vacuum.
+\textbf{Mechanism:} ties make the order non-total, so neither offsets nor
+keysets name a stable boundary. \textbf{Fix:} always append a unique,
+immutable column: \texttt{ORDER BY unit\_cost\_cents, id}. Enforce it in the
+sort compiler, not in documentation.
+
+\subsection{Unbounded Page Sizes}
+\textbf{Failure:} the server honors \texttt{?limit=1000000}; one client
+allocates a megabyte-scale JSON array per request and starves the pool.
+\textbf{Mechanism:} \texttt{limit} is a resource reservation request from an
+untrusted peer. \textbf{Fix:} a hard server-side ceiling
+(\texttt{MAX\_LIMIT = 200} in the reference service) with silent clamping or
+a 400; document the ceiling in the contract.
+
+\subsection{Filter Parameters Interpolated into SQL}
+\textbf{Failure:} \texttt{f"WHERE col >= \{param\}"} or, worse,
+\texttt{f"ORDER BY \{sort\_param\}"}. \textbf{Mechanism:} query parameters
+are attacker-controlled text; interpolation makes them executable
+(Section~\ref{subsec:ch8-filtering}). This remains the top API injection
+vector in the wild. \textbf{Fix:} allow-listed grammar $\to$ typed AST
+$\to$ bound parameters. There is no safe-regex shortcut, and ``internal
+API'' is not a mitigation --- internal callers get compromised too.
+
+\subsection{Exposing Internal Column Names}
+\textbf{Failure:} filter/sort/field parameters accepted as raw column names,
+leaking schema internals (\texttt{password\_hash}, \texttt{tenant\_key}) to
+API consumers and coupling the public contract to physical refactors.
+\textbf{Mechanism:} the public surface \emph{is} the schema. \textbf{Fix:} a
+public naming layer resolved through an allow-list map
+(\texttt{cost} $\to$ \texttt{unit\_cost\_cents}); unknown names get a 400
+that lists the \emph{allowed} fields, never the schema.
+
+\begin{warningbox}
+A composite anti-pattern ties the list together: \emph{offset pagination
+$+$ per-page \texttt{COUNT(*)} $+$ client-controlled sort on a non-unique
+column}. Each is defensible alone in a demo; combined at scale they produce
+an endpoint that is slow, incorrect under writes, and non-deterministic ---
+simultaneously. When you inherit such an endpoint, migrate consumers to
+cursors behind the \texttt{Link} header (clients following \texttt{rel="next"}
+need not notice) rather than breaking the contract outright.
+\end{warningbox}
+
+%% ============================================================================
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch8-lab}
+
+\subsection{Lab: Three Strategies, One Dataset, Zero Excuses}
+
+\textbf{Time:} 45--60 minutes. \textbf{Prerequisites:} the environment from
+Section~\ref{sec:ch8-code}. All commands are PowerShell, run from the
+chapter's \texttt{code} directory.
+
+\subsubsection{Part A --- Build and verify the dataset (5 min)}
+
+\begin{minted}{powershell}
+python gen_dataset.py --rows 200000 --db parts.db
+python -c "import sqlite3; c=sqlite3.connect('parts.db'); print(c.execute('SELECT COUNT(*), MIN(unit_cost_cents), MAX(unit_cost_cents) FROM parts').fetchone())"
+\end{minted}
+
+Expected: \texttt{generated 200,000 rows into parts.db} in a few seconds,
+then a count of 200{,}000. Re-run with the same \texttt{-{}-seed}: the
+database is byte-comparable deterministic in content (same rows, same
+order).
+
+\subsubsection{Part B --- Exercise all three strategies (15 min)}
+
+\begin{minted}{powershell}
+python pagination_service.py
+\end{minted}
+
+The self-check walks 250 ids through \texttt{/parts/offset},
+\texttt{/parts/keyset}, and \texttt{/parts/cursor}, asserts the three id
+sequences are identical, and forges a cursor to confirm the 400 path. Then
+probe by hand with the server running
+(\texttt{uvicorn pagination\_service:app --port 8000} in a second terminal):
+
+\begin{minted}{powershell}
+# First page, opaque cursor strategy; note the Link header and next_cursor.
+(Invoke-WebRequest "http://localhost:8000/parts/cursor?limit=3").Headers["Link"]
+(Invoke-WebRequest "http://localhost:8000/parts/cursor?limit=3").Content
+
+# Tamper with the cursor: change the final character; expect HTTP 400.
+Invoke-WebRequest "http://localhost:8000/parts/cursor?limit=3&cursor=<forged>"
+
+# Keyset, transparently: choose your own boundary.
+Invoke-RestMethod "http://localhost:8000/parts/keyset?limit=3&after_cost=5000&after_id=100000"
+\end{minted}
+
+Deliverable: in your notes, record the \texttt{Link} header of each
+strategy and state which relations appear and why (\texttt{last} only under
+\texttt{include\_total=true}; no \texttt{prev} for cursors --- why?).
+
+\subsubsection{Part C --- Break filtering, then fail to (10 min)}
+
+\begin{minted}{powershell}
+python filter_compiler.py
+\end{minted}
+
+Confirm the four rejection classes print, then write three attack strings of
+your own (an \texttt{OR 1=1} variant, a semicolon chain, a
+\texttt{UNION SELECT}) and verify each either parses to an inert bound
+parameter or is rejected at the grammar. Deliverable: the compiled SQL and
+parameter list for one attack, annotated with the layer that neutralized it.
+
+\subsubsection{Part D --- Reproduce the anomaly (10 min)}
+
+\begin{minted}{powershell}
+python anomaly_demo.py
+\end{minted}
+
+Expected output (deterministic):
+
+\begin{minted}{text}
+offset: with concurrent inserts -> duplicates=[5, 9, 13], skipped=[18, 19, 20]
+ keyset: with concurrent inserts -> duplicates=none, skipped=none
+\end{minted}
+
+Deliverable: modify the writer to \emph{delete} rows ahead of the window
+instead of inserting, predict the outcome using the drift formula
+($\Delta < 0$ $\Rightarrow$ skips), and confirm. Then explain, in two
+sentences, why no transaction isolation level on the reader's individual
+page queries prevents this.
+
+\subsubsection{Part E --- Measure the curve (10 min)}
+
+\begin{minted}{powershell}
+python benchmark.py
+\end{minted}
+
+Compare against Table~\ref{tab:ch8-benchmark}. Your absolute numbers will
+differ (hardware, SQLite version, cache state); the \emph{shape} must not:
+offset roughly linear in depth, keyset flat within noise. Deliverables:
+(i) your table; (ii) re-run with \texttt{-{}-rows 1000000} and report where
+offset crosses 50~ms; (iii) run \texttt{EXPLAIN QUERY PLAN} on both
+\texttt{OFFSET\_SQL} and \texttt{KEYSET\_SQL} and quote the line that proves
+the keyset is a \texttt{SEARCH} using \texttt{idx\_parts\_cost\_id}.
+
+\subsection{Case Study: The 2 a.m. Reporting API}
+\label{sec:ch8-casestudy}
+
+\textit{Names and numbers are anonymized composites drawn from real
+postmortems; the failure physics is exact.}
+
+A mid-size robotics-parts distributor --- call it the production twin of
+our fictional Northwind Robotics --- exposed an internal reporting API used
+by the finance team's nightly reconciliation export. The endpoint was the
+composite anti-pattern incarnate: \texttt{GET /api/ledger?offset=\&limit=1000},
+sorted by \texttt{posted\_at} (non-unique, millisecond timestamps from a
+batch importer), every response carrying \texttt{total\_count}, filters
+accepted as \texttt{?where=...} fragments ``because only finance uses it.''
+
+At 2 a.m.\ the export job began its walk over what had quietly become an
+8-million-row ledger after an acquisition data load. The walk is the
+$O(n^2/p)$ trap in production form: 8{,}000 page requests, each scanning an
+average of 4 million rows to reach its window --- about $3.2 \times 10^{10}$
+row visits for the night --- and each request \emph{also} running
+\texttt{COUNT(*)} to fill \texttt{total\_count} and the \texttt{rel="last"}
+link. Page fetches that cost 2~ms at offset 0 cost 40+ seconds by the
+middle of the walk. The connection pool saturated; the health-check endpoint
+--- served by the same pool --- began timing out; the orchestrator concluded
+the service was dead and began killing and rescheduling pods, whose cold
+caches made the next pages slower still. The morning dashboard showed a
+cascading failure across services that shared the database; the root cause
+was one \texttt{OFFSET} clause.
+
+And the report was \emph{wrong anyway}. The batch importer was still
+inserting back-dated rows ahead of the walker's window; the export contained
+duplicated postings (finance caught ${\sim}11{,}000$ double-counted line
+items in review) and a silent gap where a midnight delete had shifted a
+window forward. Non-unique \texttt{posted\_at} ordering meant the duplicates
+were not even deterministic.
+
+The fix, deployed over the following sprint, maps one-to-one onto this
+chapter: (1) keyset pagination over \texttt{(posted\_at, ledger\_id)} with a
+composite index to match --- walk time fell from 9 hours to 11 minutes and
+became flat with respect to depth; (2) \texttt{total\_count} removed from
+pages, replaced by \texttt{has\_more} and a nightly-refreshed stats table
+for the UI badge; (3) the \texttt{?where=} fragment replaced by an
+allow-listed filter grammar compiled to bound parameters (an audit found
+the fragment interface was reachable by any authenticated internal user);
+(4) a deterministic tie-breaker added to every ordered endpoint. The
+postmortem's action item worth stealing: \emph{``No list endpoint ships
+without a named pagination strategy, a maximum depth or page size, and an
+EXPLAIN plan in the PR description.''}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\footnotesize,
+      tl/.style={rectangle, draw=darkblue, thick, minimum height=0.62cm,
+                 minimum width=1.55cm, align=center},
+      wrt/.style={rectangle, draw=packtorange, thick, fill=packtorange!12,
+                  minimum height=0.62cm, align=center},
+      >=stealth,
+    ]
+    % --- offset timeline ---
+    \node[note, anchor=east] at (-0.4, 0) {\textbf{offset walk}};
+    \node[tl] (o1) at (0.8, 0) {page 1\\rows 1--5};
+    \node[tl, right=0.25cm of o1] (o2) {page 2\\rows 6--10};
+    \node[tl, right=0.25cm of o2] (o3) {page 3\\rows 11--15};
+    \node[wrt, right=0.25cm of o3] (o4) {page 4\\rows 15--19};
+    \node[note, right=0.3cm of o4, align=left] {row 15 \emph{again}:\\duplicate};
+    \draw[->, thick] (o1) -- (o2); \draw[->, thick] (o2) -- (o3);
+    \draw[->, thick] (o3) -- (o4);
+
+    % writer events
+    \node[wrt] (w1) at ($(o1.south east)!0.5!(o2.south west) + (0,-1.0)$) {insert\\cheap part};
+    \node[wrt] (w2) at ($(o2.south east)!0.5!(o3.south west) + (0,-1.0)$) {insert\\cheap part};
+    \node[wrt] (w3) at ($(o3.south east)!0.5!(o4.south west) + (0,-1.0)$) {insert\\cheap part};
+    \node[note, anchor=east] at (-0.4, -1.3) {\textbf{writer}};
+    \draw[->, packtorange, thick, dashed] (w1.north) -- (o2.south);
+    \draw[->, packtorange, thick, dashed] (w2.north) -- (o3.south);
+    \draw[->, packtorange, thick, dashed] (w3.north) -- (o4.south);
+    \node[note] at ($(w2) + (0,-0.75)$) {each front insert shifts every later OFFSET window by $+1$};
+
+    % --- keyset timeline ---
+    \node[note, anchor=east] at (-0.4, -3.4) {\textbf{keyset walk}};
+    \node[tl] (k1) at (0.8, -3.4) {page 1\\anchor $(c_5, i_5)$};
+    \node[tl, right=0.25cm of k1] (k2) {page 2\\$(c, i) > $ anchor};
+    \node[tl, right=0.25cm of k2] (k3) {page 3\\$(c, i) > $ anchor};
+    \node[tl, right=0.25cm of k3] (k4) {page 4\\$(c, i) > $ anchor};
+    \node[note, right=0.3cm of k4, align=left] {rows 16--20:\\exact, no replay};
+    \draw[->, thick] (k1) -- (k2); \draw[->, thick] (k2) -- (k3);
+    \draw[->, thick] (k3) -- (k4);
+    \draw[->, packtorange, thick, dashed] (w1.south) to[out=-90,in=90] (k2.north);
+    \node[note] at ($(k2.south)!0.5!(k3.south) + (0,-0.55)$)
+      {inserts land \emph{before} the anchor value $\Rightarrow$ invisible to the predicate};
+  \end{tikzpicture}
+  \caption{Write-concurrency anomaly timeline. Above: offset windows are
+           positional, so each front-of-ordering insert replays one row into
+           the next page. Below: keyset windows are anchored on boundary
+           \emph{values}; writes ahead of the anchor never enter the
+           predicate. Compare Listing~\ref{lst:ch8-anomaly}'s measured
+           output.}
+  \label{fig:ch8-anomaly-timeline}
+\end{figure}
+
+%% ============================================================================
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch8-self-assessment}
+
+Attempt each before consulting the references. Exercises marked [code]
+extend the chapter's listings; [proof] items demand a derivation or a
+counterexample; [design] items demand a defensible trade-off.
+
+\begin{enumerate}[label=\textbf{E8.\arabic*.}]
+  \item {[proof]} Starting from $T_{\mathrm{offset}}(k,p) = c_{\mathrm{seek}}
+        + k c_s + p c_f$, show that a full walk of an $n$-row table in pages
+        of $p$ costs $\Theta(n^2/p)$ row visits, and compute the constant
+        factor. What does this imply for the \emph{worst} page size from the
+        server's point of view?
+  \item {[proof]} Give a precise writer schedule (inserts and deletes with
+        positions) over a 20-row, page-size-5 walk such that the offset
+        reader emits \emph{exactly} the multiset
+        $\{r_1,\ldots,r_{19}\}$ with $r_{20}$ never emitted and $r_7$
+        emitted twice.
+  \item {[code]} Extend \texttt{anomaly\_demo.py} with a third walker that
+        paginates by offset but re-reads the last row of the previous page
+        to detect drift. Show it detects duplicates but cannot recover the
+        skipped rows. Why is detection-without-recovery the best a purely
+        positional scheme can do?
+  \item {[code]} Add a \texttt{/parts/cursor} variant whose payload embeds a
+        SHA-256 hash of the active filter and sort parameters, rejecting
+        continuations whose parameters no longer match. Explain which attack
+        or bug class this closes (Section~\ref{subsec:ch8-filter-consistency}).
+  \item {[design]} Your product requires ``jump to page 47'' in an admin
+        grid over 3 million rows. Design the endpoint: what do you cap, what
+        do you count, what do you cache, and what do you tell the PM about
+        the page-47 experience?
+  \item {[proof]} Show that the tuple predicate \texttt{(a,b) > (x,y)} and
+        its disjunctive expansion \texttt{a > x OR (a = x AND b > y)} are
+        logically equivalent, and construct a 6-row table on which the
+        hand-rolled predicate \texttt{a >= x AND b > y} returns a different
+        result set. Name the two distinct error modes.
+  \item {[code]} Add \texttt{NULLS LAST} ordering to a nullable
+        \texttt{discontinued\_at} sort and write the NULL-aware keyset
+        predicate for it. Verify against \texttt{filter\_compiler.py}'s
+        demo database.
+  \item {[design]} Design the expansion policy for \texttt{GET /orders
+        ?expand=customer,lines.part}: batch sizes, depth cap, cache
+        headers, and the point at which you tell the consumer to use the
+        GraphQL gateway (Chapter~12) instead.
+  \item {[code]} Using \texttt{EXPLAIN QUERY PLAN}, produce one index
+        definition that turns the chapter's keyset query from
+        \texttt{SEARCH ... USING INDEX} into \texttt{SCAN} plus a temporary
+        B-tree, and explain in one paragraph what the planner is telling
+        you.
+  \item {[design]} A compliance rule requires an \emph{exact} total of
+        matching records on an audited search endpoint. Reconcile this with
+        Section~\ref{subsec:ch8-metadata}'s cost analysis; give at least
+        two architectures and their failure modes.
+\end{enumerate}
+
+%% ============================================================================
+\section{Interview Q\&A Vault}
+\label{sec:ch8-interview-vault}
+
+Ordered junior $\to$ staff. Answers are model responses at the depth a
+strong candidate gives verbally.
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=2.6em]
+  % ---- junior ----
+  \item \textbf{What is pagination and why can't we just return everything?}
+        Pagination returns a collection in bounded pages. Unbounded
+        responses blow up memory on both sides, serialize for seconds, blow
+        through timeouts, and turn one curious client into a denial-of-service
+        event. Bounding page size is a resource-governance decision as much
+        as a UX one.
+  \item \textbf{How does \texttt{LIMIT}/\texttt{OFFSET} work?}
+        \texttt{ORDER BY} materializes the ordering, the engine skips
+        \texttt{OFFSET} rows, then returns up to \texttt{LIMIT} rows. The
+        skip is the problem: the engine must visit the skipped rows to count
+        past them.
+  \item \textbf{What is a cursor in API pagination?}
+        An opaque token the server returns with a page; the client sends it
+        back to get the next page. Internally it usually encodes the
+        boundary row's sort-key values --- a bookmark by value, not by
+        position.
+  \item \textbf{What is the difference between \texttt{has\_more} and
+        \texttt{total\_count}?}
+        \texttt{has\_more} answers ``is there a next page'' and costs one
+        extra row (\texttt{LIMIT p+1}). \texttt{total\_count} answers ``how
+        many altogether'' and costs a full \texttt{COUNT(*)} over the
+        filtered relation on every request that includes it.
+  \item \textbf{What HTTP header is designed for page navigation links?}
+        The \texttt{Link} header, RFC~8288 \cite{rfc8288}, with relation
+        types \texttt{next}, \texttt{prev}, \texttt{first}, \texttt{last}.
+        Clients can follow \texttt{rel="next"} without knowing the
+        pagination strategy.
+  \item \textbf{What does \texttt{?fields=id,name} do and why offer it?}
+        Sparse field selection: the response includes only the requested
+        attributes. It cuts payload size and serialization cost, and can
+        make queries answerable from a covering index. Fields must come from
+        an allow-list, not raw column names.
+  \item \textbf{Why should every sort end with a unique column?}
+        Because a non-unique sort key leaves ties in an unspecified order,
+        and page boundaries through a tie are non-deterministic. Appending
+        the primary key makes the order total, which both offset and keyset
+        pagination require to be stable.
+  \item \textbf{Name three safe filter operators you'd expose and one you
+        would not.}
+        \texttt{eq}, \texttt{gte}, \texttt{in} --- all parameterizable and
+        index-friendly. I would not expose a raw \texttt{where} or
+        free-text SQL fragment parameter: it cannot be made safe by
+        sanitization, only by replacement with a grammar.
+  % ---- mid ----
+  \item \textbf{Why is offset pagination $O(n)$ at depth while keyset is
+        $O(\log n)$?}
+        A B-tree supports lookup by \emph{value}, not by \emph{position}.
+        Reaching offset $k$ requires visiting $k$ index entries to count
+        them --- $O(k)$, up to $O(n)$. A keyset predicate \texttt{(cost,id)
+        > (?,?)} is a value lookup: $O(\log n)$ descent plus $O(p)$ for the
+        page itself, independent of depth.
+  \item \textbf{Explain the duplicates-and-skips anomaly of offset
+        pagination.}
+        Between page requests, inserts ahead of the reader's window shift
+        every later position down by one, so the next \texttt{OFFSET}
+        window replays rows already emitted (duplicates); deletes shift
+        positions up, hiding unemitted rows (skips). Each page is
+        individually correct; the composition is not, because the offset is
+        a coordinate in a system the writer keeps renumbering.
+  \item \textbf{Why doesn't snapshot isolation fix it?}
+        It would --- if the whole walk ran in one transaction. But the walk
+        spans unbounded HTTP requests; holding a snapshot open that long
+        pins versions, bloats the database, and creates its own failure
+        modes. Keyset anchoring fixes consistency without long-lived
+        snapshots.
+  \item \textbf{Write the keyset predicate for \texttt{ORDER BY cost, id}
+        and expand the tuple comparison.}
+        \texttt{WHERE (cost, id) > (?, ?)} --- equivalent to
+        \texttt{cost > ? OR (cost = ? AND id > ?)}. The second disjunct is
+        what keeps ties on \texttt{cost} correct, which is why the unique
+        tie-breaker is part of the contract.
+  \item \textbf{What index serves that query, and what must align?}
+        A composite index on \texttt{(cost, id)} --- same column order and
+        direction as the \texttt{ORDER BY}. An index on \texttt{(id, cost)}
+        is useless for it; \texttt{(cost)} alone forces a sort of ties.
+        Verify with \texttt{EXPLAIN}: you want \texttt{SEARCH ... USING
+        INDEX}, not \texttt{SCAN} or a temp B-tree.
+  \item \textbf{Design a tamper-proof cursor token.}
+        JSON payload with version, expiry, and boundary values; base64url
+        encode; append a truncated HMAC-SHA256 keyed with a server secret;
+        verify with a constant-time comparison before parsing; on any
+        failure return one undifferentiated 400. Payload fields are still
+        re-bound as query parameters --- a valid signature does not make
+        the contents trusted SQL.
+  \item \textbf{Why version the cursor payload?}
+        Tokens outlive deploys. A client mid-walk during a rollout can hold
+        a token minted by the old build; a version field lets the new build
+        reject it cleanly (client restarts the walk) instead of
+        mis-parsing it as corrupt or, worse, valid-but-different.
+  \item \textbf{When is offset pagination actually fine?}
+        Small or slowly-changing collections, shallow walks, and a real
+        random-access requirement --- an internal admin grid over ten
+        thousand rows is the canonical case. Cap the maximum offset, and
+        don't compute \texttt{COUNT(*)} per page.
+  \item \textbf{How do you implement \texttt{rel="last"} and what does it
+        cost?}
+        You need the total: $last = \lfloor (n-1)/p \rfloor \cdot p$.
+        That means \texttt{COUNT(*)} per request that emits it --- an
+        $O(n)$ aggregate --- which is why many APIs omit \texttt{last} or
+        compute totals from cached estimates.
+  \item \textbf{How would you estimate \texttt{total\_count} cheaply?}
+        Planner statistics (e.g.\ PostgreSQL \texttt{reltuples}), the row
+        estimate from \texttt{EXPLAIN} of the same query, or a
+        periodically refreshed stats table. All are approximate; present
+        them as approximate (``${\sim}$200k results'') and never mix an
+        estimate into a contract that promises exactness.
+  \item \textbf{How do you keep client-supplied sort direction safe?}
+        Direction is parsed as a token from a two-element set
+        (\texttt{asc}/\texttt{desc} or a leading \texttt{-}), never
+        interpolated. \texttt{ORDER BY \{user\_input\}} is SQL injection;
+        the field allow-list protects the column, the direction token
+        protects the keyword position, which bind parameters cannot reach.
+  \item \textbf{How do filter parameters and cursors interact?}
+        The filter and sort define the walk, so they're part of the cursor
+        contract: either they must be resent verbatim on every page (and
+        the server rejects mismatches) or their hash is embedded in the
+        signed payload. A cursor silently continuing a \emph{different}
+        query is a subtle correctness bug.
+  \item \textbf{What is the N+1 problem at an API boundary and how do you
+        fix it in REST?}
+        \texttt{?expand=supplier} on a 50-item page becomes 1 query for the
+        page plus 50 supplier queries. Fix with DataLoader-style batching:
+        collect the page's foreign keys, run one \texttt{WHERE id IN (...)}
+        per expanded relation, stitch in memory. $1{+}N$ queries become
+        $1{+}k$ for $k$ relations.
+  % ---- senior ----
+  \item \textbf{How do keyset pagination and multi-column sort interact?}
+        The keyset tuple spans \emph{all} sort keys in order ---
+        \texttt{(a, b, id) > (?, ?, ?)} --- and the composite index must
+        match column-for-column. Mixed sort directions break the single
+        tuple comparison (you need the expanded disjunctive form with
+        per-column operators), which is why cursor endpoints usually fix or
+        constrain direction.
+  \item \textbf{How do you paginate a feed ranked by score?}
+        Score is the sort key: order by \texttt{(score DESC, id DESC)} and
+        keyset on \texttt{(score, id) < (?, ?)}. The hard part is that
+        scores \emph{change}: the walk then sees a time-varying ranking, so
+        either snapshot the ranking (materialize a ranked list keyed by a
+        snapshot id, cursor over positions \emph{within the immutable
+        snapshot}) or accept drift and document it. Hot feeds (Reddit-style)
+        snapshot; warm feeds accept drift.
+  \item \textbf{Your keyset query suddenly regressed to seconds. How do you
+        diagnose?}
+        \texttt{EXPLAIN} first: look for \texttt{SCAN} replacing
+        \texttt{SEARCH}, a temp B-tree for \texttt{ORDER BY}, or a
+        rows-examined estimate that tracks the table size. Usual causes: a
+        new filter column not prefixed in the index, a sort direction flip,
+        stale planner statistics, or an OR-ed predicate defeating
+        sargability. Then check whether the payload outgrew the covering
+        index.
+  \item \textbf{Transparent keyset vs.\ opaque cursor --- how do you
+        choose?}
+        Transparent keysets (\texttt{after\_cost=...}) are debuggable and
+        bookmarkable but couple the public contract to the physical schema
+        and let clients construct arbitrary boundaries. Opaque signed
+        cursors decouple contract from schema, enable expiry and rotation,
+        and prevent boundary forgery --- at the price of
+        undebuggability-from-the-outside. Public API: opaque. Internal
+        tools where engineers live in logs: transparent is defensible.
+  \item \textbf{How do you paginate consistently across multiple database
+        shards?}
+        You don't get a global cheap ordering; you merge. Options: scatter
+        keyset queries to all shards and $k$-way merge the pages (cost
+        grows with shard count per page), pin a tenant to a shard so
+        pagination is single-shard (the multi-tenant answer), or maintain a
+        denormalized global ordering table. Offsets across shards compound
+        the $O(k)$ scan $k$ ways --- keyset is essentially mandatory.
+  \item \textbf{What are the security considerations of cursor design?}
+        Cursors are capabilities: sign them (integrity), expire them
+        (replay window), keep tenant/scope claims out unless enforced
+        server-side per request (a valid cursor must not widen
+        authorization), never log raw tokens, and treat payload fields as
+        untrusted input even after signature verification. And the signing
+        key rotates without invalidating the world only if you version keys.
+  \item \textbf{How would you migrate a live public API from offset to
+        cursors without breaking consumers?}
+        Ship cursor support alongside offset on the same endpoint; emit
+        \texttt{Link: rel="next"} in cursor form even for offset requests
+        so hypermedia-driven clients migrate transparently; announce
+        deprecation with a sunset header; add depth caps to offset first
+        (they fail loudly for the crawlers you most want off it); measure
+        strategy mix from logs; remove offset only at the next major
+        version per the versioning policy (Chapter~9).
+  \item \textbf{When does \texttt{COUNT(*)} actually become expensive, and
+        what's the production alternative?}
+        When the filtered relation stops fitting comfortably in cache or
+        the count runs per page per client under concurrency --- at millions
+        of rows it dominates endpoint latency. Alternatives: opt-in counts,
+        counts on page one only, planner estimates, pre-aggregated stats
+        tables refreshed out of band, or threshold counting (exact up to a
+        cap, ``10000+'' beyond it, computed with a \texttt{LIMIT}ed probe).
+  % ---- staff ----
+  \item \textbf{Design pagination for a multi-tenant SaaS where tenant sizes
+        span six orders of magnitude.}
+        Per-tenant keyset over \texttt{(tenant\_id, sort\_key, id)} with a
+        composite index led by \texttt{tenant\_id}: the equality prefix keeps
+        every tenant's walk a local index range, so the 10-row tenant and
+        the 100-million-row tenant share code without sharing performance
+        failure modes. Depth caps and page-size ceilings apply per tenant;
+        exports for whale tenants go to an async job with resumable cursors
+        stored server-side.
+  \item \textbf{How do you make a paginated export resumable across server
+        restarts and client crashes?}
+        Persist the cursor: the export job checkpoints the signed cursor
+        (plus the filter/sort hash) after each page, so a crash resumes at
+        the last boundary instead of page one. Keyset makes this sound ---
+        the resume point is a value, immune to intervening writes; offset
+        checkpoints resume into a shifted coordinate system and silently
+        corrupt the export.
+  \item \textbf{A client demands stable pagination over data being bulk
+        backfilled. Options?}
+        Four honest answers: (1) snapshot semantics --- materialize the
+        query result or a snapshot id up front, paginate the frozen
+        snapshot; (2) keyset with documented drift semantics (fine for
+        appends at the tail, wrong for front inserts); (3) quiesce or
+        fence the backfill behind a high-watermark column
+        (\texttt{WHERE created\_at <= ?} baked into the walk) so the
+        walked relation is effectively immutable; (4) change feed / CDC
+        instead of pagination when the requirement is really ``see
+        everything exactly once'' (Chapter~11).
+  \item \textbf{Where do filtering capabilities belong architecturally ---
+        gateway, service, or database?}
+        Enforcement of the grammar and allow-list belongs at the service
+        boundary (it is contract logic); compilation targets the database
+        (it is execution logic); the gateway may enforce coarse limits
+        (parameter count, page-size ceilings) but should not own filter
+        semantics, or you cannot evolve the contract without redeploying
+        infrastructure. The deeper the predicate is pushed into the query
+        (sargable, index-aligned), the less data crosses every layer.
+  \item \textbf{How do you test pagination correctness systematically?}
+        Property tests, not examples: for random table contents, page
+        sizes, and write schedules, assert the concatenation of pages equals
+        the expected ordered multiset (keyset) or detect drift (offset).
+        Add determinism tests (same walk twice $\Rightarrow$ same pages),
+        boundary tests (empty table, single row, page size 1, exact
+        multiples, ties spanning boundaries), security tests (forged,
+        expired, and version-mismatched cursors), and a benchmark gate in
+        CI so a missing index fails the build, not the 2 a.m.\ pager.
+  \item \textbf{What consistency guarantees would you document for a public
+        cursor-paginated endpoint, and why those?}
+        Per-page serializability (each page is a consistent answer at some
+        instant), monotonic value-progression (no page revisits a boundary
+        it passed), and documented drift semantics for mutations of already-
+        visited versus not-yet-visited regions. You explicitly do
+        \emph{not} promise a stable total or a walk-level snapshot unless
+        you sell snapshot cursors --- promising more than the mechanism
+        delivers is how you end up in someone else's postmortem.
+  \item \textbf{Is cursor pagination compatible with relational
+        \texttt{JOIN}s and aggregation endpoints?}
+        With care. The keyset predicate must reference columns of the
+        driving relation and the index must cover the join's access path;
+        joins multiply rows per key value, so the boundary tuple must be
+        unique at the \emph{joined} row granularity or you split a group
+        across pages. Aggregates generally should not paginate by keyset
+        over grouped keys without a covering index on the grouping columns
+        --- and pagination over a \texttt{GROUP BY} whose groups change
+        under concurrent writes has the same drift physics as the base
+        case, one level up.
+  \item \textbf{What would you put in an organization-wide pagination
+        standard?}
+        One envelope shape (\texttt{items}, \texttt{has\_more},
+        \texttt{next\_cursor}), one cursor format (signed, versioned,
+        expiring), \texttt{Link} headers mandatory, \texttt{total\_count}
+        opt-in only, \texttt{MAX\_LIMIT} set platform-wide, a unique
+        tie-breaker on every ordered endpoint, an allow-listed filter
+        grammar with a fixed operator set, an \texttt{EXPLAIN} plan
+        attached to every list-endpoint PR, and a benchmark gate on
+        depth-scaling. Standards exist so that the wrong thing is the hard
+        thing.
+  \item \textbf{Critique: ``We'll just paginate with
+        \texttt{WHERE id > last\_id}''. When is that right, and when does it
+        silently lie?}
+        It is a keyset over the primary key --- optimal when the product
+        ordering \emph{is} insertion order (ledgers, event logs, audit
+        trails) because the clustered index serves it for free. It silently
+        lies when consumers believe they're seeing a business ordering ---
+        recency by \texttt{updated\_at}, price, relevance --- because id
+        order is not any of those; it also breaks under id reassignment,
+        merged imports with re-keyed ids, and any future requirement to
+        re-sort. Right tool for append-only streams, wrong abstraction for
+        ranked collections.
+\end{enumerate}
+
+%% ============================================================================
+\section{External Bibliography \& Further Reading}
+\label{sec:ch8-bibliography}
+
+\begin{itemize}
+  \item \textbf{RFC 8288, \emph{Web Linking}} \cite{rfc8288} --- the
+        normative reference for \texttt{Link} headers and relation types
+        (\texttt{next}/\texttt{prev}/\texttt{first}/\texttt{last}). Short,
+        precise, and the reason hypermedia pagination is interoperable.
+  \item \textbf{RFC 9110, \emph{HTTP Semantics}} \cite{rfc9110} --- status
+        codes for the failure modes in this chapter (400 for grammar
+        rejections), \texttt{Vary} for parameterized responses, and the
+        caching semantics that interact with field selection.
+  \item \textbf{Markus Winand, \emph{Use The Index, Luke}
+        (\texttt{use-the-index-luke.com})} --- the canonical free reference
+        on index anatomy; its ``Pagination Done the Right Way'' chapter is
+        the keyset method's best-known exposition, with per-database
+        dialect notes.
+  \item \textbf{Martin Kleppmann, \emph{Designing Data-Intensive
+        Applications}} \cite{kleppmann2017ddia} --- B-tree internals,
+        snapshot isolation, and the read/write-path trade-offs behind every
+        cost claim in this chapter.
+  \item \textbf{JJ Geewax, \emph{API Design Patterns}}
+        \cite{gehl2021apidesign} --- opinionated, battle-tested treatment of
+        page tokens, filtering, and resource projection as repeatable
+        design patterns.
+  \item \textbf{PostgreSQL Documentation, \emph{LIMIT and OFFSET} and
+        \emph{Indexes}} --- authoritative semantics for row skipping, row
+        estimates used in counting strategies, and \texttt{NULLS
+        FIRST/LAST} behavior.
+  \item \textbf{SQLite Documentation, \emph{SELECT} and \emph{EXPLAIN QUERY
+        PLAN}} --- row-value comparison support and the query-plan output
+        vocabulary (\texttt{SEARCH} vs.\ \texttt{SCAN} vs.\ covering index)
+        used throughout the lab.
+  \item \textbf{JSON:API specification, \emph{Pagination and Sparse
+        Fieldsets} profiles} --- a widely adopted convention family
+        (\texttt{page[size]}, \texttt{page[after]}, \texttt{fields[type]})
+        worth aligning with when you do not control both ends.
+  \item \textbf{Stripe API documentation, \emph{Pagination}} --- the
+        industry reference implementation of opaque cursor pagination
+        (\texttt{starting\_after}/\texttt{ending\_before},
+        \texttt{has\_more}); read it as a case study in minimal,
+        stable contracts.
+  \item \textbf{Slack API documentation, \emph{Pagination}} --- cursor
+        pagination at scale (\texttt{next\_cursor} in
+        \texttt{response\_metadata}), including the operational rationale
+        for retiring offset-based methods.
+  \item \textbf{FastAPI and Pydantic documentation}
+        \cite{fastapidocs,pydanticdocs} --- query-parameter validation,
+        response modeling, and the \texttt{TestClient} used by the
+        reference service's offline self-check.
+  \item \textbf{\emph{The Datadog/Shopify engineering blogs on cursor-based
+        pagination and GraphQL Connections} (Relay Cursor Connections
+        spec)} --- for the \texttt{edges}/\texttt{node}/\texttt{pageInfo}
+        vocabulary you will meet again in Chapter~12.
+\end{itemize}
+
+%% ============================================================================
+\section{Capstone Projects}
+\label{sec:ch8-capstones}
+
+Five projects, progressive. Each names its difficulty tier; acceptance
+criteria are checkable facts, not vibes.
+
+\subsection{Capstone 1: Cursor-Paginated Ledger API [junior]}
+
+\textbf{Objective.} Re-implement the case study correctly: a
+\texttt{/ledger} endpoint over a synthetic append-only postings table,
+paginated by opaque signed cursor.
+
+\textbf{Inputs/Datasets.} \texttt{gen\_dataset.py} extended with a
+\texttt{ledger(posted\_at, ledger\_id, amount\_cents, account)} table,
+seeded with 100{,}000 postings including deliberate timestamp ties.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Order by \texttt{(posted\_at, ledger\_id)}; build the composite
+        index to match.
+  \item Implement the keyset predicate with tuple comparison and the
+        \texttt{LIMIT p+1} \texttt{has\_more} trick.
+  \item Wrap the boundary in an HMAC-signed, versioned, expiring cursor;
+        reject forged tokens with a uniform 400.
+  \item Emit \texttt{Link: rel="next"} on every non-final page.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] A scripted full walk emits every posting exactly once,
+        verified by set comparison against the source table.
+  \item[$\square$] \texttt{EXPLAIN QUERY PLAN} shows \texttt{SEARCH} using
+        the composite index for every page query.
+  \item[$\square$] Forged, expired, and version-mismatched cursors each
+        return 400 with a problem-details body.
+  \item[$\square$] Timestamp ties spanning a page boundary are handled
+        without duplicates or skips (test included).
+\end{itemize}
+
+\textbf{Stretch Goals.} Add \texttt{rel="prev"} via a reversed-order
+query; add per-account filtering with an index-led equality prefix.
+
+\subsection{Capstone 2: Filter Compiler with Property Tests [mid]}
+
+\textbf{Objective.} Harden Listing~\ref{lst:ch8-filter-compiler} into a
+library with a documented grammar and adversarial test coverage.
+
+\textbf{Inputs/Datasets.} The \texttt{parts} table; a corpus of 50 attack
+strings (injection probes, wildcard floods, encoding tricks, type
+confusions) you curate yourself.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Specify the grammar in the README-style module docstring (fields,
+        operators, types, precedence-free conjunction).
+  \item Extend the AST with parentheses-free \texttt{OR} groups
+        (\texttt{|}-separated clauses) compiled with correct parentheses.
+  \item Write \texttt{pytest} suites: unit tests per node type, golden
+        SQL/params tests, and property tests asserting that (a) compiled
+        SQL contains no substring of any raw input value, and (b) every
+        attack string is either rejected or executes as inert data.
+  \item Add a FastAPI adapter mapping \texttt{FilterError} to a 400
+        problem-details response listing allowed fields and operators.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] \texttt{pytest -q} green, including the property tests.
+  \item[$\square$] All 50 attack strings rejected or provably inert
+        (asserted by executing them against the dataset).
+  \item[$\square$] No public filter/sort/field parameter name equals an
+        internal column name it was not intended to expose.
+  \item[$\square$] Compiled queries use bound parameters exclusively ---
+        verified by inspection test on the compiler output.
+\end{itemize}
+
+\textbf{Stretch Goals.} Case-insensitive \texttt{contains} with correct
+collation; filter-dependent index recommendation report driven by
+\texttt{EXPLAIN}.
+
+\subsection{Capstone 3: Pagination Benchmark Report [mid]}
+
+\textbf{Objective.} Produce a reproducible, reviewer-grade benchmark
+comparing offset, keyset, and cursor page fetches across table sizes and
+page sizes.
+
+\textbf{Inputs/Datasets.} \texttt{gen\_dataset.py} at 100k, 200k, and 1M
+rows; \texttt{benchmark.py} extended with cursor-token overhead
+measurement and p50/p95 columns.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Parameterize the harness by row count, page size, and depth list;
+        record environment metadata (Python, SQLite version, CPU).
+  \item Add percentile statistics (p50/p95) and a cold-cache variant using
+        a fresh connection per repetition.
+  \item Measure cursor mint/verify overhead per request and report it as a
+        latency line item.
+  \item Write the report: tables, one growth-curve figure per row count,
+        and a stated verdict on where offset crosses your latency budget.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] One command reproduces every table in the report
+        (numbers flagged illustrative, shapes asserted).
+  \item[$\square$] Offset growth is demonstrably linear (fit reported);
+        keyset is flat within stated noise bounds.
+  \item[$\square$] Cursor overhead is quantified and shown to be constant
+        with depth.
+  \item[$\square$] The report names the exact index used by each query and
+        quotes the \texttt{EXPLAIN} evidence.
+\end{itemize}
+
+\textbf{Stretch Goals.} Covering-index variant showing the offset penalty
+shrinking but not vanishing; PowerShell runner script for the whole matrix.
+
+\subsection{Capstone 4: Infinite-Scroll Client over Signed Cursors [senior]}
+
+\textbf{Objective.} Build a terminal-based infinite-scroll parts browser
+that consumes \emph{only} \texttt{rel="next"} links, proving the client
+never learns the pagination strategy.
+
+\textbf{Inputs/Datasets.} The chapter's FastAPI service (cursor mode) over
+the 200k-row dataset; \texttt{httpx} for the client.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement the client loop: follow \texttt{Link}
+        \texttt{rel="next"} until absent; render pages with running totals
+        and elapsed time per page.
+  \item Add resume: persist the last cursor and the filter/sort state to
+        disk; restart mid-walk and continue exactly.
+  \item Add failure drills: expired cursor (sleep past TTL), forged cursor,
+        server restart --- each handled with a documented recovery
+        (restart walk vs.\ resume).
+  \item Run the client against a live writer inserting rows mid-walk;
+        record and explain the observable behavior.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Client source contains no offset arithmetic and no
+        cursor parsing --- only header following.
+  \item[$\square$] A kill-and-resume test completes the walk with zero
+        duplicates (asserted client-side).
+  \item[$\square$] Expired and forged cursors produce a controlled,
+        user-visible recovery path, not a crash.
+  \item[$\square$] Mid-walk inserts produce a written behavior note
+        consistent with the chapter's drift model.
+\end{itemize}
+
+\textbf{Stretch Goals.} Conditional requests with \texttt{ETag} per page
+(previews Chapter~10); strategy negotiation where the server silently
+switches the client from offset links to cursor links.
+
+\subsection{Capstone 5: Multi-Tenant Keyset Design [staff]}
+
+\textbf{Objective.} Design and validate the pagination layer for a
+multi-tenant SaaS whose tenants span six orders of magnitude in row count,
+including isolation, index design, and org-wide standards.
+
+\textbf{Inputs/Datasets.} A synthetic three-tenant dataset (1k, 200k, and
+5M rows) in one \texttt{parts} table with \texttt{tenant\_id}; the
+chapter's service as the starting point.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Add \texttt{tenant\_id} as the index-leading equality column:
+        \texttt{(tenant\_id, unit\_cost\_cents, id)}; prove every tenant's
+        walk stays a local \texttt{SEARCH}.
+  \item Embed a tenant-scope claim \emph{outside} the cursor (server-side
+        auth context) and prove a valid cursor from tenant A cannot page
+        tenant B.
+  \item Design per-tenant policy: page-size ceilings, depth caps, and an
+        async export path with server-side resumable cursors for the whale
+        tenant.
+  \item Write the org standard as a one-page ADR: envelope shape, cursor
+        format, error contract, and the EXPLAIN-in-the-PR gate.
+  \item Load-test: concurrent walks from all three tenants; demonstrate
+        the whale tenant's walk does not move the small tenants' p99.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Cross-tenant cursor replay is impossible, with a test
+        proving it.
+  \item[$\square$] All three tenants' page latency is depth-independent
+        within stated noise, measured and tabulated.
+  \item[$\square$] The whale tenant's export resumes correctly after a
+        simulated crash (checkpoint test).
+  \item[$\square$] The ADR names every trade-off explicitly rejected
+        (offsets, per-page counts, transparent cursors) with reasons.
+\end{itemize}
+
+\textbf{Stretch Goals.} Row-level security in SQLite views or a second
+connection role; snapshot-id cursors for compliance exports requiring a
+frozen relation.
+
+%% ============================================================================
+\section{Python Dependencies Appendix}
+\label{sec:ch8-dependencies}
+
+The chapter's laboratory pins the following environment. Everything else is
+the Python 3.11+ standard library --- notably \texttt{sqlite3},
+\texttt{hmac}, \texttt{hashlib}, \texttt{base64}, and \texttt{random} ---
+consistent with the curriculum's offline-first, stdlib-first rules.
+
+\begin{minted}{text}
+fastapi>=0.110
+pydantic>=2.7
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+Install on Windows PowerShell from the chapter's \texttt{code} directory:
+
+\begin{minted}{powershell}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{fastapi (\texttt{fastapi>=0.110})}
+
+\textbf{Description.} The ASGI web framework used for the reference service
+\cite{fastapidocs}: routing, request parsing, and automatic
+query-parameter validation via type hints.
+
+\textbf{Why included.} Chapters~6--7 standardized the book's API
+implementations on FastAPI; this chapter's three pagination endpoints use
+its typed \texttt{Query} parameters (with \texttt{ge}/\texttt{le} bounds
+enforcing page-size ceilings) and its \texttt{TestClient} for the offline
+self-check.
+
+\textbf{Alternatives.} Flask (simpler, but validation is hand-rolled);
+Django REST Framework (heavier, ORM-centric); a stdlib
+\texttt{http.server} implementation (fine for demos, no validation
+ecosystem).
+
+\textbf{Installation.} \texttt{pip install "fastapi>=0.110"} --- pulls
+\texttt{starlette} and \texttt{pydantic}; add \texttt{uvicorn} only if you
+want to serve it live (\texttt{pip install uvicorn}).
+
+\subsection{pydantic (\texttt{pydantic>=2.7})}
+
+\textbf{Description.} Data-validation library \cite{pydanticdocs} powering
+FastAPI's parameter coercion and the natural home for typed cursor-payload
+models in larger codebases.
+
+\textbf{Why included.} It is a FastAPI transitive dependency and the
+contract-validation layer established in Chapter~4; this chapter's service
+relies on its \texttt{Query(..., ge=1, le=200)} coercion to reject bad page
+parameters before handler code runs.
+
+\textbf{Alternatives.} \texttt{dataclasses} plus manual coercion (stdlib,
+more code); \texttt{attrs} with validators; \texttt{marshmallow}.
+
+\textbf{Installation.} \texttt{pip install "pydantic>=2.7"} --- installed
+automatically with FastAPI; pin explicitly because v1/v2 semantics differ.
+
+\subsection{httpx (\texttt{httpx>=0.27})}
+
+\textbf{Description.} Modern HTTP client for Python, sync and async.
+
+\textbf{Why included.} FastAPI's \texttt{TestClient} is built on
+\texttt{httpx}; the offline self-check in
+Listing~\ref{lst:ch8-service} and the infinite-scroll client in Capstone~4
+both speak \texttt{httpx}. It also matches Chapter~2's client-side
+toolchain.
+
+\textbf{Alternatives.} \texttt{requests} (sync-only, ubiquitous);
+\texttt{urllib} (stdlib, verbose); \texttt{aiohttp} (async, different API).
+
+\textbf{Installation.} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest (\texttt{pytest>=8})}
+
+\textbf{Description.} The standard Python test runner and assertion
+ecosystem.
+
+\textbf{Why included.} Capstones~2--5 specify \texttt{pytest} suites
+(property tests for the filter compiler, checkpoint and isolation tests for
+the capstone services); it is the curriculum-wide test framework validated
+by every track's \texttt{pytest -q} gate.
+
+\textbf{Alternatives.} \texttt{unittest} (stdlib, no fixtures/plugins);
+\texttt{nose2} (legacy); \texttt{hypothesis} as a \emph{complement} for
+property-based testing if your track permits the extra dependency.
+
+\textbf{Installation.} \texttt{pip install "pytest>=8"}.
+
+%% ============================================================================
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch8-summary}
+
+\begin{itemize}
+  \item \textbf{Position is fragile; value is stable.} Offset pagination
+        costs $O(k)$ per page at depth $k$ and drifts (duplicates/skips)
+        under concurrent writes; keyset pagination costs $O(\log n) + O(p)$
+        at any depth and anchors on boundary values immune to writes
+        elsewhere in the ordering.
+  \item \textbf{The tuple predicate is the contract.} \texttt{WHERE
+        (sort\_col, id) > (?, ?)} with a composite index in matching column
+        order turns page $n$ into the same B-tree seek as page 1. Verify
+        with \texttt{EXPLAIN}: \texttt{SEARCH ... USING INDEX}, never a
+        temp B-tree sort.
+  \item \textbf{Cursors are capabilities.} Opaque, HMAC-signed, versioned,
+        expiring tokens, verified constant-time before parsing, rejected
+        with a uniform 400. \texttt{Link} headers (RFC~8288) make
+        navigation hypermedia-driven and strategy-migration possible.
+  \item \textbf{Counting is not free.} Default to \texttt{has\_more}
+        (\texttt{LIMIT p+1}); make \texttt{total\_count} opt-in, estimated,
+        or out-of-band --- never a per-page $O(n)$ tax on every client.
+  \item \textbf{Never let the client speak SQL.} Allow-listed grammar
+        $\to$ typed AST $\to$ bound parameters, with public names decoupled
+        from physical columns; direction tokens parsed, not interpolated.
+  \item \textbf{Determinism is enforced, not hoped for.} Every ordering
+        ends in a unique tie-breaker; NULL placement is stated explicitly;
+        page sizes are capped server-side.
+  \item \textbf{Projection and expansion are budget tools.} Sparse
+        fieldsets shrink payloads and unlock covering indexes; expansion
+        requires DataLoader-style batching or the $N{+}1$ problem moves to
+        your API boundary.
+\end{itemize}
+
+%% ============================================================================
+\section{Quick-Reference Card}
+\label{sec:ch8-quickref}
+
+\subsection*{Strategy Comparison Matrix}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c c X}
+    \toprule
+    \textbf{Strategy} & \textbf{Cost at depth $k$} & \textbf{Write-stable?} &
+    \textbf{Random access?} & \textbf{Use when} \\
+    \midrule
+    Offset (LIMIT/OFFSET) & $O(k)$ & No --- duplicates/skips & Yes &
+      Small/shallow collections; admin grids; capped depth. \\
+    Keyset (seek) & $O(\log n) + O(p)$ & Yes & No &
+      Large collections; exports; feeds; internal APIs. \\
+    Opaque cursor & $O(\log n) + O(p)$ & Yes & No &
+      Public APIs: schema hiding, expiry, tamper evidence. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Pagination strategies at a glance ($p$ = page size, $n$ = rows).}
+\end{table}
+
+\subsection*{Cursor Design Checklist}
+\begin{enumerate}
+  \item Payload: version field, expiry timestamp, boundary values ---
+        nothing else.
+  \item Integrity: HMAC-SHA256 (truncated), verified with
+        \texttt{compare\_digest} \emph{before} parsing.
+  \item Failures: malformed, forged, expired, wrong-version $\Rightarrow$
+        one uniform 400 problem-details response.
+  \item Key management: secret from environment/secrets manager; never
+        logged; rotation plan via key version.
+  \item Contract: \texttt{next\_cursor} in body \emph{and} \texttt{Link:
+        rel="next"}; filter/sort state bound to the cursor (resent or
+        hashed).
+  \item Payload fields re-bound as SQL parameters --- signature $\neq$
+        trust.
+\end{enumerate}
+
+\subsection*{Filter Grammar (Reference Implementation)}
+\begin{minted}{text}
+filter   := clause (";" clause)*
+clause   := field ":" op ":" value
+field    := "sku" | "name" | "category" | "cost" | "weight" | "active"
+op       := "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "contains"
+value    := scalar | scalar ("," scalar)*      # comma list for "in"
+sort     := ["-"] field ("," ["-"] field)*     # "-" = descending
+fields   := field ("," field)*                 # sparse fieldset
+rules    : unknown field/op -> 400; values coerced to declared types;
+           contains escapes LIKE wildcards; sort always appends ", id";
+           SQL emitted with bound parameters only.
+\end{minted}
+
+\input{chapters/_standard_addendum}

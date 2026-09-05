@@ -1,0 +1,27 @@
+# requirements-book.txt -- consolidated environment for running ALL book code
+# Union of code/chNN/requirements.txt floors. Python 3.11+.
+# Install:  pip install -r requirements-book.txt
+fastapi>=0.115.6
+uvicorn[standard]>=0.29
+httpx>=0.28.1
+pydantic>=2.10.4
+pydantic-settings>=2.2
+pytest>=8.3.4
+tenacity>=8.3
+pyyaml>=6.0
+jsonschema>=4.21
+msgpack>=1.0,<2.0
+orjson>=3.9,<4.0
+h2>=4.1.0
+pyjwt[crypto]>=2.8,<3
+cryptography>=42
+keyring>=25
+websockets>=12
+strawberry-graphql[fastapi]>=0.230
+grpcio>=1.62
+grpcio-tools>=1.62
+protobuf>=4.25
+fakeredis>=2.23
+hypothesis>=6.100
+opentelemetry-sdk>=1.25
+opentelemetry-instrumentation-fastapi>=0.46b0

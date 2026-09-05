@@ -1,0 +1,149 @@
+openapi: 3.1.0
+info:
+  title: Northwind Robotics Fleet API
+  version: 2.4.0
+  description: >-
+    Manages the Northwind Robotics synthetic robot fleet: registration,
+    health telemetry summaries, and decommissioning workflows.
+  contact:
+    name: Fleet Platform Team
+    email: fleet-platform@northwind-robotics.example
+  x-lifecycle:
+    state: published
+    owner: team-fleet-platform
+servers:
+  - url: https://api.northwind-robotics.example/fleet/v2
+    description: Production (synthetic)
+paths:
+  /robots:
+    get:
+      operationId: listRobots
+      summary: List robots in the fleet
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of robots
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RobotPage'
+              example:
+                items:
+                  - robotId: rb-1001
+                    model: NW-Loader
+                    status: active
+                nextCursor: cur_002
+        default:
+          description: Unexpected error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    post:
+      operationId: registerRobot
+      summary: Register a new robot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RobotRegistration'
+      responses:
+        '201':
+          description: Robot registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Robot'
+        default:
+          description: Registration failed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /robots/{robotId}:
+    get:
+      operationId: getRobot
+      summary: Fetch a single robot
+      parameters:
+        - name: robotId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The requested robot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Robot'
+        default:
+          description: Lookup failed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  schemas:
+    Robot:
+      type: object
+      required: [robotId, model, status]
+      properties:
+        robotId:
+          type: string
+          description: Stable synthetic identifier, e.g. rb-1001
+        model:
+          type: string
+          description: Hardware model code
+        status:
+          type: string
+          enum: [active, maintenance, retired]
+          x-classification: internal
+    RobotRegistration:
+      type: object
+      required: [model]
+      properties:
+        model:
+          type: string
+        firmwareVersion:
+          type: string
+    RobotPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Robot'
+        nextCursor:
+          type: string
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri

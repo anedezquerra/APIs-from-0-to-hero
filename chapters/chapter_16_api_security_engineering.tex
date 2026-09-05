@@ -1,0 +1,3657 @@
+%% ================================================================
+%% Chapter 16: API Security Engineering (OWASP API Security Top 10)
+%% Mastering APIs: From Zero to Production Guru
+%% ================================================================
+\chapter{API Security Engineering (OWASP API Security Top 10)}
+\label{ch:api_security}
+
+%% ----------------------------------------
+%% Executive Summary
+%% ----------------------------------------
+Every API you ship is an adversary-facing product surface. The friendly
+consumers integrate once and file tickets; the unfriendly ones enumerate
+your object identifiers at machine speed, replay your tokens, probe your
+legacy routes, and ask your server to fetch \texttt{169.254.169.254} on
+their behalf. The uncomfortable fact of the last decade of breach reports is
+that the dominant failures are not exotic cryptographic breaks --- they are
+\emph{authorization} failures: the server correctly identified the caller
+and then handed over someone else's object. The OWASP API Security Top 10
+(2023)~\cite{owaspapisecurity} is the industry's distilled incident ledger,
+and this chapter treats it the way an incident ledger deserves: item by
+item, each with its mechanism, a realistic exploit narrative set in the
+Northwind Robotics universe, a concrete mitigation, and the detection signal
+that tells you the exploit is being attempted against \emph{you}.
+
+The chapter's pedagogical engine is adversarial and executable. We build a
+deliberately vulnerable FastAPI service that seeds all ten flaws --- each
+fenced with a comment naming its OWASP item --- then build the hardened
+counterpart, then run a ten-test exploit suite that proves both directions:
+the exploit lands on the vulnerable build and is repelled by the hardened
+one. Security claims you cannot execute are marketing; here every claim is a
+pytest. Around that centerpiece we build the server-side identity stack with
+equal rigor: the OAuth~2.0/OIDC token-validation pipeline in its only safe
+order (structure, algorithm allow-list, key resolution, signature,
+\texttt{iss}/\texttt{aud}/\texttt{exp}, \emph{then} claims-based
+authorization)~\cite{rfc7519,rfc6749}, scope design from coarse to fine,
+token exchange and audience restriction for service-to-service calls, and
+mTLS with SPIFFE/SPIRE for workload identity where tokens are the wrong
+tool~\cite{rfc8446}. We then widen the aperture to the disciplines that keep
+the ten items closed permanently: STRIDE threat modeling per endpoint with a
+worked table, attack trees and abuse-case writing, injection and
+canonicalization attacks, SSRF defense-in-depth, response security (headers,
+CORS, CSRF), and secrets management with scanning in CI.
+
+\begin{keyconceptbox}
+\textbf{Authentication is not authorization, and neither is a substitute
+for validation.} Every request must cross three independent gates, in order:
+(1)~\emph{authenticate} --- verify the credential cryptographically;
+(2)~\emph{authorize} --- check function scope, then the \emph{object}, then
+the \emph{properties}; (3)~\emph{validate} --- treat all input and all
+upstream output as hostile. The OWASP API Top 10 is, to first order, the
+catalog of what happens when one of the three gates is missing, and the
+defense is never a single wall: $P(\text{breach}) = \prod_i P(\text{layer } i
+\text{ fails})$, so independent layers multiply protection while dependent
+layers merely add ceremony.
+\end{keyconceptbox}
+
+%% ----------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch16-objectives}
+
+\subsection*{Learning Objectives}
+
+After completing this chapter you will be able to:
+
+\begin{enumerate}[itemsep=0.3em]
+  \item Explain each OWASP API Security Top 10 (2023) item --- its
+        mechanism, a realistic exploit, the concrete mitigation, and the
+        detection signal --- and map real incidents to the taxonomy.
+  \item Implement object-level authorization (BOLA defense) and
+        property-level authorization (mass-assignment and excessive-exposure
+        defense) as explicit, testable guards rather than conventions.
+  \item Build a production-grade token-validation pipeline: JWKS key
+        resolution, algorithm allow-listing, issuer/audience/expiry
+        enforcement, and claims-to-principal mapping.
+  \item Design OAuth scopes (coarse versus fine) and apply audience
+        restriction and token exchange to service-to-service calls.
+  \item Decide when mTLS, bearer tokens, or both are the right carrier of
+        service identity, and operate certificate rotation safely.
+  \item Threat-model an API with STRIDE per endpoint, attack trees, and
+        abuse cases, and convert threats into acceptance criteria.
+  \item Defend against injection, canonicalization, and path-traversal
+        attacks, and engineer SSRF defense-in-depth (allow-lists, DNS
+        pinning, redirect re-validation, metadata-endpoint blocking).
+  \item Operate secrets correctly: vault/KMS patterns, rotation, and
+        leak-scanning in CI.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+
+This chapter assumes Chapters~0--15, most directly: HTTP semantics and
+headers (Chapter~\ref{ch:http_wire}), consuming APIs in Python with
+\texttt{httpx} (Chapter~\ref{ch:consuming_python}), client-side credential
+handling and JWT internals (Chapter~\ref{ch:client_security}), FastAPI
+routing and dependency injection (Chapter~\ref{ch:fastapi}), validation and
+\texttt{application/problem+json} errors
+(Chapter~\ref{ch:problem_details}), and rate limiting
+(Chapter~\ref{ch:rate_limiting}), whose token bucket reappears here as the
+API6 defense. Familiarity with versioning (Chapter~\ref{ch:versioning})
+helps for the inventory discussion (API9). All code is Python~3.11+, typed,
+offline-first: a simulated network and a local JWKS fixture replace the
+internet and the identity provider.
+
+%% ----------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch16-mechanics}
+
+\subsection{The Trust Model: Where Requests Cross Boundaries}
+\label{sec:ch16-trustmodel}
+
+Security engineering begins by deciding what you refuse to trust. An API
+request crosses at least four trust boundaries before it touches data: the
+network edge (TLS termination, WAF), the authentication boundary (who are
+you?), the authorization boundary (may you do this to \emph{this} object?),
+and the domain boundary (is the input well-formed, is the upstream response
+sane?). The classic failure is collapsing these into one: a gateway that
+authenticates and then lets the service assume authorization happened, or a
+service that validates input but trusts upstream JSON blindly.
+Figure~\ref{fig:ch16-trustpipeline} shows the pipeline this chapter builds
+in code.
+
+\begin{figure}[ht]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize, >=stealth,
+  zone/.style={draw=packtgray, dashed, rounded corners, inner sep=6pt}]
+  % ---- pipeline nodes ----
+  \node[flowstep] (client) {\textbf{Client}\\[-2pt]\scriptsize browser / script / svc};
+  \node[flowstep, right=0.55cm of client] (edge) {\textbf{Edge}\\[-2pt]\scriptsize TLS 1.3, WAF,\\[-2pt]\scriptsize body-size caps};
+  \node[flowstep, right=0.55cm of edge] (authn) {\textbf{Authenticate}\\[-2pt]\scriptsize token sig,\\[-2pt]\scriptsize iss/aud/exp};
+  \node[flowstep, right=0.55cm of authn] (authz) {\textbf{Authorize}\\[-2pt]\scriptsize scope $\to$ object\\[-2pt]\scriptsize $\to$ properties};
+  \node[flowstep, right=0.55cm of authz] (domain) {\textbf{Domain}\\[-2pt]\scriptsize schema,\\[-2pt]\scriptsize business rules};
+  \node[flowstep, right=0.55cm of domain] (data) {\textbf{Data}\\[-2pt]\scriptsize parameterized\\[-2pt]\scriptsize queries only};
+  % ---- arrows ----
+  \draw[->, thick] (client) -- (edge);
+  \draw[->, thick] (edge) -- (authn);
+  \draw[->, thick] (authn) -- (authz);
+  \draw[->, thick] (authz) -- (domain);
+  \draw[->, thick] (domain) -- (data);
+  % ---- trust zones ----
+  \node[zone, fit=(client), label={[modcap]above:untrusted}] {};
+  \node[zone, fit=(edge)(authn)(authz), label={[modcap]above:perimeter trust zone}] {};
+  \node[zone, fit=(domain)(data), label={[modcap]above:service trust zone}] {};
+  % ---- rejection taps ----
+  \foreach \n/\t in {edge/429 or 413, authn/401, authz/403, domain/422}{
+    \draw[->, thick, packtorange, dashed] (\n.south) -- ++(0,-0.75)
+      node[below, note] {\t};
+  }
+  % ---- downstream egress ----
+  \node[flowstep, below=1.5cm of domain] (egress) {\textbf{Egress guard}\\[-2pt]\scriptsize SSRF policy, schema-check\\[-2pt]\scriptsize upstream responses};
+  \draw[->, thick, packtorange] (domain.south) -- (egress.north)
+    node[midway, right, note] {outbound calls};
+\end{tikzpicture}}
+\caption{Request trust-boundary and validation pipeline. Each gate is
+independent and can reject on its own evidence; the egress guard applies the
+same suspicion to traffic \emph{leaving} the service (API7, API10).}
+\label{fig:ch16-trustpipeline}
+\end{figure}
+
+\begin{definition}[Trust boundary]
+A \emph{trust boundary} is any edge in the data-flow graph across which the
+provenance guarantees of data change: from unauthenticated network input to
+an authenticated principal, from a principal to an authorized one, from a
+process to its data store, or from your service to a third-party API.
+Validation and authorization checks belong \emph{at} the boundary, not
+somewhere downstream of it.
+\end{definition}
+
+\begin{definition}[Authentication, authorization, validation]
+\emph{Authentication} (authN) establishes \emph{who} the caller is, with
+cryptographic evidence. \emph{Authorization} (authZ) decides whether that
+caller may perform \emph{this function}, on \emph{this object}, touching
+\emph{these properties}. \emph{Validation} decides whether a payload is
+well-formed and within contract, regardless of who sent it. The three are
+orthogonal: a perfectly authenticated admin can still send
+\texttt{'; DROP TABLE robots;--} as a robot name.
+\end{definition}
+
+\subsection{The OWASP API Security Top 10 (2023) at a Glance}
+\label{sec:ch16-owasp-overview}
+
+Table~\ref{tab:ch16-owasp-map} compresses the taxonomy; the subsections that
+follow expand each row into mechanism, exploit, mitigation, and detection.
+Notice the shape of the list: five of ten items (API1, API3, API5, API6,
+API9) are \emph{authorization and inventory} failures, not cryptographic
+ones. Teams that spend their entire security budget on TLS and JWT
+libraries are armoring the wrong gate.
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Item} & \textbf{Name} & \textbf{One-line mechanism} \\
+\midrule
+API1 & Broken Object Level Authorization & Object id accepted without an ownership/tenancy check. \\
+API2 & Broken Authentication & Weak, forgeable, replayable, or unvalidated credentials. \\
+API3 & Broken Object Property Level Authorization & Mass assignment on write; excessive data exposure on read. \\
+API4 & Unrestricted Resource Consumption & No ceilings on size, rate, CPU, memory, or third-party cost. \\
+API5 & Broken Function Level Authorization & Privileged routes guarded by obscurity, not role checks. \\
+API6 & Unrestricted Access to Sensitive Business Flows & Automatable high-value flows (redeem, dispatch, purchase). \\
+API7 & Server-Side Request Forgery & Server fetches attacker-chosen URLs into private networks. \\
+API8 & Security Misconfiguration & Debug surfaces, wildcard CORS, stack traces, defaults. \\
+API9 & Improper Inventory Management & Shadow, legacy, and unpatched versions still routable. \\
+API10 & Unsafe Consumption of APIs & Third-party responses trusted without validation. \\
+\bottomrule
+\end{tabularx}
+\caption{OWASP API Security Top 10 (2023)~\cite{owaspapisecurity}: mechanism
+summary. Every row is executable in this chapter's exploit suite.}
+\label{tab:ch16-owasp-map}
+\end{table}
+
+\subsection{API1:2023 --- Broken Object Level Authorization (BOLA/IDOR)}
+\label{sec:ch16-api1}
+
+\textbf{Mechanism.} The endpoint resolves an object identifier from the path
+or body (\texttt{/v1/robots/1002}) and returns or mutates the object after
+checking \emph{that} the caller is authenticated but not \emph{whether} the
+caller may touch this object. Authorization, if it exists at all, lives at
+the route level; the per-object decision is missing. Sequential or
+predictable identifiers turn the flaw into bulk enumeration.
+
+\textbf{Exploit narrative.} An attacker at Northwind Robotics captures their
+own fleet app's traffic, sees \texttt{GET /v1/robots/1001}, and changes the
+id to 1002: a competitor's robot, full record. A five-line loop from
+\texttt{id=1} to \texttt{id=90000} exfiltrates every robot in the fleet ---
+names, locations, notes, and (thanks to API3) their service keys. No
+credential is stolen; no alarm trips, because every request is a
+well-formed, authenticated \texttt{200 OK}.
+
+\textbf{Mitigation.} Make every object access carry its subject: fetch the
+record, then evaluate \texttt{guard.require\_read(record)} where the guard
+compares \texttt{record["owner\_id"]} (and \texttt{tenant\_id}) against the
+authenticated principal (Listing~\ref{lst:ch16-authz}). Two design choices
+shrink the blast radius further: unguessable identifiers (UUIDv4/UUIDv7) as
+\emph{defense in depth} --- never as the control --- and default-deny
+policies evaluated server-side on every request, including list endpoints
+(filter \emph{then} paginate; see Chapter~\ref{ch:pagination}).
+
+\textbf{Detection signal.} Per-principal object-access entropy: one subject
+reading objects owned by many distinct owners, monotonically increasing
+ids, or 4xx-then-200 sweeps. Alert on \texttt{owner\_id != sub} successes,
+not on failures alone --- the failures are the attacker's rehearsal.
+
+\subsection{API2:2023 --- Broken Authentication}
+\label{sec:ch16-api2}
+
+\textbf{Mechanism.} Anything that lets a caller become someone else without
+their credential: unsigned or unverified tokens (our teaching app's
+base64 ``tokens''), acceptance of \texttt{alg=none} or RS256$\to$HS256
+confusion, missing expiry checks, weak password reset flows, credential
+stuffing without throttling, or hardcoded master keys shipped in the binary.
+
+\textbf{Exploit narrative.} The attacker base64-encodes
+\texttt{user:mallory} --- or reads the hardcoded master key
+\texttt{sk\_test\_DEMO\_masterkey\_invalid} out of a leaked debug endpoint
+--- and the API obligingly becomes anyone. No brute force required; the
+protocol itself is the vulnerability.
+
+\textbf{Mitigation.} Adopt the validation pipeline of
+Section~\ref{sec:ch16-tokenpipeline} verbatim: asymmetric signatures
+(RS256/ES256), an algorithm allow-list, \texttt{kid}-keyed JWKS resolution,
+mandatory \texttt{iss}/\texttt{aud}/\texttt{exp}, short token lifetimes,
+and refresh rotation. Rate-limit and lock out authentication endpoints
+(Chapter~\ref{ch:rate_limiting}); hash stored secrets with a password KDF;
+and scan the repo so a master key can never reach production
+(Section~\ref{sec:ch16-secrets}).
+
+\textbf{Detection signal.} Sudden 401 spikes (credential stuffing), one IP
+cycling many subjects, tokens with unexpected \texttt{kid} or \texttt{alg}
+values arriving at all, and any successful auth whose token predates the
+latest key rotation.
+
+\subsection{API3:2023 --- Broken Object Property Level Authorization}
+\label{sec:ch16-api3}
+
+\textbf{Mechanism.} Two halves of one flaw. On write, \emph{mass
+assignment}: the handler binds the request body directly onto the model
+(\texttt{record.update(patch)}), so clients can set server-owned fields ---
+\texttt{owner\_id}, \texttt{role}, \texttt{is\_admin}, \texttt{price}. On
+read, \emph{excessive data exposure}: the endpoint serializes the internal
+model wholesale and relies on the client to hide fields, so
+\texttt{service\_key} and internal notes ride along in every 200.
+
+\textbf{Exploit narrative.} The attacker sends
+\texttt{PATCH /v1/robots/1001 \{"owner\_id": "mallory"\}} and now owns the
+robot; a follow-up \texttt{GET} conveniently includes the robot's service
+key, harvested for lateral movement. Both directions come from the same
+root cause: the wire schema was never distinguished from the storage schema.
+
+\textbf{Mitigation.} Explicit contracts both ways. On write: a request model
+with \texttt{extra="forbid"} (Pydantic~v2~\cite{pydanticdocs}) so unknown
+fields are 422 before logic runs, \emph{plus} a role-keyed write policy
+(\texttt{ROBOT\_WRITE\_POLICY}) so even known fields require the role; then
+re-assert invariants (\texttt{id}, \texttt{owner\_id}, \texttt{tenant\_id})
+from the stored record. On read: serialize through a role-keyed field
+filter (\texttt{filter\_fields}); the response is a projection, never the
+row. Section~\ref{sec:ch16-code} implements both.
+
+\textbf{Detection signal.} 422 spikes with unknown-field errors (someone is
+probing the schema), patch bodies containing server-owned field names in
+logs, and response-size anomalies on read endpoints.
+
+\subsection{API4:2023 --- Unrestricted Resource Consumption}
+\label{sec:ch16-api4}
+
+\textbf{Mechanism.} Any unbounded knob: page size, simulation steps, file
+upload size, concurrency, or third-party billable calls (SMS, geocoding).
+The attacker does not need to break in; they merely need to make the service
+do $10^7$ units of work per request, or one request per second forever,
+until CPU, memory, connection pools, or the cloud bill becomes the outage.
+
+\textbf{Exploit narrative.} \texttt{POST /v1/fleet/simulate?steps=40000000}
+from a dozen free-tier accounts. Each request pins a worker for minutes;
+the pool starves; legitimate dispatch calls queue behind the bonfire. In a
+variant, the attacker enumerates \texttt{/v1/robots?limit=1000000} and lets
+serialization do the damage.
+
+\textbf{Mitigation.} Ceilings at the schema layer
+(\texttt{Query(le=10\_000)}), body-size limits at the edge, per-principal
+and global rate limits with \texttt{429}/\texttt{Retry-After}
+(Chapter~\ref{ch:rate_limiting}), timeouts on every outbound call, and
+cost-weighted budgets for billable third-party calls. Reject early and
+cheaply: a 422 computed from the query string costs microseconds.
+
+\textbf{Detection signal.} Latency and queue-depth percentiles (p95/p99) by
+endpoint, per-principal work-unit totals, and 4xx/429 rate anomalies ---
+the attacker's probing phase is visible before the denial of service is.
+
+\subsection{API5:2023 --- Broken Function Level Authorization}
+\label{sec:ch16-api5}
+
+\textbf{Mechanism.} Administrative or privileged functions
+(\texttt{/v1/admin/users}, \texttt{/internal/export}) protected by nothing
+but the assumption that only admins know the URL --- or by a front-end that
+hides the button while the route stays open. Group/role checks are missing
+or derived from client-supplied claims.
+
+\textbf{Exploit narrative.} The attacker's ordinary operator token calls
+\texttt{GET /v1/admin/users}; the server checks that \emph{a} user exists,
+never \emph{which} role, and returns the directory. From there: targeted
+phishing, password-reset abuse, and role mining.
+
+\textbf{Mitigation.} Function-level checks in the dependency layer, not by
+convention: \texttt{require\_scope("admin:users")} \emph{and} a role check,
+default-deny on every non-public route, and denial tests in CI for every
+privileged route with every non-privileged role. Obscurity is not a
+control; route tables are public knowledge the day the OpenAPI spec leaks.
+
+\textbf{Detection signal.} 403s on admin routes clustered per subject
+(probing), successful admin calls from principals outside the admin group
+(alarm, not log line), and drift between the route table and the role
+matrix.
+
+\subsection{API6:2023 --- Unrestricted Access to Sensitive Business Flows}
+\label{sec:ch16-api6}
+
+\textbf{Mechanism.} The flow works exactly as designed --- redemption,
+dispatch, purchase, password reset --- but nothing limits \emph{how often}
+or \emph{by how many identities} it can be driven. The vulnerability is
+economic: the legitimate flow, automated, at scale.
+
+\textbf{Exploit narrative.} Northwind launches
+\texttt{POST /v1/promo/redeem} with code \texttt{NWR-LAUNCH}. A reseller
+scripts twelve redemptions per second across two hundred free accounts; the
+entire campaign budget is gone in ninety seconds, and every request was a
+valid, authenticated, schema-conformant call.
+
+\textbf{Mitigation.} Velocity limits per principal \emph{and} per flow
+(token bucket, Chapter~\ref{ch:rate_limiting}), device fingerprinting and
+proof-of-work or CAPTCHA on unauthenticated flows, one-time idempotency
+keys where semantics allow (Chapter~\ref{ch:idempotency}), and business
+invariants as code: ``one welcome bonus per verified identity'' is a
+constraint the system must enforce, not a hope.
+
+\textbf{Detection signal.} Flow-level funnel anomalies: redemption rate by
+principal, by IP ASN, by account age; bursts that track campaign launches;
+success rates far above the human baseline.
+
+\subsection{API7:2023 --- Server-Side Request Forgery (SSRF)}
+\label{sec:ch16-api7}
+
+\textbf{Mechanism.} The server fetches a caller-influenced URL ---
+webhooks, ``fetch favicon'', diagnostics pings, PDF-from-URL --- and the
+attacker aims it inward: \texttt{http://169.254.169.254/latest/meta-data}
+(cloud instance credentials), \texttt{http://inventory.internal.nwr/}, or a
+redirect chain that starts at an allowed host and ends inside the network.
+
+\textbf{Exploit narrative.} The attacker posts a JSON body whose
+\texttt{url} field names \texttt{http://169.254.169.254/}\allowbreak
+\texttt{latest/meta-data} to the diagnostics endpoint and receives the
+fleet-worker IAM credentials in the response body. When the team adds a naive ``block 169.254.*'' string check,
+the attacker switches to a redirect: an allowed shortener host that 302s to
+the metadata endpoint --- most naive fetchers follow redirects blindly.
+
+\textbf{Mitigation.} Defense in depth, each layer independently sufficient
+(Section~\ref{sec:ch16-ssrf-defense}): scheme allow-list, exact host
+allow-list, port restriction, DNS resolution with private/link-local range
+rejection \emph{before} connecting (defeats DNS rebinding), redirect
+re-validation per hop, and response size/type caps. Egress firewalling at
+the platform layer makes the application bug survivable.
+
+\textbf{Detection signal.} Outbound destinations by host histogram (a
+diagnostics feature has a tiny, stable destination set); any egress to
+link-local or RFC~1918 space from application pods; 302-chasing in egress
+logs.
+
+\subsection{API8:2023 --- Security Misconfiguration}
+\label{sec:ch16-api8}
+
+\textbf{Mechanism.} Everything that is ``on'' that should be ``off'':
+\texttt{/v1/debug/config} in production, stack traces in 500s, wildcard
+CORS with credentials, directory listing, default credentials, permissive
+TLS versions, unpatched framework CVEs, open cloud storage buckets.
+Misconfiguration is the compost heap where the other nine items grow.
+
+\textbf{Exploit narrative.} The attacker requests \texttt{/v1/debug/config}
+--- linked from a two-year-old internal wiki page --- and receives the
+master API key and the database DSN. Alternatively they trigger a 500 and
+read the traceback: absolute paths, dependency versions, ORM internals ---
+a free reconnaissance report.
+
+\textbf{Mitigation.} Hardened defaults as code: debug surfaces compiled out
+of production builds (not merely ``unlinked''), opaque 500s with the detail
+in server logs, exact-origin CORS, secure response headers on every route
+(Section~\ref{sec:ch16-response}), pinned and scanned dependencies, and a
+repeatable environment build so ``it was only staging'' cannot drift into
+production.
+
+\textbf{Detection signal.} Internet scan traffic hitting \texttt{/debug},
+\texttt{/actuator}, \texttt{/.env}; response-header audits in CI; config
+drift alerts between declared and observed posture.
+
+\subsection{API9:2023 --- Improper Inventory Management}
+\label{sec:ch16-api9}
+
+\textbf{Mechanism.} APIs you forgot you run: \texttt{/v0/robots} from 2023
+still routable, a shadow endpoint that never entered the spec, a staging
+deployment reachable from the internet, third-party integrations nobody
+owns. Every forgotten surface runs forgotten --- meaning absent ---
+controls.
+
+\textbf{Exploit narrative.} The attacker guesses \texttt{/v0/robots} (or
+finds it in an archived client SDK) and gets the entire fleet, no
+authentication --- v0 predates the auth gateway migration. The hardened v1
+is irrelevant; the attacker shops where the lights are off.
+
+\textbf{Mitigation.} Inventory as an operational artifact: a single source
+of truth for deployed versions and routes (generated from the OpenAPI spec,
+Chapter~\ref{ch:lifecycle}), sunset headers and enforced end-of-life for
+every version (Chapter~\ref{ch:versioning}), gateways that default-deny
+routes not in the inventory, and documented data-flow for every third-party
+integration.
+
+\textbf{Detection signal.} Requests to routes absent from the inventory
+(gateway-level diff), traffic share by API version (nonzero v0 traffic
+\emph{is} the alert), and certificate/DNS enumeration of your own estate.
+
+\subsection{API10:2023 --- Unsafe Consumption of APIs}
+\label{sec:ch16-api10}
+
+\textbf{Mechanism.} The trust boundary you forgot is the one facing your
+\emph{providers}: upstream responses deserialized without schema
+validation, upstream redirects followed into internal space, upstream
+payloads merged into your models, upstream ``errors'' trusted as success.
+Third parties get breached, misconfigured, or merely sloppy; your parser
+inherits all three.
+
+\textbf{Exploit narrative.} The fleet-enrichment job merges whatever the
+mapping partner returns into the robot record. A compromised (or simply
+hostile) partner returns \texttt{\{"maintenance\_mode": true\}} and the
+fleet quietly parks itself. No credential was stolen; the trust was the
+exploit.
+
+\textbf{Mitigation.} Treat upstream output like user input: parse against
+an explicit schema with \texttt{extra="ignore"} (or \texttt{"forbid"}),
+copy only vetted fields into domain objects, cap sizes and timeouts, never
+follow upstream-supplied URLs without the SSRF gauntlet, and record
+upstream provenance for audits. Evaluate third parties' security posture as
+part of procurement --- their incident is your incident.
+
+\textbf{Detection signal.} Schema-validation failures on upstream payloads
+(a spike means compromise or contract drift), unexpected fields in upstream
+responses, and behavioral diffs after partner releases.
+
+\subsection{Server-Side OAuth 2.0 \& OIDC: The Token Validation Pipeline}
+\label{sec:ch16-tokenpipeline}
+
+Chapter~\ref{ch:client_security} treated tokens as a client-side possession
+problem. Here the shoe is on the other foot: you are the resource server,
+and every arriving bearer token is an accusation you must verify. The
+verification order is itself a security property --- claim inspection before
+signature verification is how \texttt{alg=none} and key-confusion bugs
+happen. Figure~\ref{fig:ch16-tokenseq} shows the pipeline that
+Listing~\ref{lst:ch16-tokenvalidation} implements.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % ---- lifelines ----
+  \node[flowstep] (c) at (0,0) {\textbf{Client}};
+  \node[flowstep] (m) at (5.2,0) {\textbf{AuthZ middleware}};
+  \node[flowstep] (j) at (10.4,0) {\textbf{JWKS fixture / IdP}};
+  \foreach \n in {c, m, j}{
+    \draw[dashed, packtgray] (\n.south) -- ++(0,-7.4);
+  }
+  % ---- messages ----
+  \draw[->, thick] ($(c.south)+(0,-0.5)$) -- ($(m.south)+(0,-0.5)$)
+    node[midway, above, note] {1. GET /v1/fleet/commands, Bearer token};
+  \draw[->, thick] ($(m.south)+(0,-1.2)$) -- ($(m.south)+(0.7,-1.2)$)
+    node[right, note, text width=4.6cm] {2. parse: 3 segments, header
+      \texttt{alg} in allow-list, \texttt{kid} present};
+  \draw[->, thick] ($(m.south)+(0,-1.9)$) -- ($(j.south)+(0,-1.9)$)
+    node[midway, above, note] {3. resolve key by \texttt{kid} (cached)};
+  \draw[->, thick, packtgray] ($(j.south)+(0,-2.5)$) -- ($(m.south)+(0,-2.5)$)
+    node[midway, above, note] {4. verification key (else: 401)};
+  \draw[->, thick] ($(m.south)+(0,-3.2)$) -- ($(m.south)+(0.7,-3.2)$)
+    node[right, note, text width=4.6cm] {5. verify signature;
+      \texttt{iss}, \texttt{aud}, \texttt{exp}, \texttt{nbf} with leeway};
+  \draw[->, thick] ($(m.south)+(0,-4.0)$) -- ($(m.south)+(0.7,-4.0)$)
+    node[right, note, text width=4.6cm] {6. map claims $\to$ Principal
+      (sub, tenant, scopes, roles)};
+  \draw[->, thick] ($(m.south)+(0,-4.8)$) -- ($(m.south)+(0.7,-4.8)$)
+    node[right, note, text width=4.6cm] {7. enforce scope for this
+      function, then object, then properties};
+  \draw[->, thick, darkblue] ($(m.south)+(0,-5.6)$) -- ($(c.south)+(0,-5.6)$)
+    node[midway, above, note] {8. 200 (or 401 / 403 with
+      \texttt{WWW-Authenticate})};
+  \node[note, text width=10.5cm] at (5.2,-8.6)
+    {Any failure before step 6 discards the token without reading claims.
+     ``Trust, then verify'' inverted is ``verify, then trust.''};
+\end{tikzpicture}
+\caption{Token validation sequence. Steps 2--5 are \emph{authentication};
+only after them may claims be read; step 7 is \emph{authorization} and is a
+separate decision per function, object, and property.}
+\label{fig:ch16-tokenseq}
+\end{figure}
+
+\subsubsection{Scope Design: Coarse versus Fine}
+
+Scopes are the function-level authorization vocabulary of OAuth
+\cite{rfc6749}. The design spectrum runs from \emph{coarse}
+(\texttt{read}/\texttt{write}) through \emph{resource-scoped}
+(\texttt{fleet:read}, \texttt{fleet:command}) to \emph{fine-grained}
+(\texttt{robots:1001:command}). Coarse scopes keep tokens small and policies
+centralized but over-privilege every holder; ultra-fine scopes push
+object-level decisions into the token issuer, which explodes token count
+and still cannot express \emph{dynamic} ownership (the issuer does not know
+who bought robot 1002 yesterday). The pragmatic middle, used throughout
+this chapter:
+
+\begin{itemize}[itemsep=0.2em]
+  \item Scopes express \emph{capability classes}:
+        \texttt{fleet:read}, \texttt{fleet:write}, \texttt{fleet:command},
+        \texttt{promo:redeem}, \texttt{admin:users}.
+  \item Roles express \emph{organizational standing}: \texttt{owner},
+        \texttt{technician}, \texttt{admin}.
+  \item Object and property decisions stay in the resource server's guard
+        layer (Listing~\ref{lst:ch16-authz}), which knows the data.
+\end{itemize}
+
+\subsubsection{Claims-Based Authorization}
+
+Once --- and only once --- the token verifies, claims become your typed
+principal: \texttt{sub} (subject), \texttt{tenant} (tenancy boundary),
+\texttt{scope} (capability set), \texttt{roles}. Treat claim parsing as
+untrusted-input handling: type-check every claim, reject malformed ones
+with 401, and never accept a claim the IdP did not promise to control
+(user-editable profile fields are not authorization claims). The
+\texttt{Principal} dataclass in Listing~\ref{lst:ch16-tokenvalidation}
+freezes this mapping: downstream code sees immutable, validated facts, not
+a raw JWT payload dict.
+
+\subsubsection{Audience Restriction and Token Exchange}
+
+A token is a letter addressed to someone. \texttt{aud} is the address: the
+fleet API must reject tokens issued for the billing API even when both are
+signed by the same IdP, or a low-value integration becomes a lateral-movement
+vehicle. For service-to-service calls, prefer \emph{token exchange}
+(RFC~8693 semantics): service A exchanges the inbound user token for a new
+token with audience \texttt{service-b} and the \emph{minimum} scopes B
+needs --- preserving the user's identity for audit (the \texttt{act} claim)
+while enforcing least privilege per hop. Impersonation (acting \emph{as}
+the user) versus delegation (acting \emph{on behalf of}, visibly) is a
+deliberate audit choice; default to delegation.
+
+\begin{warningbox}
+\textbf{The five ways token validation goes wrong in production:}
+(1)~reading claims before verifying the signature; (2)~accepting
+\texttt{alg} from the token instead of a server-side allow-list;
+(3)~fetching JWKS from a URL \emph{inside the token} (\texttt{jku}
+injection) rather than a pinned issuer location; (4)~skipping
+\texttt{aud} because ``we only have one API today''; (5)~treating expiry as
+the only temporal check while ignoring \texttt{nbf} and clock skew in the
+other direction. Listing~\ref{lst:ch16-tokenvalidation} closes all five;
+its tests attack all five.
+\end{warningbox}
+
+\subsection{mTLS for Service Identity}
+\label{sec:ch16-mtls}
+
+Bearer tokens answer ``what may this call do''; mTLS answers ``what
+\emph{is} this workload'' --- at the transport layer, before a byte of
+application data flows~\cite{rfc8446}. In a mutual TLS handshake the server
+sends \texttt{CertificateRequest} after its own certificate message; the
+client responds with its certificate chain and a
+\texttt{CertificateVerify} signature over the handshake transcript, proving
+possession of the private key. Both sides authenticate; a stolen token
+without the client certificate is useless at the socket.
+
+\textbf{Operational realities.} Certificate \emph{rotation} is the whole
+game: short-lived workload certificates (hours, not years) issued by an
+internal CA, overlapped trust bundles so old and new chains verify during
+rollover, and automated renewal --- a manually rotated certificate fleet is
+a future outage. \textbf{SPIFFE} standardizes the workload identity
+document (a SPIFFE ID like
+\texttt{spiffe://nwr.example/ns/fleet/sa/dispatcher} carried in a X.509 SVID
+or JWT-SVID); \textbf{SPIRE} is the runtime that attests workloads
+(node/process attestation) and delivers SVIDs to them. The combination
+removes the ``where does the bootstrap secret live'' problem that plagues
+token-based service identity.
+
+\textbf{When mTLS, when tokens.} Use mTLS for \emph{machine} identity on
+the wire: mesh-internal service calls, gateway-to-service, anywhere a sidecar
+or platform can own certificate lifecycle. Use bearer tokens for
+\emph{user/delegated} identity and cross-boundary calls where semantics
+(scopes, audience, expiry) must travel with the request. Mature platforms
+run both: mTLS authenticates the workload channel; the token layered inside
+it carries the end-user context --- and neither is accepted as a substitute
+for the other.
+
+\subsection{Threat Modeling APIs}
+\label{sec:ch16-threatmodel}
+
+Threat modeling converts paranoia into a checklist. STRIDE classifies
+threats by effect --- Spoofing, Tampering, Repudiation, Information
+Disclosure, Denial of Service, Elevation of Privilege --- and applying it
+\emph{per endpoint} keeps the analysis concrete: each route is a small
+system with inputs, outputs, state changes, and an actor model.
+Table~\ref{tab:ch16-stride} is the worked example for
+\texttt{PATCH /v1/robots/\{id\}}; Listing~\ref{lst:ch16-stride} generates
+the skeleton mechanically from an OpenAPI document so the worksheet cannot
+drift from the shipped surface.
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{STRIDE} & \textbf{Threat to \texttt{PATCH /v1/robots/\{id\}}} & \textbf{Mitigation (this chapter)} \\
+\midrule
+S & Forged or replayed bearer token. & RS256 + JWKS + iss/aud/exp pipeline. \\
+T & Mass assignment of \texttt{owner\_id}, \texttt{service\_key}. & \texttt{extra="forbid"} schema + role-keyed write policy. \\
+R & Owner denies changing robot state. & Audit log: actor, before/after, request id. \\
+I & Response leaks secret fields of the object. & Role-keyed read projection; no raw-row serialization. \\
+D & Patch floods; oversized bodies. & Body-size caps; per-principal token bucket. \\
+E & Operator token calling admin functions. & Function-level scope + role checks, default-deny. \\
+\bottomrule
+\end{tabularx}
+\caption{STRIDE per endpoint: worked row set for the robot patch route.
+Every mitigations cell names an executable control, not a policy
+aspiration.}
+\label{tab:ch16-stride}
+\end{table}
+
+\textbf{Attack trees} complement STRIDE's breadth with depth: root goal
+(``read another tenant's robot record''), intermediate nodes (``obtain a
+valid token'' OR ``bypass object check'' OR ``read via legacy v0''), leaves
+mapped to concrete controls. The tree's value is the OR-branches --- they
+force you to close \emph{every} path, not the fashionable one.
+\textbf{Abuse cases} write the attacker's user story in the same backlog
+grammar as features: ``As an attacker, I enumerate sequential robot ids so
+that I can map the entire fleet,'' with acceptance criteria inverted into
+security requirements.
+
+Figure~\ref{fig:ch16-stridemap} maps the same six categories onto the
+sample fleet API's attack surface: every arrow into a component is a place
+where a STRIDE category can materialize, and the labels carry the OWASP
+item that operationalizes it.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % ---- components ----
+  \node[flowstep] (attacker) at (0,0) {\textbf{Attacker}};
+  \node[flowstep] (edge) at (4.3,1.6) {\textbf{Edge / gateway}};
+  \node[flowstep] (auth) at (4.3,-1.6) {\textbf{AuthN/AuthZ layer}};
+  \node[flowstep] (api) at (8.6,0) {\textbf{Fleet API}};
+  \node[flowstep] (db) at (12.4,1.6) {\textbf{Data store}};
+  \node[flowstep] (up) at (12.4,-1.6) {\textbf{Upstream APIs}\\[-2pt]\footnotesize partner / cloud};
+  % ---- flows with STRIDE+OWASP labels ----
+  \draw[->, thick] (attacker) -- (edge)
+    node[midway, above, note] {S: forged tokens (API2)};
+  \draw[->, thick] (attacker) -- (auth)
+    node[midway, below, note] {E: privilege probes (API5)};
+  \draw[->, thick] (edge) -- (api)
+    node[midway, above, note] {T: mass assignment (API3)};
+  \draw[->, thick] (auth) -- (api)
+    node[midway, below, note] {I: id enumeration (API1)};
+  \draw[->, thick] (api) -- (db)
+    node[midway, above, note] {T: injection};
+  \draw[->, thick] (api) -- (up)
+    node[midway, below, note] {I/E: SSRF; T: unsafe trust (API7/10)};
+  \draw[->, thick, packtorange, dashed] (api.north) .. controls (8.6,2.9) and (2.2,2.9) .. (attacker.north)
+    node[midway, above, note] {I: excessive exposure, debug surfaces (API3/8)};
+  \draw[->, thick, packtorange, dashed] (edge.west) .. controls (2.6,1.0) .. (attacker.north east)
+    node[midway, below, note, text width=3.4cm] {D: unbounded work (API4/6)};
+  \node[note, text width=13.2cm] at (6.4,-3.4)
+    {R (repudiation) is drawn at every mutating edge: without an audit
+     record --- actor, action, object, before/after --- each arrow is also
+     a way to act deniably.};
+\end{tikzpicture}
+\caption{STRIDE attack-surface map for the Northwind Robotics fleet API.
+Edges are labeled by the STRIDE category they expose and the OWASP item
+that weaponizes it.}
+\label{fig:ch16-stridemap}
+\end{figure}
+
+\textbf{Security requirements as acceptance criteria} is where modeling
+pays rent. Each abuse case lands in the definition of done as an executable
+assertion: \emph{``Given alice's token, when she requests robot 1002, then
+the response is 403''} is not a sentence in a wiki --- in this chapter it is
+\texttt{test\_api1\_bola\_cross\_owner\_read}. The exploit suite
+(Section~\ref{sec:ch16-code}) is the acceptance-criteria document, compiled.
+
+\begin{examplebox}
+\textbf{Abuse case to acceptance criterion, in one move.}\\
+\emph{Abuse case:} ``As a reseller bot, I redeem the launch promo
+thousands of times across fresh accounts to drain the campaign budget.''\\
+\emph{Acceptance criterion:} \texttt{test\_api6\_promo\_redemption\_farming}
+--- twelve consecutive redemptions from one principal must yield at most
+three 200s and a 429 with \texttt{Retry-After}. The product owner can read
+it; the CI runner can execute it; the attacker cannot argue with it.
+\end{examplebox}
+
+\subsection{Injection and Input Attacks}
+\label{sec:ch16-injection}
+
+APIs concentrate injection risk because every parameter is remote input by
+design. The taxonomy is one idea with four costumes: a string the caller
+controls is later interpreted as \emph{code} by some engine.
+
+\textbf{SQL injection} survives the ORM era through raw fragments:
+\texttt{f"WHERE owner = '\{owner\}'"}, ``just this once'' report queries,
+and ORM escape hatches. The defense is non-negotiable: parameterized
+queries, always; where identifiers (table/column names) must be dynamic,
+map them through a server-side allow-list --- never interpolate.
+\textbf{NoSQL injection} trades quotes for operators: a JSON body
+\texttt{\{"username": \{"\$gt": ""\}\}} turns a login lookup into an
+always-true match when the driver accepts operator objects from the wire.
+The defense is schema validation that pins \emph{types}, not just fields
+(Pydantic's strict types~\cite{pydanticdocs}), and rejecting operator
+objects at the boundary. \textbf{Command injection} appears in ``run this
+diagnostic'' features: any path from request data to \texttt{os.system} or
+\texttt{subprocess} with \texttt{shell=True} is a pre-existing breach;
+pass argument lists, never strings. \textbf{Server-side template injection}
+hides in features that render caller-controlled strings through a template
+engine (email subjects, report headers): \texttt{\{\{7*7\}\}} returning 49
+is the canary; the fix is to render caller data as \emph{data}, never as
+template source.
+
+\textbf{Canonicalization pitfalls} are the filter-bypass division. Unicode
+normalization folds visually distinct identifiers together
+(NFKC-collapse), so an allow-list on \texttt{username} is bypassed by a
+confusable; percent-decoding twice (\texttt{\%252e\%252e\%252f} $\to$
+\texttt{../}) walks straight past a single-decode path check; and
+overlong UTF-8 encodings historically smuggled \texttt{/} past naive
+scanners. Rules: decode \emph{once}, validate on the canonical form,
+compare with normalization you chose deliberately, and reject ---
+never ``clean'' --- input that fails.
+
+\textbf{Path traversal via IDs} is the API-shaped cousin: a download
+endpoint keyed by filename (\texttt{/v1/firmware/\{name\}}) that joins the
+id onto a base directory. The defense is a strict identifier grammar
+(\texttt{[A-Za-z0-9-]\{1,64\}}), \texttt{Path.resolve()} plus a
+containment check against the base directory, and --- better ---
+indirection: ids that are keys into a manifest, not filenames at all.
+
+\subsection{SSRF Defense-in-Depth}
+\label{sec:ch16-ssrf-defense}
+
+SSRF deserves its own blueprint because single-layer defenses keep falling.
+The layers, all implemented in Listing~\ref{lst:ch16-ssrf}:
+
+\begin{enumerate}[itemsep=0.3em]
+  \item \textbf{Scheme allow-list.} \texttt{https} (plus \texttt{http} only
+        where the lab demands it). This alone kills \texttt{file://},
+        \texttt{gopher://}, \texttt{dict://}.
+  \item \textbf{Exact host allow-list.} Not suffix matching ---
+        \texttt{example.com.evil.example} ends with your string too ---
+        and no raw IP literals or userinfo (\texttt{user@host} tricks).
+  \item \textbf{Port restriction.} 80/443/8443 only; the metadata endpoint
+        speaks HTTP on 80 but internal admin panels speak 8080/9000.
+  \item \textbf{DNS pinning.} Resolve the host yourself, reject any answer
+        in private/loopback/link-local ranges, and connect to the validated
+        address. This closes the \emph{DNS rebinding} race, where the name
+        resolves publicly at validation time and privately at connect time
+        (TOCTOU). The fetcher validates resolution and never hands the raw
+        hostname back to a resolver it does not control.
+  \item \textbf{Redirect re-validation.} \texttt{follow\_redirects=False};
+        every 30x target goes back through layers 1--4. The allowed
+        shortener that 302s to \texttt{169.254.169.254} dies here.
+  \item \textbf{Response caps.} Size and content-type limits so the fetch
+        cannot become a memory-amplification or parser-confusion channel.
+  \item \textbf{Platform egress.} Network policy at the cluster/firewall
+        layer denying pods any route to \texttt{169.254.169.254} and
+        RFC~1918 space: the bug becomes survivable even when code fails.
+\end{enumerate}
+
+\subsection{Response Security}
+\label{sec:ch16-response}
+
+Security is also what you \emph{return}. Excessive data exposure (API3's
+read half) is the headline item --- serialize projections, never rows.
+Beyond the body:
+
+\textbf{Security headers.} \texttt{X-Content-Type-Options: nosniff} blocks
+MIME confusion on error payloads; \texttt{X-Frame-Options: DENY} and a
+\texttt{frame-ancestors} CSP directive stop clickjacking of any HTML you
+serve (Swagger UI included --- give docs a real CSP:
+\texttt{default-src 'self'} rather than disabling CSP for the docs route);
+\texttt{Cache-Control: no-store} keeps authenticated responses out of
+shared caches and back buttons; \texttt{Strict-Transport-Security} once TLS
+is universal. The hardened app sets these in one middleware
+(Listing~\ref{lst:ch16-hardened}).
+
+\textbf{CORS rigor.} CORS is a \emph{browser-enforced relaxation}
+mechanism, not server security --- but misconfigured, it deputizes every
+browser to attack you. Exact origin lists only; \texttt{*} never combines
+with credentials (browsers refuse, and Starlette will not emit the pair
+--- but ``reflect the Origin header'' hand-rolled middlewares reintroduce
+it silently); keep \texttt{allow\_methods} and \texttt{allow\_headers}
+minimal; and remember CORS does nothing at all for non-browser clients, so
+it is never a substitute for authentication.
+
+\textbf{CSRF for cookie-based APIs.} If your API authenticates with
+cookies (first-party SPAs), browsers attach them cross-site automatically:
+\texttt{SameSite=Lax} (or \texttt{Strict}) is the baseline; defense in
+depth adds a synchronizer token header or the double-submit pattern for
+state-changing methods. Bearer-token APIs in \texttt{Authorization}
+headers are CSRF-immune by construction --- the browser will not attach
+them cross-origin --- one reason tokens displaced cookies for API auth.
+
+\subsection{Secrets Management}
+\label{sec:ch16-secrets}
+
+Secrets are radioactive inventory: their half-life is the time to the next
+leak. The operational pattern: a \emph{vault} (HashiCorp Vault, cloud KMS,
+or a secrets manager) holds the secret; workloads receive short-lived,
+scoped credentials at runtime via their platform identity (SPIFFE ID, IAM
+role); \emph{rotation} is a scheduled non-event, not an incident ritual ---
+dual-credential windows so old and new both verify during rollout.
+\textbf{No-secrets-in-code} is a policy with teeth only when enforced
+mechanically: \texttt{gitleaks}-style scanning in pre-commit \emph{and} CI
+(history included --- a deleted commit still contains the key), with
+detected secrets treated as compromised and rotated, never merely removed.
+Log hygiene is part of the same discipline: redact \texttt{Authorization}
+headers and token-shaped strings at the logging boundary; Chapter~5's
+client-side rules (Chapter~\ref{ch:client_security}) apply verbatim on the
+server. And version-pin your security dependencies --- an unpatched JWT
+library is an unpatched authentication layer
+(Section~\ref{sec:ch16-pitfalls}).
+
+%% ----------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch16-code}
+
+All listings live under \texttt{code\textbackslash{}ch16\textbackslash{}},
+are Python~3.11+, fully typed, and run offline: \texttt{fake\_network.py}
+replaces the internet, \texttt{jwks\_fixture.py} replaces the identity
+provider. Run everything with:
+
+\begin{minted}{text}
+cd code\ch16
+python -m pip install -r requirements.txt
+python -m pytest -q                    # 44 tests, all green
+python -m pytest test_exploit_suite.py -q --target=vulnerable   # 10 REDS
+python -m pytest test_exploit_suite.py -q --target=hardened     # 10 GREENS
+\end{minted}
+
+\begin{warningbox}
+\textbf{Listing~\ref{lst:ch16-vulnerable} is deliberately insecure teaching
+material.} It exists to be exploited by
+Listing~\ref{lst:ch16-exploitsuite} and then retired. Never deploy it,
+never copy patterns out of it, and never let it listen on a real network
+interface. Every flaw is fenced with a comment naming its OWASP item.
+\end{warningbox}
+
+\subsection{Listing 16.1 --- Simulated Network (\texttt{fake\_network.py})}
+\label{lst:ch16-fakenet}
+
+Every SSRF and unsafe-consumption exploit needs an internet; the lab
+supplies a deterministic one. The host table models the three destinations
+that matter: an internal service, the cloud metadata endpoint, and an
+allowed partner --- plus one redirect that turns an allowed host into a
+metadata fetch.
+
+\begin{minted}{python}
+"""Simulated network for offline SSRF/API10 teaching.
+
+In production, ``httpx`` sockets reach the real internet. In this workbook
+every outbound request is routed through a deterministic in-process host
+table so the exploit suite runs with zero network access. The table models
+the hosts that matter for the security story: an internal-only inventory
+service, the cloud instance-metadata endpoint, and an allowed partner API.
+"""
+
+from __future__ import annotations
+
+import httpx
+
+# Hosts that exist inside the simulated world. RFC 1918 / link-local /
+# loopback addresses stand in for Northwind Robotics' private network.
+HOST_TABLE: dict[str, tuple[int, dict[str, str], str]] = {
+    "inventory.internal.nwr": (
+        200,
+        {"content-type": "application/json"},
+        '{"service": "inventory", "db_dsn": "postgres://svc:FAKE_PASS_invalid@db.internal:5432/inv"}',
+    ),
+    "169.254.169.254": (
+        200,
+        {"content-type": "application/json"},
+        '{"iam": {"role": "nwr-fleet-worker", "AccessKeyId": "AKIAFAKE_INVALID",'
+        ' "SecretAccessKey": "sk_test_DEMO_9f8e7d6c5b4a3210_invalid"}}',
+    ),
+    "telemetry.partner-nwr.example": (
+        200,
+        {"content-type": "application/json"},
+        '{"firmware": "4.2.1", "channels": ["stable"]}',
+    ),
+    "untrusted.maps.example": (
+        200,
+        {"content-type": "application/json"},
+        '{"label": "Dock 7", "telemetry_channel": "beta", "maintenance_mode": true}',
+    ),
+}
+
+# One simulated redirect: the "safe-looking" shortener bounces to metadata.
+REDIRECTS: dict[str, str] = {
+    "short.partner-nwr.example": "http://169.254.169.254/latest/meta-data",
+}
+
+
+def simulated_dns(host: str) -> list[str]:
+    """Deterministic stand-in for DNS resolution."""
+    table = {
+        "inventory.internal.nwr": ["10.20.0.14"],
+        "169.254.169.254": ["169.254.169.254"],
+        "telemetry.partner-nwr.example": ["203.0.113.10"],
+        "untrusted.maps.example": ["198.51.100.77"],
+        "short.partner-nwr.example": ["203.0.113.99"],
+    }
+    return table.get(host, ["192.0.2.1"])  # TEST-NET-1 for anything unknown
+
+
+def mock_transport(request: httpx.Request) -> httpx.Response:
+    """httpx transport handler implementing the simulated network."""
+    host = request.url.host or ""
+    if host in REDIRECTS:
+        return httpx.Response(302, headers={"location": REDIRECTS[host]})
+    if host in HOST_TABLE:
+        status, headers, body = HOST_TABLE[host]
+        return httpx.Response(status, headers=headers, text=body)
+    return httpx.Response(404, text="host not found in simulated network")
+
+
+def make_client(**kwargs: object) -> httpx.Client:
+    """Build an httpx client bound to the simulated network."""
+    return httpx.Client(transport=httpx.MockTransport(mock_transport), **kwargs)  # type: ignore[arg-type]
+\end{minted}
+
+\subsection{Listing 16.2 --- Local JWKS Fixture (\texttt{jwks\_fixture.py})}
+\label{lst:ch16-jwks}
+
+The identity provider, offline. A synthetic RSA keypair (generated for this
+workbook, signing only test tokens, protecting nothing) backs a JWKS-style
+\texttt{kid} $\to$ key map, and \texttt{mint\_token} issues signed JWTs with
+injectable claims so tests can forge issuers, audiences, key ids, and
+expired lifetimes on demand.
+
+\begin{minted}{python}
+"""Local JWKS-style fixture: synthetic RSA keys + token minting for tests.
+
+The key below is a SYNTHETIC teaching fixture generated for this workbook.
+It protects nothing, signs only test tokens, and must never be deployed.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+import jwt
+
+ISSUER = "https://id.northwind-robotics.example"
+AUDIENCE = "nwr-fleet-api"
+KEY_ID = "nwr-demo-2026-01"
+
+SYNTHETIC_PRIVATE_PEM = """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCh/+W8y3oqhIdS
+2pI3BHb1vJwcD1T3StnITyGpBxlZGh39711Ql5g1ie0FMbTVEad1kLHDZFAAVnFa
+lWrWyEFxYLRzlZP9+zSan30hj4BRwsvIfWGO8i9f4SaUeWk+FE+JhsxETpZwPVw9
++++i0QfEIQK5Z0XY39kOlP79ewIo+TNJV6j3q0ar4sDvwVgu9K1z+LL2JHZ6PKXI
+HQ4iN9wdAMbDy0AzgEDlz+kqX8UV2o95chIh1HbH0+/XsNKPITNri/p8pSgtuHeh
+jGChkb1xi82MEC1SpnHwDuBqMZmzslMKbsplHjSPZBRwbXZRNPB+FunHOgJs4H4C
+LI1FwyqpAgMBAAECggEABmhTjb+d7I+YYKUSMnM5Qf1R+WQmhVokZLazNfcjarGh
+7Q4qKoq3HlWpwSesUjR5Y1OJTG6rzA+fOn4oHyha5PahEeShLrhgZhtCfPDVmlDy
+SX2ivbTY6IRvHQvzpzJwy5eVfcApVXV/2q3GgTHztNoPZwZC2NH7HlyzUehVzLQF
+KqFV+/3waevnx+GTEkCikO4fBHHQ6sv4MgpOhuIJTF+u6xb1uAC0zoo8bimVVd9/
+rKOK5ZbTZpKmPbgCv6NCzTDYeAv+vwpEz5qtSluiyUsUd3z6SLwL+nyCJDMdc84G
+anXuqCLxKgKPVTeM4FYdh0W0RR/9kDvL/1KE7AEazwKBgQDPe9h+QAFtnPsnWyW9
+OSM2eRUvOAKkVDLY9FYnklPeNadNywM0y/sf9MwbNFNoIb5lym/escXL0Byr4fMj
+XCLvFgxQd9YLpsU8JGTZG5WOqaPND5IL9zF85k1t9y7yP/HQrF6KLMkymh2j12gg
+IvCNLIQlYCRGFu46VoJ3DwttJwKBgQDH4VSjx7gpKmTfTxy4lq0n4k/oa8zJWQ78
+WIq3gEfJUsjksOWXqZSvgkCX+5xBWs2LwRfPJr1XOt37HyVAwWLsxblOpPNPhCq7
+tQlrE8s/9JuirMZg67Haohv65bXN9av6fiih/BiBJeiJFEA0TRSvKQa0yF6qyKs3
+oGuyQDIrrwKBgQCyvMSWlfrk+6vcjoenR7aO8aYPRFf6SlJ3VZ12f3biYSQcPvwn
+GmXedJr0AJKtjQwhUlAm7swvNLvOUlqLJo8tmbfIBkQNS4BzvAJoiXvAJ2FlgLlW
+t38ZUqh3R85YgD+HfUYAEG7Oubc48pLPxGmnpCa+r+DvxEc7WFURzZMRVwKBgH4H
+w2Gdra4vL/lqHbb6MuZCGZZ4WmDeycctYRIBTcJQc6FXNP0jDUB5BZePK+A9i/tB
+3mxcheh5krwj0E57YY/fwE8pTM1njbZbmTut+Gs0Jeo1vMQh+TvdGX1i1/asoCrK
+3337wcu1BmFgpncT3yXu3W6iJKbU7ridayqyta+7AoGAMfYURmN+K4jEoZbzA/Ap
+lVRy9JmQUzE/UtA8QcK1VvZzn6ESUNe1G9gN6cR8HNVRZi1qaSCvgZzft3e7eQ2A
+zfFTHQzFM9qTLeUlvwLFOIMMxuUBy/m4xY01vjJCiS4h/IkuKqxGbgSzUL270rGY
+8KUnb5+M+Z5JoWmaVNItxcw=
+-----END PRIVATE KEY-----"""
+
+SYNTHETIC_PUBLIC_PEM = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAof/lvMt6KoSHUtqSNwR2
+9bycHA9U90rZyE8hqQcZWRod/e9dUJeYNYntBTG01RGndZCxw2RQAFZxWpVq1shB
+cWC0c5WT/fs0mp99IY+AUcLLyH1hjvIvX+EmlHlpPhRPiYbMRE6WcD1cPfvvotEH
+xCECuWdF2N/ZDpT+/XsCKPkzSVeo96tGq+LA78FYLvStc/iy9iR2ejylyB0OIjfc
+HQDGw8tAM4BA5c/pKl/FFdqPeXISIdR2x9Pv17DSjyEza4v6fKUoLbh3oYxgoZG9
+cYvNjBAtUqZx8A7gajGZs7JTCm7KZR40j2QUcG12UTTwfhbpxzoCbOB+AiyNRcMq
+qQIDAQAB
+-----END PUBLIC KEY-----"""
+
+# JWKS-style resolution table: kid -> verification material. A real service
+# loads this from the IdP's JWKS endpoint and refreshes on unknown kid.
+JWKS: dict[str, str] = {KEY_ID: SYNTHETIC_PUBLIC_PEM}
+
+
+def mint_token(
+    subject: str,
+    scopes: list[str],
+    *,
+    audience: str = AUDIENCE,
+    issuer: str = ISSUER,
+    ttl_seconds: int = 300,
+    kid: str = KEY_ID,
+    tenant: str = "tenant-nwr",
+    now: int | None = None,
+    algorithm: str = "RS256",
+    extra: dict[str, Any] | None = None,
+) -> str:
+    """Mint a signed JWT for tests. ``now`` is injectable for determinism."""
+    issued = int(time.time()) if now is None else now
+    claims: dict[str, Any] = {
+        "iss": issuer,
+        "aud": audience,
+        "sub": subject,
+        "scope": " ".join(scopes),
+        "tenant": tenant,
+        "iat": issued,
+        "nbf": issued - 1,
+        "exp": issued + ttl_seconds,
+    }
+    if extra:
+        claims.update(extra)
+    return jwt.encode(
+        claims,
+        SYNTHETIC_PRIVATE_PEM,
+        algorithm=algorithm,
+        headers={"kid": kid},
+    )
+\end{minted}
+
+\subsection{Listing 16.3 --- The Deliberately Vulnerable API (\texttt{vulnerable\_app.py})}
+\label{lst:ch16-vulnerable}
+
+The centerpiece's dark half: every OWASP API Security Top 10 flaw seeded in
+one service, each fenced by a comment naming its item. Read it as an
+incident report written in advance --- the flaws are one or two lines each,
+which is exactly why they ship so often.
+
+\begin{minted}{python}
+"""================================================================
+INTENTIONALLY INSECURE TEACHING MATERIAL -- DO NOT DEPLOY. DO NOT IMITATE.
+================================================================
+Northwind Robotics fleet API, seeded with all ten OWASP API Security Top 10
+(2023) flaws. Every flaw is fenced with a comment naming its OWASP item.
+The hardened counterpart is hardened_app.py; the exploit suite is
+test_exploit_suite.py. All network I/O goes through fake_network.py, so the
+whole file runs offline.
+"""
+
+from __future__ import annotations
+
+import base64
+import traceback
+from typing import Any
+
+from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from fake_network import make_client
+
+# A synthetic "master key" used by the broken authenticator below.
+# OWASP API2 (hardcoded credential). Clearly fake; never a real secret.
+MASTER_KEY = "sk_test_DEMO_masterkey_invalid"
+
+USERS: dict[str, dict[str, Any]] = {
+    "alice": {"username": "alice", "role": "operator", "tenant": "tenant-nwr"},
+    "bob": {"username": "bob", "role": "operator", "tenant": "tenant-nwr"},
+    "carol": {"username": "carol", "role": "admin", "tenant": "tenant-nwr"},
+}
+
+ROBOTS: dict[int, dict[str, Any]] = {
+    1001: {
+        "id": 1001, "name": "Welder-7", "model": "NR-220", "status": "idle",
+        "battery_pct": 88, "last_seen": "2026-08-30T09:14:00Z",
+        "notes": "dock 3", "owner_id": "alice", "tenant_id": "tenant-nwr",
+        "firmware_version": "4.2.0", "service_key": "sk_test_DEMO_robot1001_invalid",
+        "service_key_last4": "1001", "maintenance_mode": False,
+        "telemetry_channel": "stable",
+    },
+    1002: {
+        "id": 1002, "name": "Lifter-2", "model": "NR-410", "status": "active",
+        "battery_pct": 61, "last_seen": "2026-08-30T09:15:00Z",
+        "notes": "bay 9", "owner_id": "bob", "tenant_id": "tenant-nwr",
+        "firmware_version": "4.1.3", "service_key": "sk_test_DEMO_robot1002_invalid",
+        "service_key_last4": "1002", "maintenance_mode": False,
+        "telemetry_channel": "stable",
+    },
+}
+
+PROMO_BALANCE = {"NWR-LAUNCH": 100}  # code -> remaining units
+
+
+# ----------------------------------------
+# OWASP API2:2023 -- Broken Authentication
+# "Tokens" are unsigned base64 of "user:<name>"; anyone can mint one for any
+# user. A hardcoded master key bypasses everything. No expiry, no signature.
+# ----------------------------------------
+def vulnerable_auth(request: Request) -> dict[str, Any]:
+    header = request.headers.get("authorization", "")
+    token = header.removeprefix("Bearer ").strip()
+    if token == MASTER_KEY:  # hardcoded backdoor credential
+        return {"username": "master", "role": "admin", "tenant": "tenant-nwr"}
+    try:
+        decoded = base64.b64decode(token).decode()
+        username = decoded.split(":", 1)[1]
+        return USERS[username]
+    except Exception:
+        # Fail-open flavoured: anonymous requests still get a context object,
+        # and several endpoints below forget to check it at all.
+        return {"username": "anonymous", "role": "none", "tenant": "tenant-nwr"}
+
+
+def forge_token(username: str) -> str:
+    """Helper used by the exploit suite: mint a 'valid' token for anyone."""
+    return base64.b64encode(f"user:{username}".encode()).decode()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="NWR Fleet API (VULNERABLE TEACHING BUILD)")
+
+    # ----------------------------------------
+    # OWASP API8:2023 -- Security Misconfiguration
+    # Wildcard CORS with credentials; stack traces returned to clients;
+    # a debug endpoint that dumps configuration including secrets.
+    # ----------------------------------------
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.exception_handler(Exception)
+    async def verbose_errors(request: Request, exc: Exception) -> JSONResponse:
+        # Leaks internals (paths, library versions) to any caller.
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(exc), "trace": traceback.format_exc()},
+        )
+
+    @app.get("/v1/debug/config")
+    def debug_config() -> dict[str, Any]:
+        return {
+            "env": "prod",
+            "master_key": MASTER_KEY,
+            "db_dsn": "postgres://svc:FAKE_PASS_invalid@db.internal:5432/fleet",
+            "flags": {"debug": True, "stack_traces": True},
+        }
+
+    # ----------------------------------------
+    # OWASP API1:2023 -- Broken Object Level Authorization
+    # OWASP API3:2023 -- Excessive Data Exposure (service_key, owner fields,
+    # tenant internals all serialized straight back).
+    # Sequential integer ids make enumeration trivial: 1001, 1002, ...
+    # ----------------------------------------
+    @app.get("/v1/robots/{robot_id}")
+    def get_robot(
+        robot_id: int, user: dict[str, Any] = Depends(vulnerable_auth)
+    ) -> dict[str, Any]:
+        # user is fetched but never checked against the object. Anyone
+        # authenticated (or 'anonymous') reads anyone's robot, secrets included.
+        return dict(ROBOTS[robot_id])
+
+    # ----------------------------------------
+    # OWASP API3:2023 -- Broken Object Property Level Authorization
+    # (mass assignment): the request body is merged wholesale into the record,
+    # so clients can set owner_id, service_key, maintenance_mode, anything.
+    # ----------------------------------------
+    @app.patch("/v1/robots/{robot_id}")
+    def patch_robot(
+        robot_id: int,
+        patch: dict[str, Any],
+        user: dict[str, Any] = Depends(vulnerable_auth),
+    ) -> dict[str, Any]:
+        record = ROBOTS[robot_id]
+        record.update(patch)  # <-- the entire flaw in one line
+        return dict(record)
+
+    # ----------------------------------------
+    # OWASP API4:2023 -- Unrestricted Resource Consumption
+    # No pagination ceiling; unbounded simulation parameter; no body limits.
+    # ----------------------------------------
+    @app.get("/v1/robots")
+    def list_robots(limit: int = 10) -> list[dict[str, Any]]:
+        # limit=1000000 is accepted happily; there is no cap.
+        return [dict(r) for r in list(ROBOTS.values())[:limit]]
+
+    @app.post("/v1/fleet/simulate")
+    def simulate(steps: int = 100) -> dict[str, Any]:
+        # The 2025 incident ran steps=40_000_000 per request until the pool
+        # starved. Loop truncated in the lab so the test suite stays fast;
+        # the flaw is that `steps` is accepted and trusted at all.
+        work = 0
+        for _ in range(min(steps, 20_000)):
+            work += 1
+        return {"requested_steps": steps, "executed_steps": work}
+
+    # ----------------------------------------
+    # OWASP API5:2023 -- Broken Function Level Authorization
+    # The admin surface checks authentication, never the role.
+    # ----------------------------------------
+    @app.get("/v1/admin/users")
+    def admin_users(user: dict[str, Any] = Depends(vulnerable_auth)) -> Any:
+        return list(USERS.values())  # any authenticated (or anon) caller
+
+    # ----------------------------------------
+    # OWASP API6:2023 -- Unrestricted Access to Sensitive Business Flows
+    # Promo redemption has no rate limit, no CAPTCHA, no velocity checks:
+    # a script drains the campaign budget in seconds.
+    # ----------------------------------------
+    @app.post("/v1/promo/redeem")
+    def redeem_promo(
+        body: dict[str, Any], user: dict[str, Any] = Depends(vulnerable_auth)
+    ) -> dict[str, Any]:
+        code = str(body.get("code", ""))
+        if PROMO_BALANCE.get(code, 0) <= 0:
+            return JSONResponse(status_code=409, content={"error": "exhausted"})  # type: ignore[return-value]
+        PROMO_BALANCE[code] -= 1
+        return {"redeemed": code, "remaining": PROMO_BALANCE[code]}
+
+    # ----------------------------------------
+    # OWASP API7:2023 -- Server-Side Request Forgery
+    # The "diagnostics" feature fetches any caller-supplied URL server-side:
+    # internal hosts, the cloud metadata endpoint, anything.
+    # ----------------------------------------
+    @app.post("/v1/diagnostics/fetch")
+    def diagnostics_fetch(
+        body: dict[str, Any], user: dict[str, Any] = Depends(vulnerable_auth)
+    ) -> dict[str, Any]:
+        url = str(body.get("url", ""))
+        with make_client() as client:  # simulated network; real one in prod
+            response = client.get(url, follow_redirects=True)
+        return {"url": url, "status": response.status_code, "body": response.text}
+
+    # ----------------------------------------
+    # OWASP API9:2023 -- Improper Inventory Management
+    # Legacy v0, shipped "temporarily" in 2023, still live, no auth at all.
+    # An internal export route that never made it into the OpenAPI spec.
+    # ----------------------------------------
+    @app.get("/v0/robots")
+    def legacy_robots() -> list[dict[str, Any]]:
+        return [dict(r) for r in ROBOTS.values()]  # unauthenticated
+
+    @app.get("/internal/export")
+    def internal_export() -> dict[str, Any]:
+        return {"users": list(USERS.values()), "robots": list(ROBOTS.values())}
+
+    # ----------------------------------------
+    # OWASP API10:2023 -- Unsafe Consumption of APIs
+    # The enrichment job trusts the upstream partner completely: every field
+    # it returns is merged into our record -- including maintenance_mode.
+    # ----------------------------------------
+    @app.post("/v1/fleet/enrich/{robot_id}")
+    def enrich_robot(
+        robot_id: int, user: dict[str, Any] = Depends(vulnerable_auth)
+    ) -> dict[str, Any]:
+        with make_client() as client:
+            upstream = client.get("http://untrusted.maps.example/site")
+        payload = upstream.json()  # no schema, no validation, total trust
+        ROBOTS[robot_id].update(payload)
+        return dict(ROBOTS[robot_id])
+
+    return app
+
+
+app = create_app()
+\end{minted}
+
+\subsection{Listing 16.4 --- The Hardened API (\texttt{hardened\_app.py})}
+\label{lst:ch16-hardened}
+
+The repaired service. Every fix names the item it closes: scope + object +
+property authorization on robot routes (API1/API3), real RS256
+authentication (API2), schema ceilings (API4), role-checked admin surface
+(API5), per-principal velocity limits on the promo flow (API6), the SSRF
+gauntlet on outbound fetches (API7), no debug surface and secure headers
+(API8), no legacy or shadow routes (API9), and schema-validated upstream
+consumption (API10).
+
+\begin{minted}{python}
+"""Hardened Northwind Robotics fleet API -- the exploit suite's green target.
+
+Every endpoint is the repaired counterpart of vulnerable_app.py. Fixes are
+commented with the OWASP item they close. Runs fully offline: tokens come
+from jwks_fixture.py, outbound I/O from fake_network.py.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from authz import (
+    ROBOT_READ_POLICY,
+    ROBOT_WRITE_POLICY,
+    ForbiddenError,
+    Guard,
+    apply_patch,
+    filter_fields,
+)
+from fake_network import make_client, simulated_dns
+from jwks_fixture import AUDIENCE, ISSUER, JWKS
+from ssrf_fetcher import OutboundPolicy, SafeFetcher, SsrfBlockedError
+from token_validation import Principal, TokenValidator, build_auth_dependency
+
+# ----------------------------------------
+# Data (same fictional universe as the vulnerable build; secrets never leave
+# the store layer now).
+# ----------------------------------------
+USERS: dict[str, dict[str, Any]] = {
+    "alice": {"username": "alice", "role": "operator", "tenant": "tenant-nwr"},
+    "bob": {"username": "bob", "role": "operator", "tenant": "tenant-nwr"},
+    "carol": {"username": "carol", "role": "admin", "tenant": "tenant-nwr"},
+}
+
+ROBOTS: dict[int, dict[str, Any]] = {
+    1001: {
+        "id": 1001, "name": "Welder-7", "model": "NR-220", "status": "idle",
+        "battery_pct": 88, "last_seen": "2026-08-30T09:14:00Z",
+        "notes": "dock 3", "owner_id": "alice", "tenant_id": "tenant-nwr",
+        "firmware_version": "4.2.0", "service_key": "sk_test_DEMO_robot1001_invalid",
+        "service_key_last4": "1001", "maintenance_mode": False,
+        "telemetry_channel": "stable",
+    },
+    1002: {
+        "id": 1002, "name": "Lifter-2", "model": "NR-410", "status": "active",
+        "battery_pct": 61, "last_seen": "2026-08-30T09:15:00Z",
+        "notes": "bay 9", "owner_id": "bob", "tenant_id": "tenant-nwr",
+        "firmware_version": "4.1.3", "service_key": "sk_test_DEMO_robot1002_invalid",
+        "service_key_last4": "1002", "maintenance_mode": False,
+        "telemetry_channel": "stable",
+    },
+}
+
+PROMO_BALANCE = {"NWR-LAUNCH": 100}
+PROMO_LIMIT_PER_PRINCIPAL = 3  # lab stand-in for the Chapter 14 token bucket
+
+OUTBOUND_POLICY = OutboundPolicy(
+    allowed_hosts=frozenset({"telemetry.partner-nwr.example"})
+)
+
+
+class PatchRobotRequest(BaseModel):
+    """API3 fix (write side): the contract is an explicit schema, and the
+    authz layer re-checks every field against the caller's role."""
+
+    model_config = {"extra": "forbid"}
+    name: str | None = Field(default=None, max_length=80)
+    notes: str | None = Field(default=None, max_length=500)
+    status: Literal["idle", "active", "charging"] | None = None
+
+
+class FetchRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    url: str = Field(max_length=2048)
+
+
+class PromoRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    code: str = Field(max_length=32)
+
+
+class UpstreamSiteInfo(BaseModel):
+    """API10 fix: upstream payloads are parsed against a schema with
+    extra fields ignored; only vetted fields ever touch our records."""
+
+    model_config = {"extra": "ignore"}
+    label: str = Field(max_length=120)
+    telemetry_channel: Literal["stable", "beta"] = "stable"
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="NWR Fleet API (hardened)")
+    validator = TokenValidator(JWKS, issuer=ISSUER, audience=AUDIENCE)
+    principal_dep = build_auth_dependency(validator)
+    redeem_counters: dict[str, int] = {}
+
+    # API8 fix: exact origins, no credentials; never the wildcard pair.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://portal.northwind-robotics.example"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next: Any) -> Any:
+        # API8 fix: secure defaults on every response; no stack traces.
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
+        response.headers.setdefault("Cache-Control", "no-store")
+        return response
+
+    @app.exception_handler(ForbiddenError)
+    async def forbidden(request: Request, exc: ForbiddenError) -> JSONResponse:
+        return JSONResponse(status_code=403, content={"detail": "forbidden"})
+
+    @app.exception_handler(SsrfBlockedError)
+    async def ssrf_blocked(request: Request, exc: SsrfBlockedError) -> JSONResponse:
+        return JSONResponse(status_code=403, content={"detail": "destination blocked"})
+
+    @app.exception_handler(Exception)
+    async def opaque_errors(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"detail": "internal error"})
+
+    def guard_for(principal: Principal) -> Guard:
+        return Guard(
+            actor_id=principal.subject,
+            tenant_id=principal.tenant,
+            roles=principal.roles,
+        )
+
+    def view_roles(principal: Principal) -> list[str]:
+        # Owners authenticate with a fleet scope and no role claim; they get
+        # the owner field policy. Named roles widen the view per policy.
+        return sorted(principal.roles) if principal.roles else ["owner"]
+
+    # API1 fix: fetch, then authorize the *object*; API3 fix (read side):
+    # serialize through the role's field policy -- never the raw record.
+    @app.get("/v1/robots/{robot_id}")
+    def get_robot(
+        robot_id: int, principal: Principal = Depends(principal_dep)
+    ) -> dict[str, Any]:
+        principal.require_scope("fleet:read")
+        record = ROBOTS.get(robot_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="not found")
+        guard_for(principal).require_read(record)
+        return filter_fields(record, ROBOT_READ_POLICY, view_roles(principal))
+
+    @app.patch("/v1/robots/{robot_id}")
+    def patch_robot(
+        robot_id: int,
+        patch: PatchRobotRequest,
+        principal: Principal = Depends(principal_dep),
+    ) -> dict[str, Any]:
+        principal.require_scope("fleet:write")
+        record = ROBOTS.get(robot_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="not found")
+        guard_for(principal).require_write(record)
+        body = patch.model_dump(exclude_none=True)
+        updated = apply_patch(record, body, ROBOT_WRITE_POLICY, principal.roles)
+        ROBOTS[robot_id] = updated
+        return filter_fields(updated, ROBOT_READ_POLICY, view_roles(principal))
+
+    # API4 fix: hard ceilings at the schema layer; anything bigger is a 422
+    # before a single byte of work happens.
+    @app.get("/v1/robots")
+    def list_robots(
+        limit: int = Query(default=10, ge=1, le=100),
+        principal: Principal = Depends(principal_dep),
+    ) -> list[dict[str, Any]]:
+        principal.require_scope("fleet:read")
+        mine = [
+            r for r in ROBOTS.values() if guard_for(principal).can_read(r)
+        ]
+        return [
+            filter_fields(r, ROBOT_READ_POLICY, view_roles(principal))
+            for r in mine[:limit]
+        ]
+
+    @app.post("/v1/fleet/simulate")
+    def simulate(
+        steps: int = Query(default=100, ge=1, le=10_000),
+        principal: Principal = Depends(principal_dep),
+    ) -> dict[str, Any]:
+        principal.require_scope("fleet:command")
+        work = 0
+        for _ in range(steps):
+            work += 1
+        return {"executed_steps": work, "cap": 10_000}
+
+    # API5 fix: the admin surface requires the admin role AND scope,
+    # checked in the dependency layer, not by convention.
+    @app.get("/v1/admin/users")
+    def admin_users(
+        principal: Principal = Depends(principal_dep),
+    ) -> list[dict[str, Any]]:
+        principal.require_scope("admin:users")
+        if "admin" not in principal.roles:
+            raise HTTPException(status_code=403, detail="admin role required")
+        return [
+            {"username": u["username"], "role": u["role"]} for u in USERS.values()
+        ]
+
+    # API6 fix: the sensitive flow is velocity-limited per authenticated
+    # principal before business logic runs.
+    @app.post("/v1/promo/redeem")
+    def redeem_promo(
+        body: PromoRequest, principal: Principal = Depends(principal_dep)
+    ) -> dict[str, Any]:
+        principal.require_scope("promo:redeem")
+        used = redeem_counters.get(principal.subject, 0)
+        if used >= PROMO_LIMIT_PER_PRINCIPAL:
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=429,
+                content={"detail": "rate limit exceeded"},
+                headers={"Retry-After": "60"},
+            )
+        if PROMO_BALANCE.get(body.code, 0) <= 0:
+            raise HTTPException(status_code=409, detail="promotion exhausted")
+        redeem_counters[principal.subject] = used + 1
+        PROMO_BALANCE[body.code] -= 1
+        return {"redeemed": body.code, "remaining": PROMO_BALANCE[body.code]}
+
+    # API7 fix: outbound fetches pass the full SSRF gauntlet -- allow-list,
+    # scheme/port checks, DNS pinning, redirect re-validation.
+    @app.post("/v1/diagnostics/fetch")
+    def diagnostics_fetch(
+        body: FetchRequest, principal: Principal = Depends(principal_dep)
+    ) -> dict[str, Any]:
+        principal.require_scope("diagnostics:run")
+        with make_client() as client:
+            fetcher = SafeFetcher(OUTBOUND_POLICY, client, resolve=simulated_dns)
+            text = fetcher.fetch_text(body.url)
+        return {"url": body.url, "body": text}
+
+    # API8 fix: no /v1/debug/config exists. API9 fix: /v0 and /internal/*
+    # are gone -- every route is in the OpenAPI spec and inventory.
+
+    # API10 fix: upstream data is parsed against UpstreamSiteInfo; only the
+    # vetted telemetry_channel field may flow into our records.
+    @app.post("/v1/fleet/enrich/{robot_id}")
+    def enrich_robot(
+        robot_id: int, principal: Principal = Depends(principal_dep)
+    ) -> dict[str, Any]:
+        principal.require_scope("fleet:write")
+        record = ROBOTS.get(robot_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="not found")
+        guard_for(principal).require_write(record)
+        with make_client() as client:
+            upstream = client.get("http://untrusted.maps.example/site")
+        try:
+            info = UpstreamSiteInfo.model_validate(upstream.json())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502, detail="upstream payload failed validation"
+            ) from exc
+        record["telemetry_channel"] = info.telemetry_channel
+        return filter_fields(record, ROBOT_READ_POLICY, view_roles(principal))
+
+    return app
+
+
+app = create_app()
+\end{minted}
+
+\subsection{Listing 16.5 --- Token Validation Middleware (\texttt{token\_validation.py})}
+\label{lst:ch16-tokenvalidation}
+
+The authentication gate as a reusable component. Note the order --- header
+structure and \texttt{alg} allow-list, \texttt{kid} resolution, signature
+and claims verification, \emph{then} mapping to an immutable
+\texttt{Principal} --- and that every failure mode raises 401 before a
+single claim is trusted. Scope failures raise 403 with a
+\texttt{WWW-Authenticate} hint~\cite{rfc9110}.
+
+\begin{minted}{python}
+"""Token validation middleware: JWKS-style key resolution, scope/audience
+enforcement, and claim-to-principal mapping.
+
+Validation order is a security invariant: never trust a claim before the
+signature, issuer, audience, and expiry have all been verified.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+ALLOWED_ALGORITHMS = ("RS256",)  # allow-list: 'none' and HS-confusion rejected
+CLOCK_LEEWAY_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class Principal:
+    """The authenticated caller, mapped from verified claims only."""
+
+    subject: str
+    tenant: str
+    scopes: frozenset[str] = field(default_factory=frozenset)
+    roles: frozenset[str] = field(default_factory=frozenset)
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in self.scopes
+
+    def require_scope(self, scope: str) -> None:
+        if not self.has_scope(scope):
+            raise HTTPException(
+                status_code=403,
+                detail=f"missing required scope '{scope}'",
+                headers={"WWW-Authenticate": f'Bearer scope="{scope}"'},
+            )
+
+
+class TokenValidator:
+    """Verifies Bearer tokens against a JWKS-style key map."""
+
+    def __init__(
+        self,
+        jwks: Mapping[str, str],
+        *,
+        issuer: str,
+        audience: str,
+        leeway: int = CLOCK_LEEWAY_SECONDS,
+    ) -> None:
+        if not jwks:
+            raise ValueError("JWKS key map must not be empty")
+        self._jwks = dict(jwks)
+        self._issuer = issuer
+        self._audience = audience
+        self._leeway = leeway
+
+    def validate(self, token: str) -> Principal:
+        header = self._unverified_header(token)
+        key = self._resolve_key(header)
+        claims = self._verify_claims(token, key)
+        return self._to_principal(claims)
+
+    def _unverified_header(self, token: str) -> dict[str, Any]:
+        try:
+            return jwt.get_unverified_header(token)
+        except jwt.DecodeError as exc:
+            raise HTTPException(status_code=401, detail="malformed token") from exc
+
+    def _resolve_key(self, header: dict[str, Any]) -> str:
+        alg = header.get("alg")
+        if alg not in ALLOWED_ALGORITHMS:
+            raise HTTPException(status_code=401, detail="disallowed algorithm")
+        kid = header.get("kid")
+        key = self._jwks.get(kid) if isinstance(kid, str) else None
+        if key is None:
+            # Real deployments: one rate-limited JWKS refetch, then fail.
+            raise HTTPException(status_code=401, detail="unknown key id")
+        return key
+
+    def _verify_claims(self, token: str, key: str) -> dict[str, Any]:
+        try:
+            claims: dict[str, Any] = jwt.decode(
+                token,
+                key,
+                algorithms=list(ALLOWED_ALGORITHMS),
+                audience=self._audience,
+                issuer=self._issuer,
+                leeway=self._leeway,
+                options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+            )
+        except jwt.ExpiredSignatureError as exc:
+            raise HTTPException(status_code=401, detail="token expired") from exc
+        except jwt.InvalidTokenError as exc:
+            raise HTTPException(status_code=401, detail="invalid token") from exc
+        return claims
+
+    @staticmethod
+    def _to_principal(claims: dict[str, Any]) -> Principal:
+        scope_claim = claims.get("scope", "")
+        if not isinstance(scope_claim, str):
+            raise HTTPException(status_code=401, detail="malformed scope claim")
+        roles_claim = claims.get("roles", [])
+        if not isinstance(roles_claim, list):
+            raise HTTPException(status_code=401, detail="malformed roles claim")
+        tenant = claims.get("tenant")
+        if not isinstance(tenant, str) or not tenant:
+            raise HTTPException(status_code=401, detail="missing tenant claim")
+        return Principal(
+            subject=str(claims["sub"]),
+            tenant=tenant,
+            scopes=frozenset(s for s in scope_claim.split() if s),
+            roles=frozenset(str(r) for r in roles_claim),
+        )
+
+
+def build_auth_dependency(
+    validator: TokenValidator,
+) -> Any:
+    """Wire a TokenValidator into FastAPI's dependency system."""
+    bearer = HTTPBearer(auto_error=True)
+
+    def current_principal(
+        credentials: HTTPAuthorizationCredentials = Depends(bearer),
+    ) -> Principal:
+        return validator.validate(credentials.credentials)
+
+    return current_principal
+
+
+def demo_app(validator: TokenValidator) -> FastAPI:
+    """Minimal app proving scope enforcement end to end."""
+    app = FastAPI(title="NWR Token Validation Demo")
+    principal_dep = build_auth_dependency(validator)
+
+    @app.get("/v1/whoami")
+    def whoami(principal: Principal = Depends(principal_dep)) -> dict[str, Any]:
+        return {
+            "sub": principal.subject,
+            "tenant": principal.tenant,
+            "scopes": sorted(principal.scopes),
+        }
+
+    @app.get("/v1/fleet/commands")
+    def fleet_commands(
+        request: Request,
+        principal: Principal = Depends(principal_dep),
+    ) -> dict[str, Any]:
+        principal.require_scope("fleet:command")
+        return {"accepted": True, "by": principal.subject}
+
+    return app
+\end{minted}
+
+\subsection{Listing 16.6 --- Authorization Guards (\texttt{authz.py})}
+\label{lst:ch16-authz}
+
+The authorization gate as pure functions over mappings: \texttt{Guard}
+answers ``may this actor touch \emph{this} object'' (API1);
+\texttt{filter\_fields} and \texttt{apply\_patch} answer ``which
+\emph{properties} may this role see or change'' (API3). Because the guards
+are framework-free, they are unit-testable without HTTP and reusable across
+REST, GraphQL (Chapter~\ref{ch:graphql}), and gRPC
+(Chapter~\ref{ch:grpc}) surfaces.
+
+\begin{minted}{python}
+"""Authorization guards: object-level (BOLA defense) and property-level
+(BOPLA defense) checks, independent of any web framework.
+
+Rule of thumb: authentication answers "who are you"; these guards answer
+"may you touch *this* object" and "may you see/write *these* fields".
+Records are plain mappings, so the guards work with ORM rows, dict stores,
+or deserialized payloads alike.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable, Mapping
+
+
+class ForbiddenError(PermissionError):
+    """Raised when a principal may not act on a resource."""
+
+
+def _owner(resource: Mapping[str, Any]) -> str:
+    try:
+        return str(resource["owner_id"])
+    except KeyError as exc:
+        raise ForbiddenError("resource has no ownership metadata") from exc
+
+
+def _tenant(resource: Mapping[str, Any]) -> str:
+    try:
+        return str(resource["tenant_id"])
+    except KeyError as exc:
+        raise ForbiddenError("resource has no tenant metadata") from exc
+
+
+@dataclass(frozen=True)
+class Guard:
+    """Object-level authorization: every access names its subject."""
+
+    actor_id: str
+    tenant_id: str
+    roles: frozenset[str] = field(default_factory=frozenset)
+
+    def can_read(self, resource: Mapping[str, Any]) -> bool:
+        if "admin" in self.roles:
+            return _tenant(resource) == self.tenant_id
+        return (
+            _tenant(resource) == self.tenant_id
+            and _owner(resource) == self.actor_id
+        )
+
+    def can_write(self, resource: Mapping[str, Any]) -> bool:
+        # Writes are owner-only; even admins must use the audited admin API.
+        return (
+            _tenant(resource) == self.tenant_id
+            and _owner(resource) == self.actor_id
+        )
+
+    def require_read(self, resource: Mapping[str, Any]) -> None:
+        if not self.can_read(resource):
+            raise ForbiddenError("read denied: not your object")
+
+    def require_write(self, resource: Mapping[str, Any]) -> None:
+        if not self.can_write(resource):
+            raise ForbiddenError("write denied: not your object")
+
+
+# Property-level policy: role -> fields the role may see or change.
+# Absent roles get nothing; server-owned fields appear in NO write policy.
+FieldPolicy = Mapping[str, frozenset[str]]
+
+ROBOT_READ_POLICY: FieldPolicy = {
+    "owner": frozenset(
+        {"id", "name", "model", "status", "battery_pct", "last_seen", "notes"}
+    ),
+    "technician": frozenset({"id", "name", "model", "status", "battery_pct"}),
+    "auditor": frozenset({"id", "name", "status", "firmware_version"}),
+    "admin": frozenset(
+        {
+            "id", "name", "model", "status", "battery_pct", "last_seen",
+            "notes", "firmware_version", "service_key_last4",
+        }
+    ),
+}
+
+ROBOT_WRITE_POLICY: FieldPolicy = {
+    "owner": frozenset({"name", "notes"}),
+    "technician": frozenset({"status", "notes"}),
+    "admin": frozenset({"name", "status", "notes", "firmware_version"}),
+}
+
+_ROLE_PRECEDENCE = ("admin", "technician", "auditor", "owner")
+
+
+def role_for(roles: Iterable[str]) -> str | None:
+    """Pick the most privileged policy role the actor holds."""
+    held = set(roles)
+    for candidate in _ROLE_PRECEDENCE:
+        if candidate in held:
+            return candidate
+    return None
+
+
+def filter_fields(
+    record: Mapping[str, Any], policy: FieldPolicy, roles: Iterable[str]
+) -> dict[str, Any]:
+    """Return only the fields the actor's role may read (BOPLA defense)."""
+    role = role_for(roles)
+    allowed = policy.get(role, frozenset()) if role else frozenset()
+    return {key: value for key, value in record.items() if key in allowed}
+
+
+def apply_patch(
+    record: Mapping[str, Any],
+    patch: Mapping[str, Any],
+    policy: FieldPolicy,
+    roles: Iterable[str],
+) -> dict[str, Any]:
+    """Apply only writable fields; reject anything else.
+
+    Mass-assignment defense: the allow-list is the contract. Server-owned
+    invariants (``id``, ``owner_id``, ``tenant_id``) are re-asserted from the
+    stored record, never from the client patch.
+    """
+    role = role_for(roles)
+    allowed = policy.get(role, frozenset()) if role else frozenset()
+    rejected = sorted(set(patch) - allowed)
+    if rejected:
+        raise ForbiddenError(f"fields not writable by this role: {rejected}")
+    updated = dict(record)
+    for key in allowed & set(patch):
+        updated[key] = patch[key]
+    for invariant in ("id", "owner_id", "tenant_id"):
+        updated[invariant] = record[invariant]
+    return updated
+
+
+def require_readable_factory(
+    get_actor: Callable[[], Guard],
+) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    """Adapt the guard to DI: fetch-then-authorize in one step."""
+
+    def require_readable(resource: Mapping[str, Any]) -> Mapping[str, Any]:
+        get_actor().require_read(resource)
+        return resource
+
+    return require_readable
+\end{minted}
+
+\subsection{Listing 16.7 --- SSRF-Safe Outbound Fetcher (\texttt{ssrf\_fetcher.py})}
+\label{lst:ch16-ssrf}
+
+Seven layers, each independently sufficient against the lab exploits:
+scheme allow-list, exact host allow-list, port restriction, userinfo/IP-literal
+rejection, DNS pinning against private ranges (rebinding-safe), redirect
+re-validation, and response size caps.
+
+\begin{minted}{python}
+"""SSRF-safe outbound fetcher.
+
+Defense layers, each independently sufficient to block the lab exploits:
+  1. Scheme allow-list (https only by default).
+  2. Host allow-list (exact match; no suffix tricks).
+  3. Port restriction.
+  4. DNS pinning: resolve first, reject private/link-local/loopback ranges,
+     then connect to the *validated* address (closes DNS-rebinding TOCTOU).
+  5. Redirect re-validation: every hop is checked like the original URL.
+  6. Size and content-type caps on the response.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+from dataclasses import dataclass
+from typing import Callable
+
+import httpx
+
+MAX_BODY_BYTES = 64 * 1024
+ALLOWED_SCHEMES = frozenset({"https", "http"})  # http only for the offline lab
+ALLOWED_PORTS = frozenset({80, 443, 8443})
+
+
+class SsrfBlockedError(PermissionError):
+    """Raised when a URL fails any layer of the SSRF policy."""
+
+
+# Explicit blocklist (stable across Python versions, unlike the shifting
+# semantics of ``is_private``). In production, prefer ``ip.is_global``
+# from a maintained egress-control library instead of hand-rolling this.
+_BLOCKED_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "0.0.0.0/8",        # "this host"
+        "10.0.0.0/8",       # RFC 1918
+        "100.64.0.0/10",    # carrier-grade NAT
+        "127.0.0.0/8",      # loopback
+        "169.254.0.0/16",   # link-local: home of 169.254.169.254 metadata
+        "172.16.0.0/12",    # RFC 1918
+        "192.168.0.0/16",   # RFC 1918
+        "224.0.0.0/4",      # multicast
+        "240.0.0.0/4",      # reserved
+        "::/128",           # unspecified
+        "::1/128",          # IPv6 loopback
+        "fc00::/7",         # IPv6 unique-local
+        "fe80::/10",        # IPv6 link-local
+        "ff00::/8",         # IPv6 multicast
+        "::ffff:0:0/96",    # IPv4-mapped IPv6 (re-checked after mapping)
+    )
+)
+
+
+def _is_public_address(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped  # canonicalize ::ffff:10.0.0.1 -> 10.0.0.1
+    return not any(ip in net for net in _BLOCKED_NETWORKS)
+
+
+@dataclass(frozen=True)
+class OutboundPolicy:
+    allowed_hosts: frozenset[str]
+    allowed_schemes: frozenset[str] = ALLOWED_SCHEMES
+    allowed_ports: frozenset[int] = ALLOWED_PORTS
+    max_redirects: int = 3
+
+    def check_url(self, url: str) -> httpx.URL:
+        parsed = httpx.URL(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in self.allowed_schemes:
+            raise SsrfBlockedError(f"scheme '{scheme}' not allowed")
+        host = (parsed.host or "").lower()
+        if host not in self.allowed_hosts:
+            raise SsrfBlockedError(f"host '{host}' not on allow-list")
+        port = parsed.port or (443 if scheme == "https" else 80)
+        if port not in self.allowed_ports:
+            raise SsrfBlockedError(f"port {port} not allowed")
+        # Canonicalization guard: reject userinfo and raw-IP literals.
+        if parsed.username or parsed.password:
+            raise SsrfBlockedError("userinfo in URL is not allowed")
+        if _looks_like_ip(host):
+            raise SsrfBlockedError("raw IP literals are not allowed")
+        return parsed
+
+    def check_resolved(
+        self, parsed: httpx.URL, resolve: Callable[[str], list[str]]
+    ) -> None:
+        """DNS pinning: every resolved address must be public."""
+        for address in resolve(parsed.host or ""):
+            if not _is_public_address(address):
+                raise SsrfBlockedError(f"resolved address {address} is not public")
+
+
+def _looks_like_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+class SafeFetcher:
+    """Fetches only URLs that survive the full policy gauntlet."""
+
+    def __init__(
+        self,
+        policy: OutboundPolicy,
+        client: httpx.Client,
+        *,
+        resolve: Callable[[str], list[str]],
+    ) -> None:
+        self._policy = policy
+        self._client = client
+        self._resolve = resolve
+
+    def fetch_text(self, url: str) -> str:
+        current = url
+        for _hop in range(self._policy.max_redirects + 1):
+            parsed = self._policy.check_url(current)
+            self._policy.check_resolved(parsed, self._resolve)
+            # follow_redirects is OFF: we re-validate every hop ourselves.
+            response = self._client.get(parsed, follow_redirects=False)
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location:
+                    raise SsrfBlockedError("redirect without Location header")
+                current = str(parsed.join(location))
+                continue
+            response.raise_for_status()
+            body = response.content
+            if len(body) > MAX_BODY_BYTES:
+                raise SsrfBlockedError("response exceeds size cap")
+            return body.decode("utf-8", errors="strict")
+        raise SsrfBlockedError("too many redirects")
+\end{minted}
+
+\subsection{Listing 16.8 --- STRIDE Worksheet Generator (\texttt{stride\_worksheet.py})}
+\label{lst:ch16-stride}
+
+Threat modeling that cannot drift from the shipped surface: feed it the
+OpenAPI document, receive a per-endpoint STRIDE checklist skeleton with
+heuristic flags (path ids $\to$ BOLA review, write methods $\to$
+mass-assignment review, missing 429 $\to$ DoS review, admin paths $\to$
+elevation review). The generator is deliberately simple --- its value is
+that it runs in CI on every spec change.
+
+\begin{minted}{python}
+"""STRIDE worksheet generator.
+
+Reads an OpenAPI 3.x document (JSON or the small YAML subset PyYAML-free
+tooling can handle: pass pre-parsed dicts) and emits a per-endpoint threat
+checklist skeleton. Pure stdlib, offline, deterministic: endpoints are
+sorted, heuristics are explicit rules you can audit.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Iterable
+
+STRIDE = ("Spoofing", "Tampering", "Repudiation", "Information Disclosure",
+          "Denial of Service", "Elevation of Privilege")
+
+WRITE_METHODS = {"post", "put", "patch", "delete"}
+ADMIN_HINTS = ("/admin", "/internal", "/debug")
+ID_PARAM_HINTS = ("{id}", "{robot_id}", "{user_id}", "{order_id}")
+
+
+def _heuristics(method: str, path: str, operation: dict[str, Any]) -> dict[str, list[str]]:
+    """Flag the STRIDE categories that need human attention and why."""
+    flagged: dict[str, list[str]] = {s: [] for s in STRIDE}
+    secured = bool(operation.get("security"))
+    has_id = any(hint in path for hint in ID_PARAM_HINTS) or any(
+        p.get("in") == "path" and str(p.get("name", "")).endswith("id")
+        for p in operation.get("parameters", [])
+    )
+    if not secured:
+        flagged["Spoofing"].append("no security scheme declared on operation")
+    if has_id:
+        flagged["Information Disclosure"].append(
+            "path id present: verify object-level authorization (BOLA)"
+        )
+        flagged["Tampering"].append(
+            "path id present: confirm ids are not enumerable or are scoped"
+        )
+    if method in WRITE_METHODS:
+        flagged["Tampering"].append(
+            "write method: schema must forbid server-owned fields (mass assignment)"
+        )
+        flagged["Repudiation"].append(
+            "write method: require an audit record with actor, before/after"
+        )
+    if any(hint in path for hint in ADMIN_HINTS):
+        flagged["Elevation of Privilege"].append(
+            "admin/internal surface: function-level role check required"
+        )
+    responses = operation.get("responses", {})
+    if "429" not in responses:
+        flagged["Denial of Service"].append(
+            "no 429 documented: confirm rate/size limits exist"
+        )
+    if method == "get":
+        flagged["Information Disclosure"].append(
+            "read method: review response fields for excessive data exposure"
+        )
+    return {k: v for k, v in flagged.items() if v}
+
+
+def generate_worksheet(spec: dict[str, Any]) -> str:
+    """Emit a Markdown STRIDE checklist skeleton, one block per endpoint."""
+    title = spec.get("info", {}).get("title", "Untitled API")
+    lines = [
+        f"# STRIDE Worksheet -- {title}",
+        "",
+        "Fill one row per flagged category: threat, abuse case, mitigation,",
+        "detection signal, owner, status.",
+        "",
+    ]
+    for path in sorted(spec.get("paths", {})):
+        for method in sorted(spec["paths"][path]):
+            if method not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            operation = spec["paths"][path][method]
+            summary = operation.get("summary", "")
+            lines.append(f"## {method.upper()} {path}")
+            if summary:
+                lines.append(f"_{summary}_")
+            lines.append("")
+            flagged = _heuristics(method, path, operation)
+            if not flagged:
+                lines.append("- [ ] No heuristic flags; still review manually.")
+            for category in STRIDE:
+                for reason in flagged.get(category, []):
+                    lines.append(f"- [ ] **{category}** -- {reason}")
+            lines.append("")
+            lines.append("| STRIDE | Threat | Abuse case | Mitigation | Detection | Owner | Status |")
+            lines.append("|---|---|---|---|---|---|---|")
+            for category in STRIDE:
+                mark = "FLAGGED" if category in flagged else ""
+                lines.append(f"| {category} | {mark} | | | | | |")
+            lines.append("")
+    return "\n".join(lines)
+
+
+def load_spec(path: str) -> dict[str, Any]:
+    """Load an OpenAPI document from a JSON file."""
+    with open(path, encoding="utf-8") as handle:
+        data: dict[str, Any] = json.load(handle)
+    if "paths" not in data:
+        raise ValueError("not an OpenAPI document: missing 'paths'")
+    return data
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="OpenAPI -> STRIDE worksheet")
+    parser.add_argument("spec", help="path to an OpenAPI JSON document")
+    parser.add_argument("-o", "--out", default=None, help="output .md path")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    worksheet = generate_worksheet(load_spec(args.spec))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as handle:
+            handle.write(worksheet)
+    else:
+        print(worksheet)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+\subsection{Listing 16.9 --- Exploit Suite Wiring (\texttt{conftest.py})}
+\label{lst:ch16-conftest}
+
+One option switches the suite between \emph{demonstration} mode (prove
+exploit \emph{and} fix) and \emph{contract} mode (assert the hardened
+contract against a chosen build --- the lab's red/green gauntlet).
+
+\begin{minted}{python}
+"""Pytest wiring for the exploit suite.
+
+Default mode ("demo"): each test proves the exploit lands on the vulnerable
+app AND is repelled by the hardened app -- 10 greens.
+
+Lab mode: ``pytest --target=vulnerable`` asserts the *hardened contract*
+against the vulnerable build (10 reds); ``--target=hardened`` re-runs the
+same contract (10 greens). That is the exploit-then-fix gauntlet.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--target",
+        action="store",
+        default="demo",
+        choices=["demo", "vulnerable", "hardened"],
+        help="demo: prove exploit+fix; vulnerable/hardened: assert contract",
+    )
+
+
+@pytest.fixture()
+def target(request: pytest.FixtureRequest) -> str:
+    return str(request.config.getoption("--target"))
+\end{minted}
+
+\subsection{Listing 16.10 --- The Exploit Suite (\texttt{test\_exploit\_suite.py})}
+\label{lst:ch16-exploitsuite}
+
+Ten tests, one per OWASP item. Each demonstrates the exploit against the
+vulnerable build (the assertion that it \emph{succeeds} is part of the
+test --- an exploit that does not land proves nothing) and its failure
+against the hardened build.
+
+\begin{minted}{python}
+"""Exploit suite: ten OWASP API Security Top 10 flaws, exploited then fixed.
+
+Default run (``pytest``) proves both halves per item: the exploit succeeds
+against the vulnerable build and is repelled by the hardened build.
+``pytest --target=vulnerable`` asserts the security contract against the
+vulnerable build (10 reds). ``--target=hardened`` runs the same contract
+against the fixed build (10 greens). That is the exploit-then-fix gauntlet.
+"""
+
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+import hardened_app
+import vulnerable_app
+from jwks_fixture import mint_token
+
+BOBS_ROBOT = 1002  # owned by bob; alice must never reach it
+
+
+def _clients() -> tuple[TestClient, TestClient]:
+    return (
+        TestClient(vulnerable_app.create_app()),
+        TestClient(hardened_app.create_app()),
+    )
+
+
+def _vuln_headers(user: str = "alice") -> dict[str, str]:
+    return {"Authorization": f"Bearer {vulnerable_app.forge_token(user)}"}
+
+
+def _jwt_headers(
+    user: str, scopes: list[str], roles: list[str] | None = None
+) -> dict[str, str]:
+    token = mint_token(user, scopes, extra={"roles": roles or ["owner"]})
+    return {"Authorization": f"Bearer {token}"}
+
+
+def check(
+    target: str, exploit_ok: bool, holds_vuln: bool, holds_hard: bool
+) -> None:
+    """demo: prove exploit lands AND fix holds; target modes: contract only."""
+    if target == "demo":
+        assert exploit_ok, "exploit should succeed against the vulnerable build"
+        assert not holds_vuln, "vulnerable build must fail the security contract"
+        assert holds_hard, "hardened build must hold the security contract"
+    elif target == "vulnerable":
+        assert holds_vuln  # expected to FAIL: 10 reds in the lab
+    else:
+        assert holds_hard  # expected to PASS: 10 greens
+
+
+# --- API1:2023 Broken Object Level Authorization ----------------------------------------
+def test_api1_bola_cross_owner_read(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.get(f"/v1/robots/{BOBS_ROBOT}", headers=_vuln_headers("alice"))
+    exploit_ok = (
+        exploit.status_code == 200 and exploit.json()["owner_id"] == "bob"
+    )
+    holds_vuln = exploit.status_code == 403
+    defense = hard.get(
+        f"/v1/robots/{BOBS_ROBOT}", headers=_jwt_headers("alice", ["fleet:read"])
+    )
+    check(target, exploit_ok, holds_vuln, defense.status_code == 403)
+
+
+# --- API2:2023 Broken Authentication ----------------------------------------
+def test_api2_forged_unsigned_token(target: str) -> None:
+    vuln, hard = _clients()
+    forged = vulnerable_app.forge_token("mallory")  # unsigned, self-minted
+    exploit = vuln.get(
+        "/v1/robots/1001", headers={"Authorization": f"Bearer {forged}"}
+    )
+    exploit_ok = exploit.status_code == 200
+    holds_vuln = exploit.status_code == 401
+    defense = hard.get(
+        "/v1/robots/1001", headers={"Authorization": f"Bearer {forged}"}
+    )
+    check(target, exploit_ok, holds_vuln, defense.status_code == 401)
+
+
+# --- API3:2023 Broken Object Property Level Authorization ----------------------------------------
+def test_api3_mass_assignment_and_excessive_exposure(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.patch(
+        "/v1/robots/1001",
+        json={"owner_id": "mallory", "service_key": "sk_test_DEMO_pwned"},
+        headers=_vuln_headers("alice"),
+    )
+    leak = vuln.get("/v1/robots/1001", headers=_vuln_headers("alice"))
+    exploit_ok = (
+        exploit.status_code == 200
+        and exploit.json()["owner_id"] == "mallory"  # server-owned field set!
+        and "service_key" in leak.json()  # secret serialized to any caller
+    )
+    holds_vuln = (
+        exploit.status_code in (403, 422) and "service_key" not in leak.json()
+    )
+    defense = hard.patch(
+        "/v1/robots/1001",
+        json={"owner_id": "mallory"},
+        headers=_jwt_headers("alice", ["fleet:write"]),
+    )
+    read_back = hard.get(
+        "/v1/robots/1001", headers=_jwt_headers("alice", ["fleet:read"])
+    )
+    holds_hard = (
+        defense.status_code == 422  # schema forbids the field outright
+        and "service_key" not in read_back.json()
+        and "owner_id" not in read_back.json()
+    )
+    check(target, exploit_ok, holds_vuln, holds_hard)
+
+
+# --- API4:2023 Unrestricted Resource Consumption ----------------------------------------
+def test_api4_unbounded_simulation(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.post("/v1/fleet/simulate", params={"steps": 10_000_000})
+    exploit_ok = exploit.status_code == 200  # 10M steps accepted, no cap
+    holds_vuln = exploit.status_code == 422
+    defense = hard.post(
+        "/v1/fleet/simulate",
+        params={"steps": 10_000_000},
+        headers=_jwt_headers("alice", ["fleet:command"]),
+    )
+    check(target, exploit_ok, holds_vuln, defense.status_code == 422)
+
+
+# --- API5:2023 Broken Function Level Authorization ----------------------------------------
+def test_api5_admin_endpoint_without_role(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.get("/v1/admin/users", headers=_vuln_headers("alice"))
+    exploit_ok = exploit.status_code == 200 and len(exploit.json()) == 3
+    holds_vuln = exploit.status_code == 403
+    defense = hard.get(
+        "/v1/admin/users",
+        headers=_jwt_headers("alice", ["fleet:read"], roles=["owner"]),
+    )
+    check(target, exploit_ok, holds_vuln, defense.status_code == 403)
+
+
+# --- API6:2023 Unrestricted Access to Sensitive Business Flows ----------------------------------------
+def test_api6_promo_redemption_farming(target: str) -> None:
+    vuln, hard = _clients()
+    successes = sum(
+        vuln.post(
+            "/v1/promo/redeem",
+            json={"code": "NWR-LAUNCH"},
+            headers=_vuln_headers("alice"),
+        ).status_code
+        == 200
+        for _ in range(12)
+    )
+    exploit_ok = successes == 12  # no velocity check: farmed a dozen times
+    holds_vuln = successes <= 3
+    codes = [
+        hard.post(
+            "/v1/promo/redeem",
+            json={"code": "NWR-LAUNCH"},
+            headers=_jwt_headers("alice", ["promo:redeem"]),
+        ).status_code
+        for _ in range(12)
+    ]
+    holds_hard = 429 in codes and codes.count(200) <= 3
+    check(target, exploit_ok, holds_vuln, holds_hard)
+
+
+# --- API7:2023 Server-Side Request Forgery ----------------------------------------
+def test_api7_ssrf_to_metadata_endpoint(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.post(
+        "/v1/diagnostics/fetch",
+        json={"url": "http://169.254.169.254/latest/meta-data"},
+        headers=_vuln_headers("alice"),
+    )
+    exploit_ok = (
+        exploit.status_code == 200 and "SecretAccessKey" in exploit.json()["body"]
+    )
+    holds_vuln = exploit.status_code == 403
+    defense = hard.post(
+        "/v1/diagnostics/fetch",
+        json={"url": "http://169.254.169.254/latest/meta-data"},
+        headers=_jwt_headers("alice", ["diagnostics:run"]),
+    )
+    check(target, exploit_ok, holds_vuln, defense.status_code == 403)
+
+
+# --- API8:2023 Security Misconfiguration ----------------------------------------
+def test_api8_debug_config_exposed(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.get("/v1/debug/config")
+    exploit_ok = exploit.status_code == 200 and "master_key" in exploit.json()
+    holds_vuln = exploit.status_code == 404
+    defense = hard.get("/v1/debug/config")
+    check(target, exploit_ok, holds_vuln, defense.status_code == 404)
+
+
+# --- API9:2023 Improper Inventory Management ----------------------------------------
+def test_api9_legacy_unauthenticated_version(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.get("/v0/robots")  # no credentials at all
+    exploit_ok = exploit.status_code == 200 and len(exploit.json()) == 2
+    holds_vuln = exploit.status_code == 404
+    defense = hard.get("/v0/robots")
+    check(target, exploit_ok, holds_vuln, defense.status_code == 404)
+
+
+# --- API10:2023 Unsafe Consumption of APIs ----------------------------------------
+def test_api10_blind_trust_of_upstream(target: str) -> None:
+    vuln, hard = _clients()
+    exploit = vuln.post("/v1/fleet/enrich/1001", headers=_vuln_headers("alice"))
+    exploit_ok = (
+        exploit.status_code == 200
+        and exploit.json()["maintenance_mode"] is True  # upstream said jump
+    )
+    holds_vuln = (
+        exploit.status_code != 200 or "maintenance_mode" not in exploit.json()
+    )
+    defense = hard.post(
+        "/v1/fleet/enrich/1001",
+        headers=_jwt_headers("alice", ["fleet:write"]),
+    )
+    after = hard.get(
+        "/v1/robots/1001", headers=_jwt_headers("alice", ["fleet:read"])
+    )
+    holds_hard = (
+        defense.status_code == 200
+        and "maintenance_mode" not in defense.json()
+        and "maintenance_mode" not in after.json()
+    )
+    check(target, exploit_ok, holds_vuln, holds_hard)
+\end{minted}
+
+\subsection{Listings 16.11--16.13 --- Library Test Suites}
+\label{lst:ch16-libtests}
+
+The supporting libraries carry their own adversarial tests:
+\texttt{test\_token\_validation.py} attacks the validator with expired
+tokens, wrong audiences, wrong issuers, \texttt{alg=none}, unknown
+\texttt{kid}s, and tampered signatures; \texttt{test\_authz.py} proves the
+guard matrix (owner/stranger/admin/cross-tenant, read/write, field
+filtering, invariant re-assertion); \texttt{test\_ssrf\_fetcher.py} attacks
+the fetcher with the metadata IP, internal hosts, \texttt{file://},
+userinfo tricks, DNS rebinding, and the allowed-host redirect to metadata.
+The full files ship in \texttt{code\textbackslash{}ch16\textbackslash{}};
+they are reproduced here in full because each test encodes an attack.
+
+\begin{minted}{python}
+"""Tests for the token validation middleware and claim->principal mapping."""
+
+from __future__ import annotations
+
+import jwt
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from jwks_fixture import (
+    AUDIENCE,
+    ISSUER,
+    JWKS,
+    SYNTHETIC_PRIVATE_PEM,
+    mint_token,
+)
+from token_validation import TokenValidator, demo_app
+
+VALIDATOR = TokenValidator(JWKS, issuer=ISSUER, audience=AUDIENCE)
+# Tokens that must validate are minted at the current instant (now=None);
+# only the expired-token test pins a past epoch. Either way every run of
+# the suite exercises identical code paths and assertions.
+PAST = 1_700_000_000
+
+
+def test_valid_token_maps_to_principal() -> None:
+    token = mint_token(
+        "alice", ["fleet:read", "fleet:write"], now=None,
+        extra={"roles": ["owner"]},
+    )
+    principal = VALIDATOR.validate(token)
+    assert principal.subject == "alice"
+    assert principal.tenant == "tenant-nwr"
+    assert principal.has_scope("fleet:read")
+    assert not principal.has_scope("admin:users")
+
+
+def test_expired_token_rejected() -> None:
+    token = mint_token("alice", ["fleet:read"], now=PAST, ttl_seconds=60)
+    with pytest.raises(HTTPException) as err:
+        VALIDATOR.validate(token)
+    assert err.value.status_code == 401
+
+
+def test_wrong_audience_rejected() -> None:
+    token = mint_token("alice", ["fleet:read"], now=None, audience="nwr-billing-api")
+    with pytest.raises(HTTPException) as err:
+        VALIDATOR.validate(token)
+    assert err.value.status_code == 401
+
+
+def test_wrong_issuer_rejected() -> None:
+    token = mint_token(
+        "alice", ["fleet:read"], now=None, issuer="https://evil.example"
+    )
+    with pytest.raises(HTTPException) as err:
+        VALIDATOR.validate(token)
+    assert err.value.status_code == 401
+
+
+def test_alg_none_rejected() -> None:
+    import time
+
+    issued = int(time.time())
+    token = jwt.encode(
+        {"iss": ISSUER, "aud": AUDIENCE, "sub": "alice", "exp": issued + 300,
+         "iat": issued, "scope": "fleet:read", "tenant": "tenant-nwr"},
+        key=None,
+        algorithm="none",
+    )
+    with pytest.raises(HTTPException) as err:
+        VALIDATOR.validate(token)
+    assert err.value.status_code == 401
+
+
+def test_unknown_kid_rejected() -> None:
+    token = mint_token("alice", ["fleet:read"], now=None, kid="nwr-rotated-2099")
+    with pytest.raises(HTTPException) as err:
+        VALIDATOR.validate(token)
+    assert err.value.status_code == 401
+    assert err.value.detail == "unknown key id"
+
+
+def test_tampered_signature_rejected() -> None:
+    token = mint_token("alice", ["fleet:read"], now=None)
+    head, payload, _sig = token.split(".")
+    tampered = f"{head}.{payload}.AAAA{token.split('.')[2][4:]}"
+    with pytest.raises(HTTPException):
+        VALIDATOR.validate(tampered)
+
+
+def test_scope_enforcement_end_to_end() -> None:
+    client = TestClient(demo_app(VALIDATOR))
+    reader = mint_token("alice", ["fleet:read"], now=None)
+    commander = mint_token("bob", ["fleet:command"], now=None)
+    assert client.get(
+        "/v1/fleet/commands", headers={"Authorization": f"Bearer {reader}"}
+    ).status_code == 403
+    response = client.get(
+        "/v1/fleet/commands", headers={"Authorization": f"Bearer {commander}"}
+    )
+    assert response.status_code == 200
+    assert response.json()["by"] == "bob"
+    assert client.get("/v1/whoami").status_code == 401  # no header at all
+
+
+def test_validator_requires_nonempty_jwks() -> None:
+    with pytest.raises(ValueError):
+        TokenValidator({}, issuer=ISSUER, audience=AUDIENCE)
+
+
+def test_minted_key_fixture_is_self_consistent() -> None:
+    # Guards the fixture itself: the synthetic keypair must sign/verify.
+    token = jwt.encode({"sub": "selftest"}, SYNTHETIC_PRIVATE_PEM, algorithm="RS256")
+    decoded = jwt.decode(
+        token, next(iter(JWKS.values())), algorithms=["RS256"]
+    )
+    assert decoded["sub"] == "selftest"
+\end{minted}
+
+\begin{minted}{python}
+"""Tests for the authorization guards in authz.py."""
+
+from __future__ import annotations
+
+import pytest
+
+from authz import (
+    ROBOT_READ_POLICY,
+    ROBOT_WRITE_POLICY,
+    ForbiddenError,
+    Guard,
+    apply_patch,
+    filter_fields,
+)
+
+ALICE_ROBOT = {
+    "id": 1001,
+    "name": "Welder-7",
+    "model": "NR-220",
+    "status": "idle",
+    "battery_pct": 88,
+    "last_seen": "2026-08-30T09:14:00Z",
+    "notes": "dock 3",
+    "owner_id": "alice",
+    "tenant_id": "tenant-nwr",
+    "firmware_version": "4.2.0",
+    "service_key": "sk_test_DEMO_robot1001_invalid",
+    "service_key_last4": "1001",
+    "maintenance_mode": False,
+}
+
+OWNER = Guard(actor_id="alice", tenant_id="tenant-nwr", roles=frozenset({"owner"}))
+STRANGER = Guard(actor_id="mallory", tenant_id="tenant-nwr", roles=frozenset({"owner"}))
+ADMIN = Guard(actor_id="carol", tenant_id="tenant-nwr", roles=frozenset({"admin"}))
+CROSS_TENANT = Guard(actor_id="alice", tenant_id="tenant-other", roles=frozenset({"admin"}))
+
+
+def test_owner_reads_own_robot() -> None:
+    OWNER.require_read(ALICE_ROBOT)
+
+
+def test_stranger_denied_read_and_write() -> None:
+    with pytest.raises(ForbiddenError):
+        STRANGER.require_read(ALICE_ROBOT)
+    with pytest.raises(ForbiddenError):
+        STRANGER.require_write(ALICE_ROBOT)
+
+
+def test_admin_reads_but_does_not_own_write() -> None:
+    ADMIN.require_read(ALICE_ROBOT)
+    with pytest.raises(ForbiddenError):
+        ADMIN.require_write(ALICE_ROBOT)
+
+
+def test_cross_tenant_admin_denied() -> None:
+    with pytest.raises(ForbiddenError):
+        CROSS_TENANT.require_read(ALICE_ROBOT)
+
+
+def test_filter_fields_hides_secrets_from_owner() -> None:
+    view = filter_fields(ALICE_ROBOT, ROBOT_READ_POLICY, ["owner"])
+    assert "service_key" not in view
+    assert "owner_id" not in view
+    assert view["name"] == "Welder-7"
+
+
+def test_filter_fields_admin_gets_last4_not_secret() -> None:
+    view = filter_fields(ALICE_ROBOT, ROBOT_READ_POLICY, ["admin"])
+    assert view["service_key_last4"] == "1001"
+    assert "service_key" not in view
+
+
+def test_filter_fields_unknown_role_gets_nothing() -> None:
+    assert filter_fields(ALICE_ROBOT, ROBOT_READ_POLICY, ["intruder"]) == {}
+
+
+def test_apply_patch_allows_writable_fields() -> None:
+    updated = apply_patch(
+        ALICE_ROBOT, {"name": "Welder-7b"}, ROBOT_WRITE_POLICY, ["owner"]
+    )
+    assert updated["name"] == "Welder-7b"
+    assert updated["owner_id"] == "alice"
+
+
+def test_apply_patch_rejects_server_owned_fields() -> None:
+    with pytest.raises(ForbiddenError):
+        apply_patch(
+            ALICE_ROBOT,
+            {"owner_id": "mallory"},
+            ROBOT_WRITE_POLICY,
+            ["owner"],
+        )
+
+
+def test_apply_patch_reinstates_invariants_even_for_admin() -> None:
+    forged = dict(ALICE_ROBOT)
+    forged["owner_id"] = "mallory"
+    updated = apply_patch(
+        forged, {"status": "charging"}, ROBOT_WRITE_POLICY, ["admin"]
+    )
+    assert updated["owner_id"] == "mallory"  # stored value preserved verbatim
+    assert updated["status"] == "charging"
+\end{minted}
+
+\begin{minted}{python}
+"""Tests for the SSRF-safe outbound fetcher against the simulated network."""
+
+from __future__ import annotations
+
+import pytest
+
+from fake_network import make_client, simulated_dns
+from ssrf_fetcher import OutboundPolicy, SafeFetcher, SsrfBlockedError
+
+POLICY = OutboundPolicy(
+    allowed_hosts=frozenset({"telemetry.partner-nwr.example"})
+)
+
+
+def _fetcher() -> SafeFetcher:
+    return SafeFetcher(POLICY, make_client(), resolve=simulated_dns)
+
+
+def test_allowed_host_fetches() -> None:
+    body = _fetcher().fetch_text("https://telemetry.partner-nwr.example/v1/manifest")
+    assert "firmware" in body
+
+
+def test_metadata_ip_blocked_by_host_allowlist() -> None:
+    with pytest.raises(SsrfBlockedError):
+        _fetcher().fetch_text("http://169.254.169.254/latest/meta-data")
+
+
+def test_internal_host_blocked() -> None:
+    with pytest.raises(SsrfBlockedError):
+        _fetcher().fetch_text("http://inventory.internal.nwr/status")
+
+
+def test_scheme_restriction_blocks_file_and_gopher() -> None:
+    with pytest.raises(SsrfBlockedError):
+        _fetcher().fetch_text("file:///etc/passwd")
+    with pytest.raises(SsrfBlockedError):
+        _fetcher().fetch_text("gopher://telemetry.partner-nwr.example/")
+
+
+def test_userinfo_trick_blocked() -> None:
+    with pytest.raises(SsrfBlockedError):
+        _fetcher().fetch_text(
+            "http://telemetry.partner-nwr.example@169.254.169.254/latest"
+        )
+
+
+def test_dns_rebinding_blocked_when_host_resolves_private() -> None:
+    fetcher = SafeFetcher(
+        POLICY,
+        make_client(),
+        resolve=lambda host: ["10.20.0.14"],  # rebind: good name, bad address
+    )
+    with pytest.raises(SsrfBlockedError):
+        fetcher.fetch_text("https://telemetry.partner-nwr.example/v1/manifest")
+
+
+def test_redirect_target_is_revalidated() -> None:
+    policy = OutboundPolicy(
+        allowed_hosts=frozenset(
+            {"telemetry.partner-nwr.example", "short.partner-nwr.example"}
+        )
+    )
+    fetcher = SafeFetcher(policy, make_client(), resolve=simulated_dns)
+    # short.partner-nwr.example 302s to the metadata endpoint: the hop is
+    # re-validated and blocked even though the *first* URL was allowed.
+    with pytest.raises(SsrfBlockedError):
+        fetcher.fetch_text("https://short.partner-nwr.example/x")
+\end{minted}
+
+%% ----------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch16-pitfalls}
+
+\begin{description}[style=nextline, itemsep=0.5em]
+  \item[Authentication without authorization.] The gateway validates the
+        JWT and the service calls it ``secure.'' But API1, API3, API5, and
+        API6 all fire \emph{after} perfect authentication. If your
+        authorization logic fits in the gateway config, you do not have
+        authorization logic.
+  \item[Trusting client-supplied IDs.] Any identifier from path, query, or
+        body is a \emph{request}, not a \emph{fact}. Fetch the object, then
+        check the object against the principal. ``The client would never
+        send that'' is the BOLA creed; clients are attackers who have not
+        been caught yet.
+  \item[PATCH merging the request into the model.]
+        \texttt{record.update(body)} is mass assignment as a one-liner.
+        The wire schema and the storage schema are different contracts ---
+        Pydantic gives you \texttt{extra="forbid"}; use it, and layer the
+        role-keyed write policy beneath it.
+  \item[Debug endpoints left in production.] ``Unlinked'' is not
+        ``unreachable.'' If the route is compiled into the production
+        build, an attacker will enumerate it. Debug surfaces must be absent
+        from production artifacts, verified by a route-inventory diff in CI
+        (API9's discipline applied to API8's problem).
+  \item[Wildcard CORS with credentials.] Browsers refuse the literal pair,
+        so developers ``fix'' it by reflecting the \texttt{Origin} header
+        --- which is wildcard CORS with extra steps. Exact origins only,
+        credentials only where the first-party app genuinely needs cookies.
+  \item[Security by obscurity.] Undocumented routes, ``secret'' URLs,
+        unguessable-looking but sequential ids, hope as a patch process.
+        The route table leaks the day an SDK, an archived spec, or a
+        curious proxy log escapes. Obscurity may slow an attacker; it must
+        never be the control.
+  \item[Logging tokens and secrets.] Authorization headers in access logs,
+        request bodies in debug logs, ``temporary'' \texttt{print} of the
+        JWT payload. Treat logs as public within the org and one mis-shipped
+        export away from public \emph{tout court}; redact at the logging
+        boundary.
+  \item[Unversioned security dependencies.] Your authentication layer is
+        exactly as strong as the JWT library's patch state. Pin versions,
+        track CVEs, and treat security-library upgrades as fast-track
+        changes --- an \texttt{alg=none} acceptance CVE is a breach with a
+        version number.
+  \item[Fail-open error handling.] \texttt{except Exception: return
+        anonymous\_context} converts every authenticator bug into silent
+        access. AuthN/authZ code fails \emph{closed}: on any ambiguity, the
+        answer is no, loudly logged.
+  \item[Rate limits only on ``expensive-looking'' routes.] Attackers price
+        your endpoints better than you do. The promo redemption looked
+        cheap; the campaign budget disagreed. Limit by \emph{business
+        impact}, not by CPU intuition (API6).
+\end{description}
+
+%% ----------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch16-lab}
+
+\subsection{Lab: The Exploit-Then-Fix Gauntlet}
+
+\textbf{Objective.} Feel the red/green rhythm that production security work
+actually has: first prove the system is broken, then prove it is fixed, and
+never confuse the two directions.
+
+\textbf{Setup (PowerShell).}
+
+\begin{minted}{text}
+cd "C:\Training\Training Areas\Data jobs learning\APIs - Usage and development\code\ch16"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+\end{minted}
+
+\textbf{Phase 1 --- watch ten reds.} Assert the \emph{hardened contract}
+against the \emph{vulnerable} build:
+
+\begin{minted}{text}
+python -m pytest test_exploit_suite.py -q --target=vulnerable
+# 10 failed -- every OWASP item demonstrably exploitable
+\end{minted}
+
+Open two or three failures and read them as an attacker: the BOLA response
+body contains \texttt{"owner\_id": "bob"}; the SSRF response body contains
+\texttt{SecretAccessKey}; the promo counter happily reports eleven
+successes. Reds in this phase are evidence, not problems.
+
+\textbf{Phase 2 --- exploit interactively.} Fire up the vulnerable app and
+drive it by hand:
+
+\begin{minted}{text}
+python -c "import vulnerable_app, uvicorn; uvicorn.run(vulnerable_app.app, port=8765)"
+# in another shell:
+curl.exe -s http://127.0.0.1:8765/v1/debug/config
+curl.exe -s -X POST http://127.0.0.1:8765/v1/diagnostics/fetch `
+  -H "Content-Type: application/json" `
+  -d '{"url": "http://169.254.169.254/latest/meta-data"}'
+\end{minted}
+
+\textbf{Phase 3 --- watch ten greens.} The identical contract, the hardened
+build:
+
+\begin{minted}{text}
+python -m pytest test_exploit_suite.py -q --target=hardened
+# 10 passed
+\end{minted}
+
+\textbf{Phase 4 --- prove both directions at once.}
+
+\begin{minted}{text}
+python -m pytest -q
+# 44 passed: exploit demonstrations, token gauntlet, authz matrix,
+# SSRF gauntlet, STRIDE generator
+\end{minted}
+
+\textbf{Phase 5 --- break it yourself.} Pick one fix in
+\texttt{hardened\_app.py} (delete the \texttt{guard.require\_read} call, or
+change \texttt{extra="forbid"} to \texttt{"ignore"}), re-run the demo suite,
+and watch exactly one test catch exactly your sabotage. If none does, the
+suite --- not the fix --- is wrong: add the missing test.
+
+\subsection{War Story: The BOLA Breach That Walked the Primary Keys}
+
+A fleet-management provider (think Northwind Robotics with worse luck)
+shipped \texttt{GET /api/devices/\{id\}} behind a perfectly modern stack:
+TLS everywhere, RS256 access tokens, scopes checked at the gateway, SOC~2
+badge gleaming. The handler looked up the device and returned it; ownership
+was ``handled by the mobile app,'' which only ever requested devices the
+user owned. The ids were sequential integers starting at 10\,000.
+
+A security researcher registered a free account, captured one request,
+decremented the id, and received another customer's device --- location
+history, owner email, and an MQTT password. A weekend script walking
+\texttt{id} downward harvested 1.4~million devices before a finance analyst
+asked why the API bill tripled. There had been no alarm: every request was
+authenticated, schema-valid, and a \texttt{200 OK}. The postmortem's
+action items map one-to-one onto this chapter: object-level checks in the
+handler (API1), unguessable ids as depth (API1), removal of internal fields
+from responses (API3), per-principal enumeration anomaly alerts
+(detection), and a regression test asserting the 403 --- the exploit suite
+pattern you have now run yourself. The company's cryptography was never
+attacked. It never mattered.
+
+%% ----------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch16-exercises}
+
+\subsection*{Exercises}
+
+\begin{enumerate}[label=\textbf{E16.\arabic*.}, leftmargin=1.9cm, itemsep=0.4em]
+  \item \textbf{Close the redirect hole by hand.} Extend
+        \texttt{test\_ssrf\_fetcher.py} with a second simulated redirect:
+        an allowed host that chains two 302s before landing on
+        \texttt{inventory.internal.nwr}. Prove the fetcher blocks the final
+        hop, then lower \texttt{max\_redirects} to 1 and prove the chain
+        dies earlier. What does each failure mode tell the operator?
+  \item \textbf{Add a role.} Add a \texttt{support} role to
+        \texttt{authz.py} that may read \texttt{notes} but not
+        \texttt{battery\_pct}, and may write nothing. Add the policy rows
+        and three tests, including ``support plus owner'' union behavior.
+  \item \textbf{Break the token pipeline safely.} In
+        \texttt{token\_validation.py}, move the claims mapping ahead of
+        signature verification (do not keep this code). Which existing test
+        catches it? If none does, write one that mints an unsigned token
+        with \texttt{alg=HS256} and an attacker-chosen \texttt{sub}.
+  \item \textbf{Inventory audit.} Use \texttt{app.routes} on both builds to
+        list every route; diff them against the OpenAPI document. Which
+        vulnerable-build routes are absent from its own spec, and which
+        OWASP item does that instantiate?
+  \item \textbf{Property-level read diff.} Capture the JSON returned for
+        robot 1001 by \emph{each} role against the hardened build and diff
+        the field sets against \texttt{ROBOT\_READ\_POLICY}. Then do the
+        same against the vulnerable build and count the excess fields.
+\end{enumerate}
+
+\subsection*{Deep-Dive Questions}
+
+\begin{enumerate}[label=\textbf{D16.\arabic*.}, leftmargin=1.9cm, itemsep=0.4em]
+  \item Why is \texttt{aud} enforcement still mandatory when your IdP only
+        issues tokens to one audience today? Trace the failure eighteen
+        months later when a second API appears.
+  \item The chapter claims dependent layers ``add ceremony.'' Give a
+        concrete pair of defenses against mass assignment that are
+        \emph{dependent} (share a failure mode) and a pair that are
+        \emph{independent}.
+  \item DNS pinning validates the resolved address and connects to it.
+        What breaks about TLS hostname verification when you connect by IP,
+        and how do production SSRF guards resolve that tension?
+  \item In the token-exchange pattern, what should happen to the
+        \texttt{sub} and \texttt{act} claims across two hops, and what do
+        you lose if hop two impersonates instead of delegates?
+  \item Which of the ten OWASP items are \emph{invisible} to a Web
+        Application Firewall at the edge, and why? (Hint: anything
+        requiring knowledge of object ownership.)
+  \item The promo rate limiter in the hardened app is a per-process
+        counter. What changes when the service runs twelve replicas, and
+        which Chapter~\ref{ch:rate_limiting} architecture applies?
+\end{enumerate}
+
+%% ----------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch16-interviews}
+
+\subsection*{Junior (Q1--Q10)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm, itemsep=0.9em]
+  \item \textbf{Explain BOLA and its mitigation.}\par
+        \textbf{A.} Broken Object Level Authorization: the server checks
+        \emph{that} you're logged in but not \emph{whether} you may touch
+        the requested object, so \texttt{/v1/robots/1002} returns someone
+        else's robot. Mitigate in the handler: fetch the object, compare
+        its \texttt{owner\_id}/\texttt{tenant\_id} to the authenticated
+        principal, default-deny, and add unguessable ids as depth ---
+        never as the control.
+  \item \textbf{What is the difference between authentication and
+        authorization?}\par
+        \textbf{A.} Authentication proves identity with cryptographic
+        evidence; authorization decides what that identity may do ---
+        function (scope/role), object (ownership), and properties
+        (fields). Conflating them is how ``authenticated'' APIs leak other
+        tenants' data.
+  \item \textbf{What are the three segments of a JWT, and which are
+        protected?}\par
+        \textbf{A.} Header, payload, signature, base64url-joined. Only the
+        signature is integrity-protected; header and payload are readable
+        by anyone, so never put secrets in them~\cite{rfc7519}.
+  \item \textbf{Why is \texttt{alg=none} acceptance so dangerous?}\par
+        \textbf{A.} A ``JWT'' with algorithm \texttt{none} has no
+        signature at all --- anyone can mint one claiming any
+        \texttt{sub}. Validators must enforce a server-side algorithm
+        allow-list; never honor the \texttt{alg} the attacker supplies.
+  \item \textbf{What does a 401 mean versus a 403?}\par
+        \textbf{A.} 401: identity unknown or invalid (missing/bad token)
+        --- authenticate, then retry. 403: identity known, action refused
+        --- retrying unchanged will never succeed. 401 carries
+        \texttt{WWW-Authenticate}~\cite{rfc9110}.
+  \item \textbf{What is mass assignment?}\par
+        \textbf{A.} Binding the request body directly onto the model
+        (\texttt{record.update(patch)}), letting clients set server-owned
+        fields like \texttt{owner\_id} or \texttt{is\_admin}. Defense:
+        explicit request schemas with \texttt{extra="forbid"} plus a
+        role-keyed writable-field policy.
+  \item \textbf{Why must API responses not serialize the database row
+        directly?}\par
+        \textbf{A.} Rows contain fields clients must never see --- service
+        keys, internal notes, other tenants' metadata. The client cannot
+        be trusted to hide them. Serialize a role-appropriate projection.
+  \item \textbf{What is SSRF in one paragraph?}\par
+        \textbf{A.} The server fetches an attacker-chosen URL, so the
+        attacker reaches destinations only the server can: internal
+        services, localhost, and the cloud metadata endpoint
+        \texttt{169.254.169.254}, which hands out instance credentials.
+  \item \textbf{Name three security headers and what each blocks.}\par
+        \textbf{A.} \texttt{X-Content-Type-Options: nosniff} (MIME
+        confusion), \texttt{X-Frame-Options: DENY} (clickjacking),
+        \texttt{Cache-Control: no-store} (sensitive data in caches).
+        \texttt{Strict-Transport-Security} and CSP belong on anything
+        serving HTML.
+  \item \textbf{Where do API keys belong in a request, and why?}\par
+        \textbf{A.} In a header (\texttt{Authorization} or a dedicated
+        key header). Query strings land in access logs, browser history,
+        and \texttt{Referer}; headers do not.
+\end{enumerate}
+
+\subsection*{Mid-Level (Q11--Q22)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm, itemsep=0.9em, start=11]
+  \item \textbf{Walk the safe JWT validation order.}\par
+        \textbf{A.} Structure (three segments) $\to$ \texttt{alg} against a
+        server allow-list $\to$ \texttt{kid} resolved against your trusted
+        JWKS $\to$ signature $\to$ \texttt{iss}, \texttt{aud},
+        \texttt{exp}/\texttt{nbf} with leeway $\to$ \emph{only then} map
+        claims to a principal. Any earlier claim use is a vulnerability.
+  \item \textbf{How does mass assignment differ from BOLA?}\par
+        \textbf{A.} BOLA is the wrong \emph{object}; mass assignment is
+        the wrong \emph{properties} on the right object. They compose: a
+        BOLA read plus mass-assignment write is a full account takeover.
+        Different guards, same family --- OWASP groups mass assignment
+        under API3 with excessive data exposure~\cite{owaspapisecurity}.
+  \item \textbf{Coarse versus fine scopes --- how do you choose?}\par
+        \textbf{A.} Coarse scopes (\texttt{read}/\texttt{write}) are simple
+        but over-privilege; per-object scopes explode and still cannot
+        express dynamic ownership. Middle path: scopes name capability
+        classes (\texttt{fleet:command}), roles name standing, and the
+        resource server enforces object-level rules against its own data.
+  \item \textbf{What is audience restriction and what breaks without
+        it?}\par
+        \textbf{A.} \texttt{aud} names the intended resource server;
+        without enforcement, a token minted for a low-risk API replays
+        against your high-risk one --- lateral movement with valid
+        signatures. Validate \texttt{aud} exactly, on every service.
+  \item \textbf{Explain token exchange for service-to-service calls.}\par
+        \textbf{A.} Service A exchanges the inbound user token at the IdP
+        for a new token with audience \texttt{service-b} and minimum
+        scopes, keeping the user visible via an actor claim (delegation,
+        not impersonation). Least privilege per hop, auditable chain.
+  \item \textbf{Design SSRF defenses in layers.}\par
+        \textbf{A.} Scheme allow-list; exact host allow-list (no suffix
+        matches, no raw IPs, no userinfo); port restriction; resolve-then-
+        validate DNS against private/link-local ranges and connect to the
+        validated address (anti-rebinding); re-validate every redirect hop;
+        size/type caps; platform egress rules as the backstop.
+  \item \textbf{What is DNS rebinding and how does pinning stop it?}\par
+        \textbf{A.} The attacker's domain resolves to a public IP at your
+        validation moment, then to 127.0.0.1 or a link-local address at
+        connect moment (short TTL, race). Pinning: resolve once, validate
+        every returned address, and connect to \emph{that} address ---
+        the TOCTOU window disappears.
+  \item \textbf{Why is ``filter the response fields in the serializer''
+        safer than ``don't put secrets in the model''?}\par
+        \textbf{A.} The model must hold secrets for its own work
+        (signing, rotation). The serializer is the boundary where context
+        (the caller's role) is available, so the allow-list projection
+        belongs there. Secrets-in-model is unavoidable; secrets-on-wire is
+        the bug.
+  \item \textbf{How do you threat-model one endpoint with STRIDE?}\par
+        \textbf{A.} Enumerate the route's inputs, state changes, and
+        outputs; walk Spoofing/Tampering/Repudiation/Information
+        Disclosure/DoS/Elevation asking ``how could this happen here?'';
+        each credible threat gets a mitigation and a detection signal; each
+        abuse case becomes an executable acceptance test.
+  \item \textbf{Wildcard CORS with credentials --- what's the trap?}\par
+        \textbf{A.} Browsers reject \texttt{Access-Control-Allow-Origin: *}
+        with credentials, so developers reflect the request's
+        \texttt{Origin} instead --- which is universal cross-origin read
+        access for any malicious site. Exact allow-lists only; and CORS is
+        browser-only, never an authN/Z substitute.
+  \item \textbf{When does a cookie-authenticated API need CSRF defenses,
+        and which?}\par
+        \textbf{A.} Whenever browsers attach credentials automatically.
+        \texttt{SameSite=Lax/Strict} baseline; synchronizer-token or
+        double-submit header for state-changing methods; custom-header
+        requirement as depth. Bearer tokens in \texttt{Authorization}
+        headers are CSRF-immune by construction.
+  \item \textbf{What's wrong with sequential integer ids?}\par
+        \textbf{A.} Nothing cryptographically --- but they turn any BOLA
+        into bulk enumeration and leak business volume. Use random
+        UUIDv4/UUIDv7 externally \emph{as defense in depth} while the
+        ownership check remains the actual control.
+\end{enumerate}
+
+\subsection*{Senior \& Staff (Q23--Q33)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm, itemsep=0.9em, start=23]
+  \item \textbf{Design authorization for a multi-tenant API.}\par
+        \textbf{A.} Tenant in the token (signed claim, not a header the
+        client picks); every stored object carries \texttt{tenant\_id};
+        the guard requires \texttt{record.tenant\_id ==
+        principal.tenant} before any role logic; cross-tenant admin
+        operations go through a separate audited elevation path; tests
+        include cross-tenant access for every route. Add
+        tenant-scoped rate limits so one tenant's abuse cannot starve
+        others.
+  \item \textbf{Scope design for a payments API?}\par
+        \textbf{A.} Capability classes per risk tier:
+        \texttt{payments:read}, \texttt{payments:create},
+        \texttt{payments:refund}, \texttt{payouts:configure} --- the last
+        two step-up protected (fresh auth, MFA evidence in
+        \texttt{acr}/\texttt{amr}). Amount limits as \emph{policy}, not
+        scope combinatorics; object-level checks (this merchant's
+        payments only) in the resource server; every mutation idempotent
+        (Chapter~\ref{ch:idempotency}) and audited.
+  \item \textbf{mTLS versus bearer tokens for service identity --- decide
+        and defend.}\par
+        \textbf{A.} mTLS binds identity to the transport and the
+        workload's key possession --- nothing reusable crosses the wire ---
+        but user semantics (scopes, delegation) don't fit certificates.
+        Bearer tokens carry rich, expiring, audience-restricted context but
+        are copyable. Production answer: both --- mTLS (SPIFFE/SPIRE
+        SVIDs, auto-rotated) authenticates the workload channel; a
+        narrowly-scoped token inside carries the user context.
+  \item \textbf{Your JWKS endpoint is unavailable during a deploy. Design
+        the failure mode.}\par
+        \textbf{A.} Cache keys with TTL well beyond token lifetime; on
+        unknown \texttt{kid}, one rate-limited refetch, then 401 (fail
+        closed) --- never accept on cache miss. Pre-warm caches on
+        rotation; overlap old/new keys in the published set so in-flight
+        tokens verify through rollover.
+  \item \textbf{How would you detect BOLA exploitation in
+        production?}\par
+        \textbf{A.} Per-principal object-access metrics: distinct owners
+        touched per subject, sequential-id walk detection, 403:200 ratio
+        shifts, enumeration velocity. Alert on \emph{successful}
+        cross-owner reads, not just denied ones --- denials are the
+        rehearsal; successes are the breach.
+  \item \textbf{Design the redaction boundary for logs.}\par
+        \textbf{A.} A logging middleware/filter with a deny-list
+        (\texttt{Authorization}, cookies, fields matching key patterns
+        like \texttt{sk\_*}) applied at emission, plus body capture off by
+        default in production. Treat centralized logs as a breach surface:
+        least-privilege access, retention limits, and periodic
+        gitleaks-style scans of the log store itself.
+  \item \textbf{API6 says the flow worked ``as designed.'' How do you
+        specify abuse-resistance for a business flow?}\par
+        \textbf{A.} Write the economic abuse case first (``drain the
+        budget via fresh accounts''); derive quantitative invariants
+        (redemptions per verified identity $\le 1$, per-IP velocity,
+        per-campaign budget circuit breaker); implement as layered
+        controls (token bucket per principal, device/identity
+        correlation, anomaly alerts); express each as an executable test
+        --- this chapter's \texttt{test\_api6} is the template.
+  \item \textbf{A partner API you consume is compromised. What did your
+        architecture already assume?}\par
+        \textbf{A.} Upstream responses are untrusted input: schema
+        validation with \texttt{extra="ignore"}, field-level allow-listing
+        into your domain model, timeouts and size caps, no following of
+        upstream-supplied URLs without the SSRF gauntlet, provenance
+        logging, and a kill switch per integration. Their breach becomes
+        your 502 spike, not your data corruption (API10).
+  \item \textbf{How do you keep the API inventory honest at scale?}\par
+        \textbf{A.} The deployed route table \emph{is} the inventory:
+        generate it from OpenAPI specs in CI, diff gateway-observed routes
+        against it (any unlisted route is an incident), enforce
+        default-deny at the gateway, attach owners and end-of-life dates
+        to every version (Chapter~\ref{ch:versioning},
+        Chapter~\ref{ch:lifecycle}), and alert on any traffic to retired
+        versions --- nonzero v0 traffic is the smoke alarm.
+  \item \textbf{Critique: ``We put authorization in the API gateway, so
+        services trust gateway headers.''}\par
+        \textbf{A.} Fine only if the network is provably closed (mTLS
+        everywhere, no path to services except the gateway, header
+        stripping at the edge) --- one misconfigured ingress and callers
+        forge \texttt{X-User-Role: admin}. Depth says: gateway enforces
+        coarse policy, services still verify a signed token and enforce
+        object-level rules against their own data.
+  \item \textbf{Design certificate rotation that cannot page you at
+        3~a.m.}\par
+        \textbf{A.} Short-lived workload certs issued by an internal CA
+        (SPIRE), renewed automatically at half-life; trust bundles served
+        with old+new during overlap; clients reload without restarts;
+        alerts on \emph{renewal failures}, not on expiry; a documented
+        break-glass procedure whose drill runs quarterly. Manual rotation
+        is an outage you have scheduled.
+  \item \textbf{Which OWASP API items does a WAF not solve, and how do you
+        explain that to an executive?}\par
+        \textbf{A.} API1, API3, API5, most of API6 and API9 --- they are
+        \emph{logic} failures indistinguishable from legitimate traffic at
+        the edge: every malicious request was authenticated,
+        schema-valid, and rate-reasonable. Executive framing: the WAF is
+        the building's front door; these attacks use a valid key and walk
+        to the wrong office. The controls live in the application and the
+        inventory, and they are testable --- here is the suite.
+\end{enumerate}
+
+%% ----------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch16-bibliography}
+
+\begin{itemize}[itemsep=0.3em]
+  \item \textbf{OWASP API Security Top 10 (2023)}~\cite{owaspapisecurity}
+        --- the taxonomy this chapter is organized around; read the
+        project page's per-item ``Is the API Vulnerable?'' sections
+        alongside Section~\ref{sec:ch16-api1}--\ref{sec:ch16-api10}.
+  \item \textbf{OWASP Application Security Verification Standard (ASVS)}
+        --- the control checklist for turning this chapter into an audit;
+        sections V1 (architecture), V3 (session/token management), and
+        V13 (API verification) map directly onto our pipeline.
+  \item \textbf{OWASP Cheat Sheet Series} --- especially the \emph{REST
+        Security}, \emph{JSON Web Token}, \emph{Server Side Request
+        Forgery Prevention}, and \emph{Cross-Site Request Forgery
+        Prevention} sheets; the pragmatic counterparts to the standards.
+  \item \textbf{RFC 6749} (OAuth 2.0)~\cite{rfc6749} and \textbf{RFC 7519}
+        (JWT)~\cite{rfc7519} --- read the Security Considerations sections
+        first; they anticipate half the exploits in this chapter.
+  \item \textbf{RFC 8446} (TLS 1.3)~\cite{rfc8446} --- the handshake that
+        mTLS extends with \texttt{CertificateRequest}; worth reading for
+        the transcript-authentication design.
+  \item \textbf{RFC 9110} (HTTP Semantics)~\cite{rfc9110} --- the precise
+        meanings of 401/403, \texttt{WWW-Authenticate}, caching and
+        \texttt{Vary} rules your response-security posture depends on.
+  \item \textbf{\emph{API Security in Action}} (Neil Madden, Manning) ---
+        the book-length treatment: capability tokens, macaroons,
+        fine-grained authorization, and hardened OAuth patterns.
+  \item \textbf{PortSwigger Web Security Academy} --- free, hands-on labs
+        for SSRF, access control, and injection; the closest public
+        equivalent of this chapter's exploit gauntlet.
+  \item \textbf{FastAPI}~\cite{fastapidocs} and
+        \textbf{Pydantic}~\cite{pydanticdocs} documentation --- security
+        utilities, dependency injection, and \texttt{extra}/strict model
+        configuration used throughout Section~\ref{sec:ch16-code}.
+  \item \textbf{\emph{Release It!}} (Nygard)~\cite{nygard2018releaseit} ---
+        the stability patterns (bulkheads, circuit breakers, fail-fast)
+        that keep API4/API6 controls from becoming outages themselves.
+\end{itemize}
+
+%% ----------------------------------------
+\section{Capstone Projects}
+\label{sec:ch16-capstones}
+
+\subsection*{Capstone 16.1 --- BOLA Hunter \textbf{[junior]}}
+
+\textbf{Objective.} Build a small FastAPI notes API (\texttt{GET/PATCH
+/notes/\{id\}}) with an ownership model, then write an exploit script and
+the fix.
+
+\textbf{Inputs/Datasets.} A synthetic in-memory store of 20 notes owned by
+4 fictional users; unsigned-lab tokens acceptable here (this capstone
+predates the JWT requirement).
+
+\textbf{Steps.} (1)~Implement the API with the ownership check
+deliberately missing on \texttt{GET}. (2)~Write \texttt{exploit.py} that
+enumerates ids 1--20 with one user's credential and dumps every note.
+(3)~Add the \texttt{Guard}-style object check. (4)~Re-run: the exploit
+must now produce 20 denials. (5)~Add a regression test asserting the 403.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}[itemsep=0.2em]
+  \item[$\square$] Exploit script retrieves a foreign note against the
+        vulnerable build.
+  \item[$\square$] Hardened build answers 403 for every cross-owner access.
+  \item[$\square$] Pytest suite: exploit-succeeds and fix-holds both
+        asserted, all offline.
+  \item[$\square$] README explains why unguessable ids alone would not fix
+        it.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add \texttt{ETag}-based conditional writes
+(Chapter~\ref{ch:idempotency}); make ids UUIDv7 and show the enumeration
+script fail (then explain why that is not the control).
+
+\subsection*{Capstone 16.2 --- Scope Forge \& Token Gauntlet \textbf{[mid]}}
+
+\textbf{Objective.} Stand up a toy resource server with the full
+token-validation pipeline and a scope model, then attack it with a
+forgery battery.
+
+\textbf{Inputs/Datasets.} This chapter's \texttt{jwks\_fixture.py} and
+\texttt{token\_validation.py}; a scope vocabulary you design for a
+three-resource fleet domain.
+
+\textbf{Steps.} (1)~Design coarse/fine scope sets; document the trade-off.
+(2)~Wire the validator into three endpoints with different required scopes.
+(3)~Write adversarial tests: expired, wrong \texttt{aud}, wrong
+\texttt{iss}, \texttt{alg=none}, unknown \texttt{kid}, tampered payload,
+missing scope. (4)~Add \texttt{WWW-Authenticate} diagnostics on failures.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}[itemsep=0.2em]
+  \item[$\square$] Seven forgery tests all produce 401/403, none 200.
+  \item[$\square$] Validation order provably never reads claims before
+        signature verification (test with an unsigned token carrying
+        admin claims).
+  \item[$\square$] Scope design document justifies each scope's
+        granularity.
+\end{itemize}
+
+\textbf{Stretch Goals.} Implement token exchange to a second ``service''
+with narrowed scope and audience; add clock-skew boundary tests.
+
+\subsection*{Capstone 16.3 --- SSRF Bunker \textbf{[mid]}}
+
+\textbf{Objective.} Harden a ``webhook tester'' feature against SSRF with
+the full seven-layer gauntlet and a simulated adversary network.
+
+\textbf{Inputs/Datasets.} \texttt{fake\_network.py} plus two hosts you add:
+one that redirects twice into link-local space, one serving a 1\,MB body.
+
+\textbf{Steps.} (1)~Build the naive fetcher and exploit it three ways
+(metadata IP, internal host, redirect chain). (2)~Layer in the
+\texttt{SafeFetcher} policy one control at a time, re-running exploits
+after each. (3)~Add DNS-pinning and redirect re-validation tests.
+(4)~Document which layer stops which exploit, including the layers that
+stop \emph{nothing} alone but matter in composition.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}[itemsep=0.2em]
+  \item[$\square$] All naive exploits succeed pre-fix, all blocked
+        post-fix, demonstrated in one pytest run.
+  \item[$\square$] DNS-rebinding and redirect tests included.
+  \item[$\square$] A layer-by-layer blame table in the README.
+\end{itemize}
+
+\textbf{Stretch Goals.} IPv6-mapped IPv4 bypass attempts; egress-rule
+simulation as a second, independent transport wrapper.
+
+\subsection*{Capstone 16.4 --- Threat-Model Pipeline \textbf{[senior]}}
+
+\textbf{Objective.} Turn threat modeling into a build artifact: extend
+\texttt{stride\_worksheet.py} into a CI gate that fails when new endpoints
+ship without completed STRIDE rows.
+
+\textbf{Inputs/Datasets.} The hardened app's OpenAPI document; a completed
+worksheet file per endpoint checked into the repo.
+
+\textbf{Steps.} (1)~Extend the generator with heuristics for query-string
+filters, file uploads, and webhook registrations. (2)~Add a
+\texttt{--check} mode that diffs generated skeletons against committed,
+human-completed worksheets. (3)~Wire it as a CI step; demonstrate a red
+build by adding an undocumented route. (4)~Write two abuse cases with
+executable acceptance tests.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}[itemsep=0.2em]
+  \item[$\square$] \texttt{--check} exits nonzero on undocumented or
+        unmodeled endpoints, zero when worksheets are current.
+  \item[$\square$] At least three new heuristics with unit tests.
+  \item[$\square$] Two abuse cases expressed as passing security tests.
+\end{itemize}
+
+\textbf{Stretch Goals.} Emit attack-tree DOT files from the worksheet
+annotations; score endpoint risk by flag count and data sensitivity.
+
+\subsection*{Capstone 16.5 --- Full Red Team / Blue Team Exercise \textbf{[staff]}}
+
+\textbf{Objective.} Run a two-sided exercise on a multi-service Northwind
+Robotics topology: a red team exploits a seeded environment; a blue team
+ships fixes without breaking the contract test suite.
+
+\textbf{Inputs/Datasets.} This chapter's vulnerable app extended with a
+second service (billing), a JWKS fixture with two audiences, and the
+simulated network; a scoring rubric mapping findings to OWASP items.
+
+\textbf{Steps.} (1)~Seed at least ten flaws across both services,
+including one cross-service token-confusion flaw (billing tokens accepted
+by fleet). (2)~Red team: document each exploit as a failing contract test
+before showing it. (3)~Blue team: fix until the contract suite is green
+and the Chapter~\ref{ch:testing} functional suite stays green. (4)~Retro:
+map every finding to an OWASP item, a detection signal, and a control that
+would have prevented it by construction.
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}[itemsep=0.2em]
+  \item[$\square$] Every red finding exists as an executable contract test
+        (no slide-deck-only findings).
+  \item[$\square$] Cross-service audience-confusion exploit demonstrated
+        and closed.
+  \item[$\square$] Functional test suite remains green after hardening
+        (security fixes must not break the contract).
+  \item[$\square$] Retro document: findings $\to$ OWASP items $\to$
+        detection $\to$ permanent control.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add mTLS between the two services via a local CA
+and show the token-confusion exploit's remaining path; introduce a
+deliberate regression and measure time-to-detect with the new alerts.
+
+%% ----------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch16-deps}
+
+The chapter's \texttt{requirements.txt} (also in
+\texttt{code\textbackslash{}ch16\textbackslash{}requirements.txt}):
+
+\begin{minted}{text}
+fastapi>=0.110
+pyjwt[crypto]>=2.8
+httpx>=0.27
+pytest>=8
+pydantic>=2.7
+\end{minted}
+
+\subsection{fastapi}
+
+\textbf{Description.} The ASGI framework hosting both builds; its
+dependency-injection system is where authentication and authorization
+compose, and its \texttt{TestClient} makes the whole suite in-process and
+offline.
+
+\textbf{Why included.} Every listing targets FastAPI
+\cite{fastapidocs}; pinning $\ge 0.110$ keeps the Pydantic~v2 integration
+and the security utilities used here.
+
+\textbf{Alternatives.} Starlette directly (FastAPI's substrate), Flask +
+flask-login-style extensions, or Litestar --- the guard patterns in
+\texttt{authz.py} port unchanged.
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "fastapi>=0.110"
+\end{minted}
+
+\subsection{pyjwt[crypto]}
+
+\textbf{Description.} The de-facto Python JWT library: encode/decode with
+algorithm allow-lists, claim validation (\texttt{iss}, \texttt{aud},
+\texttt{exp}, \texttt{nbf}), leeway, and --- via the \texttt{[crypto]}
+extra --- RSA/ECDSA verification through \texttt{cryptography}.
+
+\textbf{Why included.} Listing~\ref{lst:ch16-tokenvalidation} builds the
+JWKS-style pipeline on it: \texttt{algorithms=["RS256"]} is mandatory,
+\texttt{none} is rejected by construction, and \texttt{leeway} is a
+first-class parameter.
+
+\textbf{Alternatives.} \texttt{authlib} (full OAuth/OIDC client and server
+--- the better choice when you must \emph{issue} tokens, not just verify);
+\texttt{python-jose} (historically common, less actively maintained).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "pyjwt[crypto]>=2.8"
+\end{minted}
+
+\subsection{httpx}
+
+\textbf{Description.} The HTTP client (and FastAPI's test transport
+substrate). Its pluggable \texttt{transport} seam is what lets the chapter
+simulate the internet with \texttt{MockTransport}.
+
+\textbf{Why included.} Both SSRF halves depend on it: the vulnerable
+fetcher and the policy-wrapped \texttt{SafeFetcher} share one client
+interface, so the defense is a drop-in layer, not a rewrite.
+
+\textbf{Alternatives.} \texttt{requests} (no transport injection, no
+HTTP/2, sync-only); \texttt{aiohttp} (async but a different ecosystem).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "httpx>=0.27"
+\end{minted}
+
+\subsection{pytest}
+
+\textbf{Description.} The test runner; the exploit suite's
+\texttt{--target} option uses \texttt{pytest\_addoption} to switch between
+demonstration and contract modes.
+
+\textbf{Why included.} Security requirements as acceptance criteria is the
+chapter's thesis; pytest is where the criteria execute
+(Chapter~\ref{ch:testing} treats the harness itself).
+
+\textbf{Alternatives.} \texttt{unittest} (stdlib, no fixtures/parametrize
+ergonomics); \texttt{nose2} (effectively unmaintained). For property-based
+adversarial input generation, add \texttt{hypothesis} later.
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "pytest>=8"
+\end{minted}
+
+\subsection{pydantic}
+
+\textbf{Description.} The validation library underneath FastAPI: typed
+models, \texttt{extra="forbid"/"ignore"} policies, strict types, and
+constraint fields (\texttt{le}, \texttt{max\_length}) that turn resource
+ceilings into schema facts.
+
+\textbf{Why included.} API3's fix (explicit wire schemas), API4's fix
+(schema-level ceilings), and API10's fix (upstream payload validation) are
+all Pydantic models~\cite{pydanticdocs}; pinning $\ge 2.7$ keeps the v2
+\texttt{model\_validate}/\texttt{model\_dump} API used here.
+
+\textbf{Alternatives.} \texttt{marshmallow} (schema-first, more
+ceremony); \texttt{attrs}+\texttt{cattrs}; for policy-as-code beyond field
+filtering, look at policy engines in the \texttt{oso}/Cedar style ---
+valuable when authorization rules outgrow per-role tables and need
+centralized, auditable evaluation.
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{text}
+python -m pip install "pydantic>=2.7"
+\end{minted}
+
+%% ----------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch16-summary}
+
+\begin{itemize}[itemsep=0.3em]
+  \item The OWASP API Security Top 10 is mostly an \emph{authorization}
+        catalog: API1, API3, API5, API6, and API9 all fire after perfect
+        authentication. Armor the object, the property, the function, and
+        the flow --- not just the credential.
+  \item Token validation has one safe order: structure, algorithm
+        allow-list, \texttt{kid}-keyed JWKS resolution, signature,
+        \texttt{iss}/\texttt{aud}/\texttt{exp}, \emph{then} claims-based
+        authorization. Reading claims early is the root of the classic
+        JWT exploits.
+  \item Scopes are capability classes, not object permissions; object and
+        property decisions belong in the resource server next to the data.
+  \item mTLS (ideally SPIFFE/SPIRE-issued, auto-rotated) authenticates
+        \emph{workloads}; tokens carry \emph{user/delegated} context.
+        Strong platforms run both, each for its own job.
+  \item SSRF is a systems problem: scheme/host/port allow-lists, DNS
+        pinning, per-hop redirect re-validation, response caps, and
+        platform egress rules --- each layer independently sufficient.
+  \item Threat modeling pays rent only when abuse cases become executable
+        acceptance criteria; the exploit suite \emph{is} the security
+        requirements document.
+  \item Secrets are rotated, vaulted, and scanned for --- never committed,
+        never logged, and treated as compromised the moment a scanner
+        trips.
+  \item Every claim in this chapter runs: 10 exploit demonstrations,
+        10 reds, 10 greens, 44 tests, zero network.
+\end{itemize}
+
+%% ----------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch16-quickref}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{OWASP item} & \textbf{Mitigation matrix (control $\to$ detection)} \\
+\midrule
+API1 BOLA & Guard every object access; unguessable ids as depth $\to$ alert on cross-owner reads and id walks. \\
+API2 Broken AuthN & RS256/ES256 + JWKS + iss/aud/exp; throttle auth endpoints $\to$ 401 spikes, alg/kid anomalies. \\
+API3 BOPLA & \texttt{extra="forbid"} writes + role-keyed read/write field policies $\to$ unknown-field 422 spikes. \\
+API4 Resource & Schema ceilings, body caps, cost budgets, 429s $\to$ p99 latency and per-principal work units. \\
+API5 BFLA & Scope+role checks in dependencies; default-deny $\to$ 403 clusters on admin routes. \\
+API6 Flow abuse & Per-principal velocity limits; business invariants as code $\to$ funnel anomalies per flow. \\
+API7 SSRF & Allow-lists, DNS pinning, redirect re-validation, egress rules $\to$ egress destination histograms. \\
+API8 Misconfig & Debug compiled out, opaque 500s, exact CORS, security headers $\to$ route/config drift scans. \\
+API9 Inventory & Spec-driven inventory, gateway default-deny, EOL enforcement $\to$ traffic to unlisted routes. \\
+API10 Upstream & Schema-validate upstream, copy vetted fields only $\to$ upstream validation-failure spikes. \\
+\bottomrule
+\end{tabularx}
+\caption{OWASP API Top 10 mitigation matrix~\cite{owaspapisecurity}.}
+\label{tab:ch16-matrix}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{c X}
+\toprule
+\textbf{\#} & \textbf{Token validation checklist (in order)} \\
+\midrule
+1 & Three segments; base64url decodes; header/payload are JSON. \\
+2 & \texttt{alg} in server allow-list; \texttt{none} rejected outright. \\
+3 & \texttt{kid} resolves in your trusted JWKS map (one rate-limited refetch on miss). \\
+4 & Signature verifies against the resolved key. \\
+5 & \texttt{exp} present and in the future within leeway; \texttt{nbf}/\texttt{iat} sane. \\
+6 & \texttt{iss} exact match; \texttt{aud} contains this service. \\
+7 & Claims type-checked; only now mapped to a principal. \\
+8 & Scope check for the function; guard check for the object; field policy for the properties. \\
+\bottomrule
+\end{tabularx}
+\caption{The only safe token-validation order.}
+\label{tab:ch16-tokencheck}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Header} & \textbf{API value} \\
+\midrule
+\texttt{X-Content-Type-Options} & \texttt{nosniff} \\
+\texttt{X-Frame-Options} & \texttt{DENY} (or CSP \texttt{frame-ancestors 'none'}) \\
+\texttt{Content-Security-Policy} & \texttt{default-src 'none'} for JSON; \texttt{default-src 'self'} on docs routes \\
+\texttt{Cache-Control} & \texttt{no-store} on authenticated responses \\
+\texttt{Strict-Transport-Security} & \texttt{max-age=63072000; includeSubDomains} (once TLS is universal) \\
+\texttt{Access-Control-Allow-Origin} & Exact origins only; never \texttt{*} with credentials \\
+\bottomrule
+\end{tabularx}
+\caption{Secure-headers table for JSON APIs.}
+\label{tab:ch16-headers}
+\end{table}
+
+\input{chapters/_standard_addendum}
+

@@ -1,0 +1,3187 @@
+\chapter{Synthesis, Reference Architectures \& Future Directions}
+\label{ch:synthesis}
+
+\section*{Executive Summary}
+
+Every chapter so far has taken one API concern --- the wire protocol, a
+framework, an error model, a scaling tactic, a governance discipline --- and
+treated it with the depth it deserves. Real systems, however, are never about
+one concern. A production API platform is a \emph{composition}: HTTP semantics
+(Chapter~\ref{ch:http_wire}), REST resource design
+(Chapter~\ref{ch:rest_style}), GraphQL selection sets
+(Chapter~\ref{ch:graphql}), gRPC streaming (Chapter~\ref{ch:grpc}), event
+delivery (Chapter~\ref{ch:async_apis}), and the operational disciplines of
+security, observability, testing, and lifecycle governance
+(Chapters~\ref{ch:api_security}--\ref{ch:lifecycle}) all coexist inside one
+coherent architecture. This final chapter is about that composition.
+
+The chapter delivers four capstone artifacts. First, the \textbf{Master
+Decision Card}: a rigorous, constraint-driven selection framework for choosing
+between REST, GraphQL, gRPC, event-driven/webhook, and WebSocket/SSE
+interaction profiles --- expressed as decision tables, a decision tree, and
+worked scenarios, and then \emph{encoded as executable software}. Second, the
+\textbf{Northwind Robotics API Platform reference architecture}: one
+integrated design that uses every concept in the book, with per-layer
+commentary mapping each architectural element back to the chapter that taught
+it. Third, the \textbf{Grand Capstone}: a complete, buildable specification of
+that platform --- scope, domains, API surfaces, non-functional requirements, a
+four-milestone delivery plan, acceptance criteria, and an evaluation rubric.
+Fourth, an honest assessment of the \textbf{emerging frontiers} --- HTTP/3 and
+QUIC, AI-agent-consumed APIs and the Model Context Protocol, AI-assisted
+design, edge-native deployment, post-quantum TLS, and security automation ---
+so that you can separate deployable reality from conference-stage enthusiasm.
+
+The chapter closes the loop on your own development: a cross-cutting
+synthesis of the book's failure taxonomy, one-page-per-module summary tables,
+career pathways from junior to staff API engineer mapped to chapters, a
+consolidated bibliography, and five integrative capstone projects. The code in
+this chapter is deliberately integrative: a protocol-selection advisor with a
+full rationale trace, a single FastAPI application that exposes REST, GraphQL,
+and SSE surfaces with RFC~9457 errors, idempotency keys, and rate-limit
+headers, and an architecture conformance checker that turns the book's
+governance rules into executable policy.
+
+\section{Learning Objectives \& Prerequisites}
+
+After completing this chapter, you will be able to:
+
+\begin{itemize}
+  \item Select an API interaction profile (REST, GraphQL, gRPC,
+        event-driven, or streaming) from stated constraints, and defend the
+        selection with an explicit, auditable rationale.
+  \item Assemble a complete reference architecture --- edge, gateway,
+        services, data, observability, and governance --- and justify every
+        layer against the non-functional requirements it serves.
+  \item Specify a multi-protocol API platform to the standard a staff
+        engineer would expect: SLOs, security posture, rate tiers, delivery
+        milestones, and measurable acceptance criteria.
+  \item Diagnose which chapter's discipline applies to any concrete failure
+        mode observed in production.
+  \item Assess emerging API technologies (HTTP/3, MCP, edge-native compute,
+        post-quantum TLS) with a sober adopt/trial/wait classification.
+  \item Map your own competency growth from junior to staff engineer onto
+        concrete, chapter-anchored skills.
+  \item Encode architectural governance as executable policy that runs
+        offline in CI, and prove platform surfaces work together with
+        in-process smoke tests.
+\end{itemize}
+
+\subsection*{Prerequisites}
+
+This is the synthesis chapter: it assumes the whole book. You should be
+comfortable with HTTP message semantics and connection management
+(Chapter~\ref{ch:http_wire}), client-side consumption patterns
+(Chapter~\ref{ch:consuming_python}), REST maturity and resource modeling
+(Chapter~\ref{ch:rest_style}), serialization contracts
+(Chapter~\ref{ch:serialization}), building services with FastAPI
+(Chapter~\ref{ch:fastapi}), RFC~9457 error design
+(Chapter~\ref{ch:problem_details}), pagination and versioning
+(Chapters~\ref{ch:pagination}--\ref{ch:versioning}), idempotency and caching
+(Chapter~\ref{ch:idempotency}), asynchronous and event-driven APIs
+(Chapter~\ref{ch:async_apis}), GraphQL and gRPC
+(Chapters~\ref{ch:graphql}--\ref{ch:grpc}), rate limiting
+(Chapter~\ref{ch:rate_limiting}), microservice resilience
+(Chapter~\ref{ch:microservices}), security engineering
+(Chapter~\ref{ch:api_security}), deployment (Chapter~\ref{ch:deployment}),
+observability (Chapter~\ref{ch:observability}), testing
+(Chapter~\ref{ch:testing}), and lifecycle governance
+(Chapter~\ref{ch:lifecycle}). Sections below reference these chapters
+liberally rather than re-teaching them.
+
+\section{Deep Technical Mechanics \& Architectural Concepts}
+
+\subsection{The Master Decision Card: Choosing an Interaction Profile}
+\label{sec:decision-card}
+
+The most consequential API decision a team makes is rarely \emph{how} to
+implement a protocol --- it is \emph{which} protocol to implement. Choosing
+poorly is expensive in a way that refactoring cannot fix: the protocol is the
+contract your consumers build against, and contracts accrete
+(Chapter~\ref{ch:lifecycle}). The industry conversation about this choice is
+unfortunately dominated by fashion. The antidote is to treat protocol
+selection as \textbf{constraint satisfaction}, not taste.
+
+\begin{definition}[Interaction Profile]
+An \emph{interaction profile} is the combination of transport semantics,
+message format, delivery model, and contract style through which a consumer
+and provider exchange data. This book covers five: \textbf{REST} (resource
+oriented, HTTP semantics, Chapter~\ref{ch:rest_style}), \textbf{GraphQL}
+(selection sets over a typed graph, Chapter~\ref{ch:graphql}), \textbf{gRPC}
+(contract-first RPC over HTTP/2 with Protobuf, Chapter~\ref{ch:grpc}),
+\textbf{event-driven} (brokered events or signed webhooks,
+Chapter~\ref{ch:async_apis}), and \textbf{streaming} (Server-Sent Events or
+WebSockets, Chapter~\ref{ch:async_apis}).
+\end{definition}
+
+\subsubsection{The Six Criteria}
+
+The decision card evaluates a candidate interaction against six criteria.
+Each criterion is a question with a small set of allowed answers --- which is
+precisely what makes the framework encodable as the questionnaire of
+Listing~1 (Section~\ref{sec:code-advisor}).
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Criterion} & \textbf{Question} & \textbf{Why it dominates} \\
+    \midrule
+    Consumer type & Who calls this API? &
+      Browser-based third parties cannot speak raw gRPC; machines do not care
+      about human-readable payloads; mobile clients feel every over-fetched
+      byte on a metered radio. \\
+    Payload shape & Fixed resources or a nested graph? &
+      Deep object graphs make REST chatty (the N+1 endpoint problem) and make
+      GraphQL's selection sets pay for themselves. \\
+    Latency budget & What p99 must you hold? &
+      Sub-50\,ms service-to-service budgets favor gRPC's binary framing and
+      HTTP/2 multiplexing \cite{rfc9113,grpcdocs}; relaxed budgets tolerate
+      store-and-forward asynchrony. \\
+    Delivery model & Sync, push, or fire-and-forget? &
+      Structural constraint: unary request--response protocols cannot push.
+      If the server must initiate, you need SSE/WebSockets or events. \\
+    HTTP caching & Must shared caches help? &
+      Only REST GETs are addressable, cacheable resources under HTTP
+      semantics \cite{rfc9110}; POST-based GraphQL bypasses the CDN layer
+      entirely. \\
+    Team maturity & Exploratory or disciplined? &
+      GraphQL and gRPC pay off only with schema governance discipline; REST
+      has the shallowest tooling curve \cite{gehl2021apidesign}. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The six criteria of the Master Decision Card.}
+  \label{tab:decision-criteria}
+\end{table}
+
+\subsubsection{The Comparison Table}
+
+Table~\ref{tab:protocol-matrix} condenses twenty chapters of trade-offs into
+one grid. Read it as \emph{tendencies}, not laws --- each row has an entire
+chapter of nuance behind it.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X X X}
+    \toprule
+    & \textbf{REST} & \textbf{GraphQL} & \textbf{gRPC} & \textbf{Events/webhooks} & \textbf{SSE/WS} \\
+    \midrule
+    Primary consumer &
+      public, partner &
+      mobile, SPA, data &
+      internal services &
+      machines, partners &
+      dashboards, tickers \\
+    Delivery &
+      sync & sync & sync + streams & async, at-least-once & server push \\
+    Payload &
+      JSON resources \cite{rfc8259} &
+      client-shaped JSON &
+      binary Protobuf \cite{protobufdocs} &
+      event envelopes &
+      text frames / JSON \\
+    Caching &
+      full HTTP caching \cite{rfc9110} &
+      persisted queries only &
+      none &
+      n/a (push) &
+      no-cache streams \\
+    Contract &
+      OpenAPI \cite{openapi31} &
+      SDL schema \cite{graphqlspec} &
+      proto files \cite{grpcdocs} &
+      AsyncAPI \cite{asyncapi} &
+      AsyncAPI \\
+    Tooling curve &
+      shallow & medium & medium--steep & medium & shallow--medium \\
+    Failure mode &
+      N+1 hops & N+1 resolvers & coupling via stubs &
+      silent event loss & connection storms \\
+    Book chapter &
+      \ref{ch:rest_style} & \ref{ch:graphql} & \ref{ch:grpc} &
+      \ref{ch:async_apis} & \ref{ch:async_apis} \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Interaction profile comparison matrix (tendencies, not laws).}
+  \label{tab:protocol-matrix}
+\end{table}
+
+\begin{keyconceptbox}
+\textbf{Constraints choose protocols; engineers choose implementations.}
+If your stated constraints (consumer, payload, latency, delivery, caching,
+maturity) do not uniquely determine a profile, your constraints are not yet
+stated sharply enough. When two profiles genuinely tie, prefer the one your
+organization already operates well: operational maturity beats theoretical
+fit.
+\end{keyconceptbox}
+
+\subsubsection{The Decision Tree}
+
+Figure~\ref{fig:decision-tree} renders the card as a tree. The delivery model
+comes first because it is a \emph{structural} constraint --- no amount of
+engineering makes a unary REST endpoint push data to the client.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  >=stealth,
+  node distance=5mm and 10mm,
+  qnode/.style={flowstep, fill=blue!5, align=center},
+  ansnode/.style={flowstep, fill=green!5, align=center},
+  lbl/.style={note, midway}
+]
+\node[qnode] (d1) {Q4: delivery\\model?};
+\node[qnode, below left=14mm and 6mm of d1] (d2) {Q1+Q3: consumer and\\latency budget?};
+\node[ansnode, right=18mm of d1] (ev) {Event-driven\\webhooks / broker\\(Ch.~\ref{ch:async_apis})};
+\node[ansnode, above right=4mm and 18mm of d1] (st) {SSE / WebSockets\\(Ch.~\ref{ch:async_apis})};
+\node[ansnode, below left=6mm and 2mm of d2] (grpc) {gRPC\\(Ch.~\ref{ch:grpc})};
+\node[qnode, below right=6mm and 2mm of d2] (d3) {Q2: payload\\shape?};
+\node[ansnode, below left=6mm and 2mm of d3] (rest) {REST + OpenAPI\\(Ch.~\ref{ch:rest_style})};
+\node[ansnode, below right=6mm and 2mm of d3] (gql) {GraphQL\\(Ch.~\ref{ch:graphql})};
+
+\draw[->] (d1) -- node[lbl, above left] {sync} (d2);
+\draw[->] (d1) -- node[lbl, above] {fire-and-forget} (ev);
+\draw[->] (d1) -- node[lbl, above] {server push} (st);
+\draw[->] (d2) -- node[lbl, above left] {internal + p99 $<$ 50\,ms} (grpc);
+\draw[->] (d2) -- node[lbl, above right] {otherwise} (d3);
+\draw[->] (d3) -- node[lbl, above left] {fixed resources / caching} (rest);
+\draw[->] (d3) -- node[lbl, above right] {nested graph, mobile/SPA} (gql);
+\end{tikzpicture}
+\caption{The Master Decision Card as a decision tree. Question numbers refer
+to Table~\ref{tab:decision-criteria}; delivery is tested first because it is
+structural. Edge cases (gRPC-Web for browsers, GraphQL subscriptions over
+WebSockets) are refinements, not new branches.}
+\label{fig:decision-tree}
+\end{figure}
+
+\subsubsection{Worked Scenarios}
+
+The framework earns its keep on realistic, messy scenarios. Each of the five
+below is encoded verbatim as a canonical test case in the advisor of
+Section~\ref{sec:code-advisor}, so the prose and the executable policy cannot
+drift apart.
+
+\begin{examplebox}
+\textbf{Scenario A --- Public SaaS API.} A vendor exposes its product catalog
+to unknown third-party developers. Consumer: public. Payload: fixed
+resources. Latency: relaxed (hundreds of milliseconds fine). Delivery:
+synchronous. Caching: catalog reads must be CDN-cacheable. Team: disciplined.
+\textbf{Recommendation: REST + OpenAPI.} Third parties expect plain HTTPS and
+JSON they can explore with \texttt{curl}; shared caching
+\cite{rfc9110} absorbs read amplification; OpenAPI gives the portal its
+source of truth \cite{openapi31}. GraphQL adds support burden with no
+caching upside; gRPC is unreachable from browsers without a proxy layer.
+\end{examplebox}
+
+\textbf{Scenario B --- Internal microservice mesh.} Forty services exchange
+inventory and pricing calls inside one trust boundary. Consumer: internal.
+Latency: extreme (p99 $<$ 50\,ms budgets on hot paths). Delivery: sync, with
+some server-streaming feeds. \textbf{Recommendation: gRPC.} Strongly typed
+contracts, code generation, HTTP/2 multiplexing, and binary framing
+\cite{rfc9113,grpcdocs} dominate at this latency budget, and the team
+controls both ends of every call.
+
+\textbf{Scenario C --- Mobile app backend.} A field-technician app renders
+deeply nested work-order screens over metered connections. Consumer: mobile.
+Payload: nested graph. Latency: tight. Caching: personalized, so no shared
+cache. \textbf{Recommendation: GraphQL.} One round trip per screen with
+exactly the fields rendered \cite{graphqlspec}; an aggregating BFF-style REST
+layer is the acceptable fallback when GraphQL governance is not yet in place.
+
+\textbf{Scenario D --- IoT telemetry.} Three thousand robots stream sensor
+readings. Consumer: machine. Payload: high-volume streams. Delivery:
+fire-and-forget. \textbf{Recommendation: event-driven} ingestion to a broker
+with an event envelope (\texttt{event\_id}, \texttt{occurred\_at});
+gRPC bidirectional streaming is the runner-up when devices speak HTTP/2 and
+the operator wants backpressure-aware streams
+(Chapter~\ref{ch:async_apis}).
+
+\textbf{Scenario E --- Partner integrations.} Business partners must learn
+within seconds that an order shipped. Consumer: public, delivery:
+fire-and-forget to \emph{their} endpoints. \textbf{Recommendation: signed
+webhooks} with delivery logs and replay, per
+Chapter~\ref{ch:async_apis}. Polling a REST endpoint is the graceful
+degradation path, not the primary design.
+
+\begin{warningbox}
+\textbf{The decision card is a floor, not a ceiling.} It prevents
+\emph{indefensible} choices (public gRPC to browsers, unary APIs for push,
+uncached GraphQL for a read-heavy public catalog). It does not certify that
+the chosen design is good --- that still requires the discipline of the
+relevant chapter.
+\end{warningbox}
+
+\subsection{The Northwind Robotics Reference Architecture}
+\label{sec:ref-arch}
+
+We now integrate the entire book into one design: the \textbf{Northwind
+Robotics API Platform}, a synthetic-but-realistic platform for a robotics
+manufacturer. Northwind sells robots and spare parts (catalog, orders), runs
+a connected fleet (telemetry), and integrates with resellers (partner APIs).
+Figure~\ref{fig:ref-arch} shows the full picture; the commentary after it
+maps every layer to the chapters that justify it.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  >=stealth,
+  node distance=4mm and 6mm,
+  pbox/.style={flowstep, fill=white, align=center},
+  layerbox/.style={draw=packtgray, dashed, inner sep=6pt},
+  lbl/.style={note}
+]
+% --- consumers ---
+\node[pbox] (spa) {Partner\\portals};
+\node[pbox, right=of spa] (mobile) {Mobile\\app};
+\node[pbox, right=of mobile] (web) {Web\\storefront};
+\node[pbox, right=of web] (fleet) {Robot\\fleet};
+
+% --- edge ---
+\node[pbox, below=8mm of mobile, fill=blue!5] (edge) {CDN + WAF\\ TLS 1.3 termination \cite{rfc8446}\\ static cache \cite{rfc9110}};
+
+% --- gateway ---
+\node[pbox, below=6mm of edge, fill=blue!5] (gw) {API gateway\\ auth offload \cite{rfc6749,rfc7519}\\ rate tiers (Ch.~\ref{ch:rate_limiting})\\ request validation};
+
+% --- services ---
+\node[pbox, below left=8mm and 16mm of gw] (rest) {Catalog + orders\\REST / FastAPI\\(Ch.~\ref{ch:fastapi})};
+\node[pbox, below=8mm of gw] (gql) {GraphQL\\read model\\(Ch.~\ref{ch:graphql})};
+\node[pbox, below right=8mm and 16mm of gw] (grpc) {Inventory\\gRPC internal\\(Ch.~\ref{ch:grpc})};
+\node[pbox, right=8mm of grpc] (push) {Webhooks + SSE\\dispatcher\\(Ch.~\ref{ch:async_apis})};
+
+% --- data ---
+\node[pbox, below=10mm of gql] (db) {PostgreSQL\\+ outbox table};
+\node[pbox, right=10mm of db] (broker) {Event broker\\(telemetry bus)};
+\node[pbox, left=10mm of db] (cache) {Redis\\rate limits, cache};
+
+% --- cross-cutting ---
+\node[pbox, below=8mm of db, fill=yellow!5] (otel) {Observability: OpenTelemetry traces, metrics, logs \cite{opentelemetrydocs} (Ch.~\ref{ch:observability})};
+\node[pbox, below=6mm of otel, fill=yellow!5] (gov) {Governance: linted OpenAPI/AsyncAPI specs, developer portal, conformance CI \cite{openapi31,asyncapi} (Ch.~\ref{ch:lifecycle})};
+
+% --- edges ---
+\draw[->] (spa) -- (edge);
+\draw[->] (mobile) -- (edge);
+\draw[->] (web) -- (edge);
+\draw[->] (fleet) -- (broker);
+\draw[->] (edge) -- (gw);
+\draw[->] (gw) -- (rest);
+\draw[->] (gw) -- (gql);
+\draw[->] (gw) -- (grpc);
+\draw[->] (rest) -- (db);
+\draw[->] (gql) -- (db);
+\draw[->] (grpc) -- (db);
+\draw[->] (db) -- node[lbl, above] {outbox relay} (broker);
+\draw[->] (broker) -- (push);
+\draw[->] (push) -- node[lbl, right] {signed events} (spa);
+\draw[->] (push) -- node[lbl, right] {SSE} (mobile);
+\draw[<->] (gw) -- (cache);
+\draw[->, dashed] (rest) -- (otel);
+\draw[->, dashed] (gql) -- (otel);
+\draw[->, dashed] (grpc) -- (otel);
+\draw[->, dashed] (gw) -- (otel);
+\draw[->, dashed] (gov) -- (gw);
+
+% --- layer labels ---
+\node[lbl, left=2mm of edge] {Edge};
+\node[lbl, left=2mm of gw] {Gateway};
+\node[lbl, left=2mm of gql, xshift=-6mm] {Services};
+\node[lbl, left=2mm of db] {Data};
+\end{tikzpicture}
+\caption{The Northwind Robotics API Platform reference architecture. Solid
+arrows are request/event flow; dashed arrows are control-plane and telemetry
+flow. Every box names the chapter that teaches it.}
+\label{fig:ref-arch}
+\end{figure}
+
+\subsubsection{Layer-by-Layer Commentary}
+
+\textbf{Consumers.} Four consumer classes drive four interaction profiles,
+exactly as the decision card predicts: partners (REST + webhooks), mobile
+(GraphQL + SSE), the web storefront (REST with CDN caching), and the robot
+fleet (event-driven ingestion). One platform, four profiles --- chosen per
+consumer, not per fashion.
+
+\textbf{Edge.} A CDN terminates TLS~1.3 \cite{rfc8446}, serves cached catalog
+GETs, and absorbs cheap abuse; a WAF filters known-bad signatures before they
+cost compute. This is where HTTP semantics pay rent: correct
+\texttt{Cache-Control}, \texttt{ETag}, and \texttt{Vary} headers
+(Chapters~\ref{ch:http_wire}, \ref{ch:idempotency}) translate directly into
+origin shielding \cite{rfc9110}.
+
+\textbf{Gateway.} The gateway is a policy enforcement point, not a junk
+drawer. It offloads token verification (OAuth~2.0 bearer tokens with JWTs
+\cite{rfc6749,rfc7519}, PKCE for public clients \cite{rfc7636}), enforces
+rate tiers and emits IETF \texttt{RateLimit} headers
+\cite{ietf_ratelimit_headers} (Chapter~\ref{ch:rate_limiting}), and stamps
+every request with a correlation ID for tracing
+(Chapter~\ref{ch:observability}). Business logic never lives here.
+
+\textbf{Services.} Each service owns its profile: FastAPI REST for catalog
+and orders with keyset pagination (Chapter~\ref{ch:pagination}), date-based
+versioning (Chapter~\ref{ch:versioning}), RFC~9457 problem details
+\cite{rfc9457} (Chapter~\ref{ch:problem_details}), and idempotency keys on
+order creation (Chapter~\ref{ch:idempotency}). GraphQL fronts the read model
+for the mobile app with depth limits and persisted queries
+(Chapter~\ref{ch:graphql}). gRPC handles the internal inventory hot path
+(Chapter~\ref{ch:grpc}). The dispatcher owns webhook signing, delivery logs,
+and SSE fan-out (Chapter~\ref{ch:async_apis}).
+
+\textbf{Data.} PostgreSQL is the system of record; every state change that
+must be published is written \emph{in the same transaction} to an outbox
+table, then relayed to the broker --- the transactional outbox pattern of
+Chapter~\ref{ch:async_apis}, which eliminates dual-write anomalies
+\cite{kleppmann2017ddia}. Redis carries rate-limit counters and short-lived
+cache entries; it is never a source of truth.
+
+\textbf{Observability.} OpenTelemetry instrumentation in every hop produces
+traces joined by the gateway's correlation ID, RED/USE metrics, and
+structured logs \cite{opentelemetrydocs}
+(Chapter~\ref{ch:observability}). SLOs and error budgets follow the SRE
+discipline of Chapter~\ref{ch:observability} \cite{beyer2016sre}.
+
+\textbf{Governance.} OpenAPI and AsyncAPI specs are the source of truth,
+linted in CI, rendered to the developer portal, and checked by the
+conformance policy engine of Listing~3 (Section~\ref{sec:code-checker})
+\cite{openapi31,asyncapi} (Chapter~\ref{ch:lifecycle}). Deprecations follow
+the \texttt{Sunset} header convention \cite{rfc8594}.
+
+\subsubsection{Request Lifecycle Walkthrough}
+
+A partner's \texttt{POST /v1/orders} traverses the platform like this:
+
+\begin{enumerate}
+  \item \textbf{Edge:} TLS 1.3 handshake (resumed), WAF pass, cache bypass
+        (POST is not cacheable \cite{rfc9110}).
+  \item \textbf{Gateway:} JWT verified locally against cached JWKS
+        \cite{rfc7519}; rate tier \texttt{partner-standard} admits the
+        request, \texttt{RateLimit-Remaining: 97} stamped
+        \cite{ietf_ratelimit_headers}; correlation ID \texttt{rid-9f2}
+        assigned.
+  \item \textbf{Service:} FastAPI validates the payload with Pydantic
+        \cite{pydanticdocs,fastapidocs}; the \texttt{Idempotency-Key}
+        deduplicates retries (Chapter~\ref{ch:idempotency}); a gRPC call to
+        inventory reserves stock within the 50\,ms budget
+        (Chapter~\ref{ch:grpc}); order row and outbox row commit in one
+        transaction.
+  \item \textbf{Async fan-out:} the outbox relay publishes
+        \texttt{order.created} to the broker; the dispatcher signs and POSTs
+        the webhook to the partner and pushes an SSE event to the operations
+        dashboard (Chapter~\ref{ch:async_apis}).
+  \item \textbf{Observe:} one trace, four spans, zero log lines containing
+        credentials (Chapters~\ref{ch:observability},
+        \ref{ch:api_security}).
+\end{enumerate}
+
+Every failure along this path has a named, rehearsed response: validation
+fails with RFC~9457 422 \cite{rfc9457}; rate exhaustion returns 429 with
+\texttt{Retry-After}; inventory timeout trips a circuit breaker
+\cite{nygard2018releaseit} (Chapter~\ref{ch:microservices}); webhook delivery
+retries with backoff and lands in the delivery log for replay.
+
+\subsection{The Grand Capstone: Platform Specification}
+\label{sec:grand-capstone}
+
+This subsection is the full buildable specification of the platform in
+Figure~\ref{fig:ref-arch}. It extends every per-chapter capstone into one
+integrative build, and it is the [staff] project of
+Section~\ref{sec:capstones}.
+
+\subsubsection{Scope and Domains}
+
+Build the Northwind Robotics API Platform as a set of deployable services
+plus the governance toolchain that keeps them honest. Four domains:
+\textbf{catalog} (products, categories, pricing), \textbf{orders} (placement,
+status, partner notification), \textbf{inventory} (stock reservation,
+restock), and \textbf{telemetry} (fleet readings, operator dashboards).
+Synthetic data only; all services must run offline on one machine with
+in-process fakes for the broker and payment gateway.
+
+\subsubsection{API Surfaces per Protocol}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Surface} & \textbf{Profile} & \textbf{Contract} \\
+    \midrule
+    \texttt{/v1/products}, \texttt{/v1/orders} & REST + OpenAPI &
+      keyset pagination, date version, RFC~9457 errors, idempotency keys \\
+    \texttt{/graphql} & GraphQL &
+      read model over catalog + telemetry; depth $\leq$ 5; persisted queries \\
+    \texttt{inventory.v1.Inventory} & gRPC &
+      \texttt{Reserve}/\texttt{Release}/\texttt{WatchStock} (server stream) \\
+    \texttt{order.created}, \texttt{order.shipped} & webhooks &
+      signed (HMAC), delivery log, replay endpoint, AsyncAPI spec \\
+    \texttt{/v1/telemetry/stream} & SSE &
+      operator dashboard feed, \texttt{Last-Event-ID} resume \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Grand Capstone API surfaces. Each surface cites its governing
+  spec artifact.}
+  \label{tab:capstone-surfaces}
+\end{table}
+
+\subsubsection{Non-Functional Requirements}
+
+\begin{itemize}
+  \item \textbf{SLOs:} catalog read p99 $<$ 200\,ms at 99.9\,\% monthly
+        availability; order write p99 $<$ 500\,ms; inventory gRPC p99 $<$
+        50\,ms; webhook delivery 99.5\,\% within 60\,s. Error budgets govern
+        release pace \cite{beyer2016sre}.
+  \item \textbf{Security posture:} OAuth~2.0 + JWT bearer at the gateway
+        \cite{rfc6749,rfc7519}; API keys for partners; webhook signatures;
+        OWASP API Top 10 checklist in CI \cite{owaspapisecurity}; no
+        credential material in logs; TLS 1.3 only \cite{rfc8446}.
+  \item \textbf{Rate tiers:} \texttt{public} 60/min, \texttt{partner-standard}
+        600/min, \texttt{partner-premium} 6\,000/min; IETF headers on every
+        response \cite{ietf_ratelimit_headers} (Chapter~\ref{ch:rate_limiting}).
+  \item \textbf{Data integrity:} order + outbox atomicity; idempotent order
+        placement; replayable webhook log retained 30 days
+        \cite{kleppmann2017ddia}.
+  \item \textbf{Operability:} OTel traces end to end \cite{opentelemetrydocs};
+        twelve-factor configuration \cite{twelvefactor}; health endpoints;
+        benchmark snapshot per release.
+\end{itemize}
+
+\subsubsection{Phased Delivery Plan}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Milestone} & \textbf{Theme} & \textbf{Exit criteria} \\
+    \midrule
+    M1 (weeks 1--4) & REST core &
+      catalog + orders REST surface green on contract tests; RFC~9457
+      everywhere; keyset pagination; idempotency replay test passing. \\
+    M2 (weeks 5--8) & Read model + internal RPC &
+      GraphQL read model live with depth limiting; inventory gRPC service
+      with streaming \texttt{WatchStock}; gateway auth + rate tiers. \\
+    M3 (weeks 9--12) & Async platform &
+      outbox relay, signed webhooks with delivery log and replay, SSE
+      telemetry stream; AsyncAPI specs linted in CI. \\
+    M4 (weeks 13--16) & Production hardening &
+      OTel traces across all surfaces; SLO dashboards; conformance checker
+      gating merges; load and failure-mode test evidence; portal published. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Grand Capstone four-milestone delivery plan.}
+  \label{tab:milestones}
+\end{table}
+
+\subsubsection{Acceptance Criteria and Evaluation Rubric}
+
+Acceptance is binary and evidence-based: every surface in
+Table~\ref{tab:capstone-surfaces} responds per its spec in an offline
+in-process test run; the conformance checker passes on the manifests folder;
+the SLO dashboard shows green against a recorded load test; a chaos drill
+(kill inventory mid-order) produces the designed circuit-breaker behavior
+\cite{nygard2018releaseit}.
+
+The rubric scores five dimensions at 0--4 each: \textbf{correctness}
+(contract conformance), \textbf{resilience} (failure-mode behavior),
+\textbf{operability} (telemetry, runbooks), \textbf{governance} (specs,
+lint, portal), and \textbf{craft} (code quality, typing, tests).
+A passing Grand Capstone scores $\geq$ 16 with no dimension below 3.
+
+\subsection{Cross-Cutting Synthesis}
+\label{sec:synthesis}
+
+\subsubsection{The Failure Taxonomy, Revisited}
+
+Chapter by chapter, this book has built a taxonomy of how APIs fail.
+Table~\ref{tab:failure-taxonomy} consolidates it: for each failure class,
+where it is taught, how you detect it, and the designed mitigation.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X X}
+    \toprule
+    \textbf{Failure class} & \textbf{Chapter} & \textbf{Detection} & \textbf{Mitigation} \\
+    \midrule
+    Protocol misuse & \ref{ch:http_wire} & semantic lint, packet capture & teach HTTP, not frameworks \cite{rfc9110} \\
+    Client brittleness & \ref{ch:consuming_python} & contract tests & retries with backoff, timeouts \cite{httpxdocs} \\
+    Ambiguous errors & \ref{ch:problem_details} & error-shape lint & RFC~9457 problem details \cite{rfc9457} \\
+    Page drift & \ref{ch:pagination} & duplicate/skipped rows & keyset cursors \\
+    Breaking change & \ref{ch:versioning} & spec diff in CI & date versions, \texttt{Sunset} \cite{rfc8594} \\
+    Duplicate side effects & \ref{ch:idempotency} & replay tests & idempotency keys \\
+    Lost events & \ref{ch:async_apis} & outbox lag, delivery log & transactional outbox \cite{kleppmann2017ddia} \\
+    N+1 resolvers & \ref{ch:graphql} & query tracing & dataloaders, depth limits \\
+    Tight RPC coupling & \ref{ch:grpc} & stub fan-out audit & contract-first, versioned protos \\
+    Quota abuse & \ref{ch:rate_limiting} & 429 rate, tier stats & tiers + IETF headers \cite{ietf_ratelimit_headers} \\
+    Cascading failure & \ref{ch:microservices} & latency waterfall & timeouts, breakers, bulkheads \cite{nygard2018releaseit} \\
+    Credential leaks & \ref{ch:api_security} & log scans, secret scans & OWASP discipline \cite{owaspapisecurity} \\
+    Snowflake deploys & \ref{ch:deployment} & drift detection & twelve-factor config \cite{twelvefactor} \\
+    Blind operation & \ref{ch:observability} & missing spans & OTel everywhere \cite{opentelemetrydocs} \\
+    Untested contracts & \ref{ch:testing} & consumer complaints & consumer-driven contracts \cite{pactdocs} \\
+    Spec rot & \ref{ch:lifecycle} & portal/spec drift & executable governance \cite{openapi31,asyncapi} \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The consolidated failure taxonomy: one row per chapter's core
+  enemy.}
+  \label{tab:failure-taxonomy}
+\end{table}
+
+\subsubsection{One Page per Module}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \multicolumn{3}{l}{\textbf{Module I --- Foundations (Ch.~\ref{ch:introduction}--\ref{ch:client_security})}} \\
+    \midrule
+    \textbf{Chapter} & \textbf{Core idea} & \textbf{Artifact you must produce} \\
+    \midrule
+    \ref{ch:introduction} & APIs as products and contracts & platform vision + consumer map \\
+    \ref{ch:http_wire} & messages, semantics, connections \cite{rfc9110,rfc9112,rfc9113} & annotated request/response traces \\
+    \ref{ch:consuming_python} & disciplined clients & retrying, timeout-bound client \cite{httpxdocs,requestsdocs} \\
+    \ref{ch:rest_style} & resources, uniformity, maturity \cite{fielding2000rest,richardson2013restful} & resource model + OpenAPI draft \\
+    \ref{ch:serialization} & contracts over bytes \cite{rfc8259,jsonschemadocs} & versioned schemas \\
+    \ref{ch:client_security} & secrets, TLS, token handling \cite{rfc8446,rfc7636} & secure client checklist \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Module I synthesis: speak the protocol fluently before building.}
+  \label{tab:module1}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \multicolumn{3}{l}{\textbf{Module II --- Building APIs (Ch.~\ref{ch:fastapi}--\ref{ch:idempotency})}} \\
+    \midrule
+    \textbf{Chapter} & \textbf{Core idea} & \textbf{Artifact you must produce} \\
+    \midrule
+    \ref{ch:fastapi} & typed, fast service scaffolding \cite{fastapidocs,pydanticdocs} & working FastAPI service \\
+    \ref{ch:problem_details} & errors as a designed interface \cite{rfc9457} & problem-details catalog \\
+    \ref{ch:pagination} & stable traversal of changing data \cite{rfc8288} & keyset-paginated collections \\
+    \ref{ch:versioning} & evolve without breaking & date versioning + \texttt{Sunset} policy \cite{rfc8594} \\
+    \ref{ch:idempotency} & retries must be safe & idempotency-key middleware \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Module II synthesis: correctness is a designed property.}
+  \label{tab:module2}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \multicolumn{3}{l}{\textbf{Module III --- Protocols \& Scale (Ch.~\ref{ch:async_apis}--\ref{ch:microservices})}} \\
+    \midrule
+    \textbf{Chapter} & \textbf{Core idea} & \textbf{Artifact you must produce} \\
+    \midrule
+    \ref{ch:async_apis} & decouple with events and push \cite{asyncapi} & outbox + webhook pipeline \\
+    \ref{ch:graphql} & client-driven selection \cite{graphqlspec} & governed schema + persisted queries \\
+    \ref{ch:grpc} & typed, streaming RPC \cite{grpcdocs,protobufdocs} & proto contracts + stubs \\
+    \ref{ch:rate_limiting} & protect capacity, signal policy \cite{ietf_ratelimit_headers} & tiered limiter + headers \\
+    \ref{ch:microservices} & resilience is engineered \cite{nygard2018releaseit,newman2021microservices} & breaker/timeout budget map \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Module III synthesis: pick profiles per constraint, scale
+  deliberately.}
+  \label{tab:module3}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \multicolumn{3}{l}{\textbf{Module IV --- Production \& Governance (Ch.~\ref{ch:api_security}--\ref{ch:lifecycle})}} \\
+    \midrule
+    \textbf{Chapter} & \textbf{Core idea} & \textbf{Artifact you must produce} \\
+    \midrule
+    \ref{ch:api_security} & defense in depth for APIs \cite{owaspapisecurity,rfc6749,rfc7519} & threat model + auth design \\
+    \ref{ch:deployment} & reproducible, portable services \cite{twelvefactor} & container + CI pipeline \\
+    \ref{ch:observability} & you cannot run what you cannot see \cite{opentelemetrydocs,beyer2016sre} & traces, SLOs, runbooks \\
+    \ref{ch:testing} & contracts are the test surface \cite{pactdocs} & contract + chaos suites \\
+    \ref{ch:lifecycle} & governance as code \cite{openapi31,gehl2021apidesign} & linted specs, portal, policy CI \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Module IV synthesis: production is a discipline, not a
+  destination.}
+  \label{tab:module4}
+\end{table}
+
+\subsection{Emerging Frontiers, Honestly Assessed}
+\label{sec:frontiers}
+
+A capstone chapter owes you more than enthusiasm: it owes you an
+adopt/trial/wait posture for each frontier, with the maturity caveats that
+vendor keynotes omit.
+
+\subsubsection{HTTP/3 and QUIC}
+
+HTTP/3 \cite{rfc9114} reimplements HTTP semantics over QUIC \cite{rfc9000},
+which replaces TCP + TLS 1.3 \cite{rfc8446} with a UDP-based transport that
+integrates the handshake, provides per-stream loss recovery (eliminating
+TCP's head-of-line blocking that HTTP/2 \cite{rfc9113,rfc7541} merely
+mitigates), and supports connection migration across network changes ---
+a direct win for mobile clients moving between radios. \textbf{Posture:
+trial.} Browsers and major CDNs already negotiate HTTP/3 via
+\texttt{Alt-Svc}, so public REST and SSE surfaces inherit it for free at the
+edge; but QUIC's CPU cost at the server, UDP filtering in enterprise
+networks, and thinner debugging tooling mean you should measure before
+mandating it. gRPC stays on HTTP/2 in most stacks today.
+
+\subsubsection{APIs Consumed by AI Agents (MCP)}
+
+The newest consumer class is not a human developer or a mobile app but an AI
+agent invoking tools. The Model Context Protocol (MCP) standardizes how hosts
+discover and call such tools: a server publishes \emph{tool schemas} ---
+typed names, descriptions, and JSON Schema argument contracts
+\cite{jsonschemadocs} --- and the agent selects and invokes them at runtime.
+The implication for API design is profound: \textbf{your schema is now read
+by a model, not just by humans}. Descriptions, field naming, error shapes,
+and idempotency semantics become prompt-adjacent surface area. Tool schemas
+should be derived from the same OpenAPI/JSON Schema source of truth
+\cite{openapi31} rather than hand-maintained, or the two contracts will
+drift --- exactly the spec-rot failure of Chapter~\ref{ch:lifecycle} in a new
+costume. RFC~9457 problem details \cite{rfc9457} turn out to be
+agent-friendly errors: structured, typed, and self-describing.
+\textbf{Posture: trial} for internal tool ecosystems; \textbf{wait} before
+exposing MCP surfaces publicly until authorization and auditing patterns
+settle.
+
+\subsubsection{AI-Assisted API Design and Review}
+
+LLM assistants now draft OpenAPI documents, generate SDKs, and review spec
+diffs competently. The durable value is not generation --- it is
+\emph{review at scale}: an assistant can flag missing error responses,
+inconsistent pagination, or non-idiomatic naming across hundreds of
+endpoints. The durable risk is confident invention of plausible-but-wrong
+contracts. The professional pattern: AI proposes, executable policy (the
+conformance checker of Listing~3 (Section~\ref{sec:code-checker})) disposes. \textbf{Posture:
+adopt} for drafting and review, always behind deterministic CI gates.
+
+\subsubsection{Edge-Native APIs}
+
+Edge runtimes (worker isolates, regional endpoints) move request handling
+closer to the consumer, cutting TLS and TTFB latency and enabling regional
+data affinity for compliance. The architectural constraint is state: edge
+functions shine for read-heavy, cache-friendly, or geographically partitioned
+workloads and hurt when every request must reach a centralized strongly
+consistent store. Regional affinity --- routing a tenant's writes to their
+home region --- is the pragmatic middle. \textbf{Posture: trial} for
+read-dominated surfaces (catalog!); \textbf{wait} for write-heavy cores.
+
+\subsubsection{Post-Quantum TLS Readiness}
+
+Harvest-now-decrypt-later attacks make cryptographic agility a present-tense
+concern. The ecosystem's answer is hybrid key exchange in TLS~1.3
+\cite{rfc8446} (classical + post-quantum KEM in one handshake), already
+rolling out across browsers and CDNs. For API platforms the work is
+unglamorous: inventory where TLS is terminated, ensure libraries track
+current hybrids, watch handshake-size regressions that can break QUIC
+amplification limits, and keep certificate automation healthy so algorithm
+rotation is an upgrade, not a migration. \textbf{Posture: adopt} at the edge
+(inherited from your CDN); \textbf{trial} for east--west service mesh TLS.
+
+\subsubsection{API Security Automation}
+
+Attack surface discovery, schema-aware fuzzing, and runtime anomaly detection
+are converging into continuous API security testing keyed off your OpenAPI
+specs \cite{openapi31,owaspapisecurity}. The spec-first discipline of
+Chapter~\ref{ch:lifecycle} is the prerequisite: tools can only fuzz what they
+can see. \textbf{Posture: adopt} spec-driven scanning in CI;
+\textbf{trial} runtime behavioral detection.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Frontier} & \textbf{Posture} & \textbf{Prerequisite before adoption} \\
+    \midrule
+    HTTP/3 / QUIC \cite{rfc9114,rfc9000} & trial & edge support inherited; measure server CPU \\
+    MCP tool schemas & trial (internal) & spec-first JSON Schema source of truth \cite{jsonschemadocs} \\
+    AI-assisted design/review & adopt & deterministic lint gates behind every suggestion \\
+    Edge-native APIs & trial & read-heavy or regionally partitionable data \\
+    Post-quantum TLS & adopt (edge) & TLS inventory, automation, current libraries \cite{rfc8446} \\
+    Security automation & adopt (CI) & complete, linted OpenAPI coverage \cite{owaspapisecurity} \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Frontier adoption postures. Nothing here exempts you from the
+  operational maturity of Module IV.}
+  \label{tab:frontiers}
+\end{table}
+
+\begin{warningbox}
+\textbf{Frontiers amplify your existing maturity.} HTTP/3 does not fix a
+missing caching strategy; MCP does not fix an unversioned schema; edge
+compute does not fix unbounded fan-out. Adopt frontiers \emph{after} the
+boring disciplines of Chapters~\ref{ch:api_security}--\ref{ch:lifecycle} are
+routine, or you will simply fail faster, in more places.
+\end{warningbox}
+
+\subsection{Career Pathways and the Mastery Checklist}
+\label{sec:careers}
+
+API engineering is a T-shaped career: broad literacy across protocols and
+operations, deep expertise that grows with each level.
+Figure~\ref{fig:pathway} maps the levels onto the book's modules;
+Table~\ref{tab:competencies} makes the progression checkable.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  >=stealth,
+  node distance=6mm,
+  lvl/.style={flowstep, fill=blue!5, align=center, minimum width=3.1cm, minimum height=1.5cm},
+  lbl/.style={modcap}
+]
+\node[lvl] (junior) {\textbf{Junior}\\[2pt] consume + build\\basic REST\\Ch.~\ref{ch:introduction}--\ref{ch:fastapi}};
+\node[lvl, right=of junior] (mid) {\textbf{Mid}\\[2pt] correctness:\\errors, pagination,\\versions, idempotency\\Ch.~\ref{ch:problem_details}--\ref{ch:idempotency}};
+\node[lvl, right=of mid] (senior) {\textbf{Senior}\\[2pt] multi-protocol,\\resilience, scale\\Ch.~\ref{ch:async_apis}--\ref{ch:microservices}};
+\node[lvl, right=of senior] (staff) {\textbf{Staff}\\[2pt] platform, security,\\governance, strategy\\Ch.~\ref{ch:api_security}--\ref{ch:lifecycle}, this ch.};
+\draw[->, thick] (junior) -- (mid);
+\draw[->, thick] (mid) -- (senior);
+\draw[->, thick] (senior) -- (staff);
+\node[lbl, above=2mm of mid] {increasing scope: endpoint $\rightarrow$ service $\rightarrow$ system $\rightarrow$ organization};
+\end{tikzpicture}
+\caption{The API engineer mastery pathway. Levels are scopes of
+responsibility, not years of tenure.}
+\label{fig:pathway}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Level} & \textbf{You can be trusted to\ldots} \\
+    \midrule
+    Junior &
+      read a packet capture; consume any documented REST API with retries
+      and timeouts; build a typed FastAPI CRUD service; keep secrets out of
+      code and logs. \\
+    Mid &
+      design RFC~9457 error catalogs; implement keyset pagination and date
+      versioning; make every mutation idempotent; write contract tests;
+      explain your API's caching headers to a CDN engineer. \\
+    Senior &
+      choose protocols from constraints and defend the choice; design
+      outbox-based event pipelines; operate rate tiers; break production
+      safely (timeouts, breakers, bulkheads) and prove it with chaos
+      drills \cite{nygard2018releaseit}. \\
+    Staff &
+      own a multi-protocol platform strategy; set SLOs and error budgets
+      \cite{beyer2016sre}; run governance as code; evaluate frontiers with
+      adopt/trial/wait rigor; grow seniors through design review
+      \cite{gehl2021apidesign}. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The mastery checklist, by level.}
+  \label{tab:competencies}
+\end{table}
+
+\textbf{Staying current.} The durable sources are the specification bodies
+and their errata, not social media: the IETF HTTP and QUIC working groups
+(RFCs 9110--9114 \cite{rfc9110,rfc9114}), the OpenAPI Initiative
+\cite{openapi31}, the AsyncAPI Initiative \cite{asyncapi}, the GraphQL
+Foundation \cite{graphqlspec}, the CNCF (gRPC \cite{grpcdocs}, OpenTelemetry
+\cite{opentelemetrydocs}), and OWASP \cite{owaspapisecurity}. Conferences
+worth your time: API World, APIDays, KubeCon/CloudNativeCon, QCon, and SREcon.
+Communities: vendor-neutral spec discussion lists and the conference talk
+archives. Budget one hour a week; reread foundational texts
+\cite{fielding2000rest,kleppmann2017ddia,newman2021microservices} yearly ---
+they reward rereading as your scope grows.
+
+\section{Production-Ready Code Implementation}
+\label{sec:code}
+
+Three integrative, complete programs implement this chapter's ideas. All are
+offline-first (no network, no credentials), deterministic (no wall-clock or
+randomness on decision paths), fully typed, and shipped with executable
+tests. Setup (PowerShell, run once per machine):
+
+\begin{minted}{powershell}
+cd "code\ch21"
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi "strawberry-graphql[fastapi]" pydantic pyyaml httpx pytest
+python -m pytest -q
+\end{minted}
+
+\subsection{Listing 1 --- The Protocol-Selection Advisor}
+\label{sec:code-advisor}
+
+The advisor encodes the Master Decision Card of
+Section~\ref{sec:decision-card} as a scored questionnaire. Each criterion
+emits \emph{signals}: weighted, human-readable point contributions to one or
+more profiles. The score for profile $p$ is simply
+
+\begin{equation}
+\mathrm{score}(p) = \sum_{s \in S,\; s.\mathrm{profile} = p} s.\mathrm{points}
+\end{equation}
+
+and the recommendation is the argmax with a deterministic tie-break by
+profile declaration order. Because every signal carries its rationale, the
+recommendation ships with an \emph{auditable trace} --- you can show a
+reviewer exactly which constraints moved which profile, which is how the
+framework stays teachable instead of becoming an oracle.
+
+\begin{minted}{python}
+"""Protocol-selection advisor for the Master Decision Card.
+
+Encodes the Chapter 21 decision framework as a scored questionnaire:
+weighted criteria, deterministic arithmetic, and a full rationale trace
+so the recommendation can be audited and taught from.
+
+Offline, deterministic, standard library only. Python 3.11+.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
+
+class Profile(str, Enum):
+    """API interaction profiles compared by the advisor."""
+
+    REST = "REST"
+    GRAPHQL = "GraphQL"
+    GRPC = "gRPC"
+    EVENTS = "Event-driven (webhooks/broker)"
+    STREAM = "WebSockets / SSE"
+
+
+class Consumer(str, Enum):
+    PUBLIC = "public-third-party"
+    MOBILE = "mobile-spa"
+    INTERNAL = "internal-service"
+    MACHINE = "machine-telemetry"
+
+
+class Payload(str, Enum):
+    FIXED = "fixed-resources"
+    GRAPH = "nested-graph"
+    HIGH_VOLUME = "high-volume-streams"
+
+
+class Latency(str, Enum):
+    RELAXED = "relaxed"      # p99 >= 200 ms is fine
+    TIGHT = "tight"          # interactive, p99 < 200 ms
+    EXTREME = "extreme"      # p99 < 50 ms service-to-service
+
+
+class Delivery(str, Enum):
+    SYNC = "sync-request-response"
+    PUSH = "server-push-realtime"
+    ASYNC = "async-fire-and-forget"
+
+
+class Team(str, Enum):
+    EXPLORATORY = "exploratory"
+    DISCIPLINED = "disciplined"
+
+
+@dataclass(frozen=True)
+class Requirements:
+    """Answers to the six-question selection questionnaire."""
+
+    consumer: Consumer
+    payload: Payload
+    latency: Latency
+    delivery: Delivery
+    http_caching: bool
+    team: Team
+
+
+@dataclass(frozen=True)
+class Signal:
+    """One weighted contribution to a profile's score."""
+
+    profile: Profile
+    points: int
+    criterion: str
+    rationale: str
+
+
+@dataclass(frozen=True)
+class Recommendation:
+    """Advisor output: ranked scores plus an auditable trace."""
+
+    winner: Profile
+    scores: dict[Profile, int]
+    signals: tuple[Signal, ...] = field(default_factory=tuple)
+
+    def rationale(self, profile: Profile | None = None) -> list[str]:
+        """Return the trace lines for one profile (default: the winner)."""
+        target = profile or self.winner
+        return [
+            f"[{s.points:+d}] {s.criterion}: {s.rationale}"
+            for s in self.signals
+            if s.profile == target
+        ]
+
+
+def _score(req: Requirements) -> tuple[Signal, ...]:
+    """Apply every rule of the Master Decision Card to the answers."""
+    signals: list[Signal] = []
+
+    def add(profile: Profile, points: int, criterion: str, rationale: str) -> None:
+        signals.append(Signal(profile, points, criterion, rationale))
+
+    # --- Criterion 1: consumer type -------------------------------------
+    if req.consumer is Consumer.PUBLIC:
+        add(Profile.REST, 3, "consumer",
+            "public third parties expect plain HTTPS + JSON they can curl")
+        add(Profile.EVENTS, 2, "consumer",
+            "webhooks are the standard public async contract")
+        add(Profile.GRAPHQL, 1, "consumer",
+            "powerful for public developers but raises the support burden")
+        add(Profile.GRPC, -3, "consumer",
+            "browser clients cannot speak raw HTTP/2 gRPC without a proxy")
+        add(Profile.STREAM, 1, "consumer",
+            "SSE/WebSocket endpoints are feasible but operationally niche")
+    elif req.consumer is Consumer.MOBILE:
+        add(Profile.GRAPHQL, 3, "consumer",
+            "clients pick exactly the fields they render; no over-fetching")
+        add(Profile.REST, 2, "consumer",
+            "aggregating BFF-style REST resources also solve over-fetching")
+        add(Profile.STREAM, 1, "consumer",
+            "push channels pair well with mobile UX")
+        add(Profile.GRPC, -2, "consumer",
+            "gRPC-Web adds a proxy hop that mobile teams rarely want")
+    elif req.consumer is Consumer.INTERNAL:
+        add(Profile.GRPC, 3, "consumer",
+            "strongly typed, streaming, low-overhead service-to-service RPC")
+        add(Profile.REST, 1, "consumer",
+            "REST remains the default when tooling maturity is low")
+        add(Profile.EVENTS, 1, "consumer",
+            "async integration decouples internal services")
+        add(Profile.GRAPHQL, 1, "consumer",
+            "federated graphs can front many internal services")
+    else:  # MACHINE telemetry
+        add(Profile.EVENTS, 3, "consumer",
+            "telemetry is naturally asynchronous and bursty")
+        add(Profile.GRPC, 2, "consumer",
+            "bidirectional streaming fits high-rate device channels")
+        add(Profile.STREAM, 1, "consumer",
+            "persistent sockets work where HTTP/2 is unavailable")
+        add(Profile.REST, -1, "consumer",
+            "per-reading REST calls waste headers and connections")
+
+    # --- Criterion 2: payload shape -------------------------------------
+    if req.payload is Payload.GRAPH:
+        add(Profile.GRAPHQL, 3, "payload",
+            "nested graph selection sets are GraphQL's home turf")
+        add(Profile.REST, -1, "payload",
+            "deep graphs force N+1 endpoint hops in REST")
+    elif req.payload is Payload.HIGH_VOLUME:
+        add(Profile.GRPC, 2, "payload",
+            "compact binary frames and HTTP/2 streams suit high volume")
+        add(Profile.EVENTS, 2, "payload",
+            "brokered batches absorb volume spikes")
+        add(Profile.REST, -1, "payload",
+            "textual JSON per request is the most expensive option")
+    else:
+        add(Profile.REST, 2, "payload",
+            "fixed resource shapes map one-to-one onto REST resources")
+
+    # --- Criterion 3: latency budget ------------------------------------
+    if req.latency is Latency.EXTREME:
+        add(Profile.GRPC, 3, "latency",
+            "HTTP/2 multiplexing plus Protobuf minimize per-call overhead")
+        add(Profile.GRAPHQL, -1, "latency",
+            "query planning and JSON add milliseconds per request")
+        add(Profile.REST, 0, "latency",
+            "acceptable with keep-alive and HTTP/2, but not minimal")
+    elif req.latency is Latency.TIGHT:
+        add(Profile.GRPC, 1, "latency", "comfortable within tight budgets")
+        add(Profile.REST, 1, "latency", "comfortable within tight budgets")
+    else:
+        add(Profile.EVENTS, 2, "latency",
+            "async delivery tolerates relaxed latency by design")
+
+    # --- Criterion 4: delivery model (hard structural signals) ----------
+    if req.delivery is Delivery.PUSH:
+        add(Profile.STREAM, 4, "delivery",
+            "server push requires SSE or WebSockets; unary APIs cannot push")
+        add(Profile.GRPC, 1, "delivery",
+            "server-streaming RPC works for non-browser clients")
+        add(Profile.REST, -3, "delivery",
+            "unary REST has no server-push channel")
+        add(Profile.GRAPHQL, -2, "delivery",
+            "GraphQL subscriptions need a socket transport anyway")
+    elif req.delivery is Delivery.ASYNC:
+        add(Profile.EVENTS, 4, "delivery",
+            "fire-and-forget delivery is the defining event-driven case")
+    else:
+        add(Profile.REST, 1, "delivery",
+            "synchronous request-response is REST's native shape")
+        add(Profile.GRPC, 1, "delivery",
+            "unary RPC is also synchronous request-response")
+
+    # --- Criterion 5: HTTP caching --------------------------------------
+    if req.http_caching:
+        add(Profile.REST, 3, "caching",
+            "only REST leverages shared/CDN caching of GET responses")
+        add(Profile.GRAPHQL, -2, "caching",
+            "POST-based queries bypass standard HTTP caches")
+        add(Profile.GRPC, -2, "caching",
+            "gRPC calls are not addressable cacheable resources")
+    else:
+        add(Profile.GRAPHQL, 1, "caching",
+            "no penalty when edge caching is not required")
+
+    # --- Criterion 6: team maturity -------------------------------------
+    if req.team is Team.EXPLORATORY:
+        add(Profile.REST, 2, "team",
+            "REST has the shallowest learning curve and richest tooling")
+        add(Profile.GRPC, -1, "team",
+            "Protobuf toolchains and reflection quirks slow new teams")
+        add(Profile.GRAPHQL, -1, "team",
+            "schema governance and N+1 discipline require experience")
+    else:
+        add(Profile.GRAPHQL, 1, "team",
+            "disciplined teams can exploit schema-first workflows")
+        add(Profile.GRPC, 1, "team",
+            "disciplined teams can run contract-first RPC safely")
+
+    return tuple(signals)
+
+
+def recommend(req: Requirements) -> Recommendation:
+    """Score all profiles and return the winner with a rationale trace.
+
+    Ties break deterministically by profile enum order, so the same
+    answers always produce the same recommendation.
+    """
+    signals = _score(req)
+    scores = {profile: 0 for profile in Profile}
+    for signal in signals:
+        scores[signal.profile] += signal.points
+    winner = max(Profile, key=lambda p: (scores[p], -list(Profile).index(p)))
+    return Recommendation(winner=winner, scores=scores, signals=signals)
+
+
+# --- Canonical scenarios from the chapter's worked examples ---------------
+
+PUBLIC_SAAS = Requirements(
+    consumer=Consumer.PUBLIC,
+    payload=Payload.FIXED,
+    latency=Latency.RELAXED,
+    delivery=Delivery.SYNC,
+    http_caching=True,
+    team=Team.DISCIPLINED,
+)
+
+INTERNAL_MESH = Requirements(
+    consumer=Consumer.INTERNAL,
+    payload=Payload.FIXED,
+    latency=Latency.EXTREME,
+    delivery=Delivery.SYNC,
+    http_caching=False,
+    team=Team.DISCIPLINED,
+)
+
+MOBILE_BACKEND = Requirements(
+    consumer=Consumer.MOBILE,
+    payload=Payload.GRAPH,
+    latency=Latency.TIGHT,
+    delivery=Delivery.SYNC,
+    http_caching=False,
+    team=Team.DISCIPLINED,
+)
+
+IOT_TELEMETRY = Requirements(
+    consumer=Consumer.MACHINE,
+    payload=Payload.HIGH_VOLUME,
+    latency=Latency.RELAXED,
+    delivery=Delivery.ASYNC,
+    http_caching=False,
+    team=Team.DISCIPLINED,
+)
+
+PARTNER_NOTIFICATIONS = Requirements(
+    consumer=Consumer.PUBLIC,
+    payload=Payload.FIXED,
+    latency=Latency.RELAXED,
+    delivery=Delivery.ASYNC,
+    http_caching=False,
+    team=Team.EXPLORATORY,
+)
+
+
+if __name__ == "__main__":
+    scenarios = {
+        "Public SaaS API": PUBLIC_SAAS,
+        "Internal microservice mesh": INTERNAL_MESH,
+        "Mobile app backend": MOBILE_BACKEND,
+        "IoT telemetry": IOT_TELEMETRY,
+        "Partner notifications": PARTNER_NOTIFICATIONS,
+    }
+    for name, reqs in scenarios.items():
+        rec = recommend(reqs)
+        print(f"{name}: {rec.winner.value}")
+        for line in rec.rationale():
+            print(f"    {line}")
+\end{minted}
+
+The unit tests lock the five canonical worked scenarios to their expected
+recommendations and assert the framework invariants: determinism, score
+arithmetic (scores equal the sum of their signals), and trace integrity.
+
+\begin{minted}{python}
+"""Unit tests for the protocol-selection advisor.
+
+Covers the five canonical scenarios from the chapter plus framework
+invariants (determinism, scoring arithmetic, rationale trace).
+"""
+
+from __future__ import annotations
+
+from protocol_advisor import (
+    IOT_TELEMETRY,
+    INTERNAL_MESH,
+    MOBILE_BACKEND,
+    PARTNER_NOTIFICATIONS,
+    PUBLIC_SAAS,
+    Consumer,
+    Delivery,
+    Latency,
+    Payload,
+    Profile,
+    Requirements,
+    Team,
+    recommend,
+)
+
+
+def test_public_saas_recommends_rest() -> None:
+    assert recommend(PUBLIC_SAAS).winner is Profile.REST
+
+
+def test_internal_mesh_recommends_grpc() -> None:
+    assert recommend(INTERNAL_MESH).winner is Profile.GRPC
+
+
+def test_mobile_backend_recommends_graphql() -> None:
+    assert recommend(MOBILE_BACKEND).winner is Profile.GRAPHQL
+
+
+def test_iot_telemetry_recommends_events() -> None:
+    assert recommend(IOT_TELEMETRY).winner is Profile.EVENTS
+
+
+def test_partner_notifications_recommend_events() -> None:
+    assert recommend(PARTNER_NOTIFICATIONS).winner is Profile.EVENTS
+
+
+def test_push_delivery_selects_streams() -> None:
+    reqs = Requirements(
+        consumer=Consumer.PUBLIC,
+        payload=Payload.FIXED,
+        latency=Latency.TIGHT,
+        delivery=Delivery.PUSH,
+        http_caching=False,
+        team=Team.DISCIPLINED,
+    )
+    assert recommend(reqs).winner is Profile.STREAM
+
+
+def test_recommendation_is_deterministic() -> None:
+    first = recommend(PUBLIC_SAAS)
+    second = recommend(PUBLIC_SAAS)
+    assert first == second
+
+
+def test_scores_equal_sum_of_signals() -> None:
+    rec = recommend(MOBILE_BACKEND)
+    for profile in Profile:
+        total = sum(s.points for s in rec.signals if s.profile is profile)
+        assert rec.scores[profile] == total
+
+
+def test_winner_has_strictly_highest_score() -> None:
+    rec = recommend(IOT_TELEMETRY)
+    best = max(rec.scores.values())
+    assert rec.scores[rec.winner] == best
+    assert list(rec.scores.values()).count(best) >= 1
+
+
+def test_rationale_trace_references_winner_only() -> None:
+    rec = recommend(INTERNAL_MESH)
+    trace = rec.rationale()
+    assert trace, "winner must have at least one rationale line"
+    for line in trace:
+        assert ":" in line and line.startswith("[")
+\end{minted}
+
+Running the demo driver prints the recommendation and the rationale trace
+for each canonical scenario:
+
+\begin{minted}{text}
+Public SaaS API: REST
+    [+3] consumer: public third parties expect plain HTTPS + JSON they can curl
+    [+2] payload: fixed resource shapes map one-to-one onto REST resources
+    [+1] delivery: synchronous request-response is REST's native shape
+    [+3] caching: only REST leverages shared/CDN caching of GET responses
+Internal microservice mesh: gRPC
+    [+3] consumer: strongly typed, streaming, low-overhead service-to-service RPC
+    [+3] latency: HTTP/2 multiplexing plus Protobuf minimize per-call overhead
+    [+1] delivery: unary RPC is also synchronous request-response
+    [+1] team: disciplined teams can run contract-first RPC safely
+Mobile app backend: GraphQL
+    [+3] consumer: clients pick exactly the fields they render; no over-fetching
+    [+3] payload: nested graph selection sets are GraphQL's home turf
+    [+1] caching: no penalty when edge caching is not required
+    [+1] team: disciplined teams can exploit schema-first workflows
+IoT telemetry: Event-driven (webhooks/broker)
+    [+3] consumer: telemetry is naturally asynchronous and bursty
+    [+2] payload: brokered batches absorb volume spikes
+    [+2] latency: async delivery tolerates relaxed latency by design
+    [+4] delivery: fire-and-forget delivery is the defining event-driven case
+Partner notifications: Event-driven (webhooks/broker)
+    [+2] consumer: webhooks are the standard public async contract
+    [+2] latency: async delivery tolerates relaxed latency by design
+    [+4] delivery: fire-and-forget delivery is the defining event-driven case
+\end{minted}
+
+\subsection{Listing 2 --- The Northwind Platform Slice}
+\label{sec:code-platform}
+
+One FastAPI application \cite{fastapidocs,pydanticdocs} assembling the
+book's patterns into a single deployable unit: a keyset-paginated REST
+catalog (Chapters~\ref{ch:fastapi}, \ref{ch:pagination}), a GraphQL read
+model joining catalog rows to inventory availability
+(Chapter~\ref{ch:graphql}), an SSE telemetry stream
+(Chapter~\ref{ch:async_apis}), RFC~9457 problem-details errors from every
+failure path \cite{rfc9457} (Chapter~\ref{ch:problem_details}), idempotency
+keys on order creation (Chapter~\ref{ch:idempotency}), and IETF
+\texttt{RateLimit} headers from a fixed-window limiter
+\cite{ietf_ratelimit_headers} (Chapter~\ref{ch:rate_limiting}). State is
+injected through the application factory so every test gets an isolated
+platform --- the deterministic-test discipline of Chapter~\ref{ch:testing}.
+
+\begin{minted}{python}
+"""Northwind Robotics API Platform -- integrative slice (Chapter 21).
+
+One FastAPI application assembling the book's core patterns into a
+single deployable unit:
+
+* REST catalog with keyset pagination          (Ch. 6, Ch. 8)
+* GraphQL read model over the same domain data (Ch. 12)
+* SSE telemetry stream                         (Ch. 11)
+* RFC 9457 problem-details errors              (Ch. 7)
+* Idempotency keys on order creation           (Ch. 10)
+* IETF rate-limit response headers             (Ch. 14)
+
+Offline, deterministic, synthetic data only. Python 3.11+.
+"""
+
+from __future__ import annotations
+
+import base64
+import threading
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+
+import strawberry
+import uvicorn
+from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from strawberry.fastapi import GraphQLRouter
+
+# --- Domain data (synthetic Northwind Robotics universe) -------------------
+
+PRODUCTS: list[dict[str, object]] = [
+    {
+        "id": 1,
+        "sku": "NWR-ARM-6X",
+        "name": "Northwind 6-Axis Arm",
+        "category": "manipulators",
+        "unit_price_cents": 12_500_00,
+    },
+    {
+        "id": 2,
+        "sku": "NWR-LDR-360",
+        "name": "LiDAR 360 Scanner",
+        "category": "sensors",
+        "unit_price_cents": 3_499_00,
+    },
+    {
+        "id": 3,
+        "sku": "NWR-DRV-BLDC",
+        "name": "BLDC Motor Driver",
+        "category": "actuators",
+        "unit_price_cents": 189_99,
+    },
+]
+
+AVAILABILITY: dict[str, int] = {
+    "NWR-ARM-6X": 4,
+    "NWR-LDR-360": 12,
+    "NWR-DRV-BLDC": 61,
+}
+
+ROBOT_TELEMETRY: dict[str, dict[str, float | int]] = {
+    "R-101": {"motor_temp_c": 41.2, "cycles": 18233},
+    "R-102": {"motor_temp_c": 38.7, "cycles": 12004},
+    "R-103": {"motor_temp_c": 44.9, "cycles": 25077},
+}
+
+DEMO_API_KEY = "dev-key-northwind"
+RATE_LIMIT = 30
+API_VERSION = "2026-09-01"
+
+
+# --- Errors: RFC 9457 problem details (Ch. 7) ------------------------------
+
+def problem(status: int, title: str, detail: str, type_: str = "about:blank") -> JSONResponse:
+    """Build an RFC 9457 ``application/problem+json`` response."""
+    return JSONResponse(
+        status_code=status,
+        media_type="application/problem+json",
+        content={"type": type_, "title": title, "status": status, "detail": detail},
+    )
+
+
+# --- Platform state: rate limiting (Ch. 14) and idempotency (Ch. 10) -------
+
+@dataclass
+class PlatformState:
+    """Mutable application state guarded by one lock (demo-scale)."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    remaining: int = RATE_LIMIT
+    orders: dict[str, dict[str, object]] = field(default_factory=dict)
+    next_order_id: int = 1
+
+
+class CursorError(ValueError):
+    """Raised when a keyset pagination cursor cannot be decoded."""
+
+
+# --- Schemas ----------------------------------------------------------------
+
+class ProductOut(BaseModel):
+    id: int
+    sku: str
+    name: str
+    category: str
+    unit_price_cents: int
+
+
+class ProductPage(BaseModel):
+    items: list[ProductOut]
+    next_cursor: str | None = None
+    api_version: str
+
+
+class OrderIn(BaseModel):
+    sku: str
+    quantity: int = Field(ge=1, le=100)
+
+
+class OrderOut(BaseModel):
+    order_id: str
+    sku: str
+    quantity: int
+    status: str
+    api_version: str
+
+
+def _encode_cursor(product_id: int) -> str:
+    return base64.urlsafe_b64encode(f"cursor:{product_id}".encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> int:
+    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    prefix, _, value = raw.partition(":")
+    if prefix != "cursor" or not value.isdigit():
+        raise ValueError(f"malformed cursor: {cursor!r}")
+    return int(value)
+
+
+# --- GraphQL read model (Ch. 12) -------------------------------------------
+
+@strawberry.type
+class CatalogItem:
+    sku: str
+    name: str
+    category: str
+    unit_price_cents: int
+    availability: int
+
+
+@strawberry.type
+class RobotStatus:
+    robot_id: str
+    motor_temp_c: float
+    cycles: int
+
+
+@strawberry.type
+class GraphQuery:
+    @strawberry.field
+    def catalog(self, category: str | None = None) -> list[CatalogItem]:
+        rows = PRODUCTS
+        if category is not None:
+            rows = [p for p in rows if p["category"] == category]
+        return [
+            CatalogItem(
+                sku=str(p["sku"]),
+                name=str(p["name"]),
+                category=str(p["category"]),
+                unit_price_cents=int(p["unit_price_cents"]),
+                availability=AVAILABILITY.get(str(p["sku"]), 0),
+            )
+            for p in rows
+        ]
+
+    @strawberry.field
+    def robot_status(self, robot_id: str) -> RobotStatus | None:
+        row = ROBOT_TELEMETRY.get(robot_id)
+        if row is None:
+            return None
+        return RobotStatus(
+            robot_id=robot_id,
+            motor_temp_c=float(row["motor_temp_c"]),
+            cycles=int(row["cycles"]),
+        )
+
+
+graphql_router = GraphQLRouter(strawberry.Schema(query=GraphQuery))
+
+
+# --- Application factory -----------------------------------------------------
+
+def create_app(state: PlatformState | None = None) -> FastAPI:
+    """Build the platform app; inject state to keep tests isolated."""
+    app = FastAPI(title="Northwind Robotics API Platform", version="1.0.0")
+    platform = state or PlatformState()
+
+    @app.middleware("http")
+    async def platform_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if request.url.path in ("/healthz", "/docs", "/openapi.json"):
+            return await call_next(request)
+        if request.headers.get("X-API-Key") != DEMO_API_KEY:
+            return problem(401, "Unauthorized", "missing or invalid X-API-Key header")
+        with platform.lock:
+            if platform.remaining <= 0:
+                return JSONResponse(
+                    status_code=429,
+                    media_type="application/problem+json",
+                    headers={"Retry-After": "30", "RateLimit": f'"limit={RATE_LIMIT}"'},
+                    content={
+                        "type": "about:blank",
+                        "title": "Too Many Requests",
+                        "status": 429,
+                        "detail": "quota exhausted; retry after the Retry-After window",
+                    },
+                )
+            platform.remaining -= 1
+            remaining = platform.remaining
+        response = await call_next(request)
+        response.headers["RateLimit"] = f'"limit={RATE_LIMIT}, remaining={remaining}"'
+        response.headers["RateLimit-Remaining"] = str(remaining)
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        detail = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in exc.errors()
+        )
+        return problem(422, "Unprocessable Entity", detail)
+
+    # --- REST catalog (Ch. 6 + Ch. 8) -------------------------------------
+    @app.get("/v1/products", response_model=ProductPage)
+    def list_products(
+        category: str | None = None,
+        limit: int = Query(default=2, ge=1, le=50),
+        cursor: str | None = None,
+    ) -> ProductPage:
+        rows = [p for p in PRODUCTS if category is None or p["category"] == category]
+        rows.sort(key=lambda p: int(p["id"]))
+        if cursor is not None:
+            try:
+                after = _decode_cursor(cursor)
+            except ValueError as exc:
+                raise CursorError(str(exc)) from exc
+            rows = [p for p in rows if int(p["id"]) > after]
+        page = rows[:limit]
+        next_cursor = (
+            _encode_cursor(int(page[-1]["id"])) if len(rows) > limit else None
+        )
+        return ProductPage(
+            items=[ProductOut(**p) for p in page],  # type: ignore[arg-type]
+            next_cursor=next_cursor,
+            api_version=API_VERSION,
+        )
+
+    @app.exception_handler(CursorError)
+    async def cursor_handler(_request: Request, exc: CursorError) -> JSONResponse:
+        return problem(400, "Invalid Cursor", str(exc))
+
+    # --- Orders with idempotency keys (Ch. 10) -----------------------------
+    @app.post("/v1/orders", response_model=OrderOut, status_code=201)
+    def create_order(order: OrderIn, request: Request) -> OrderOut | JSONResponse:
+        key = request.headers.get("Idempotency-Key")
+        if not key:
+            return problem(
+                400,
+                "Missing Idempotency-Key",
+                "POST /v1/orders requires an Idempotency-Key header",
+            )
+        with platform.lock:
+            existing = platform.orders.get(key)
+            if existing is not None:
+                if existing["payload"] != order.model_dump():
+                    return problem(
+                        422,
+                        "Idempotency Conflict",
+                        "key reused with a different request payload",
+                    )
+                return OrderOut(
+                    order_id=str(existing["order_id"]),
+                    sku=order.sku,
+                    quantity=order.quantity,
+                    status="accepted",
+                    api_version=API_VERSION,
+                )
+            if order.sku not in AVAILABILITY:
+                return problem(404, "Unknown SKU", f"no catalog entry for {order.sku!r}")
+            order_id = f"ORD-{platform.next_order_id:04d}"
+            platform.next_order_id += 1
+            platform.orders[key] = {
+                "order_id": order_id,
+                "payload": order.model_dump(),
+            }
+        return OrderOut(
+            order_id=order_id,
+            sku=order.sku,
+            quantity=order.quantity,
+            status="accepted",
+            api_version=API_VERSION,
+        )
+
+    # --- SSE telemetry stream (Ch. 11) --------------------------------------
+    @app.get("/v1/telemetry/stream")
+    async def telemetry_stream() -> StreamingResponse:
+        async def events() -> AsyncIterator[str]:
+            event_id = 0
+            for robot_id in sorted(ROBOT_TELEMETRY):
+                row = ROBOT_TELEMETRY[robot_id]
+                event_id += 1
+                yield (
+                    f"id: {event_id}\n"
+                    f"event: robot-reading\n"
+                    f'data: {{"robot_id": "{robot_id}", '
+                    f'"motor_temp_c": {row["motor_temp_c"]}, '
+                    f'"cycles": {row["cycles"]}}}\n\n'
+                )
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    app.include_router(graphql_router, prefix="/graphql")
+    return app
+
+
+if __name__ == "__main__":
+    uvicorn.run(create_app(), host="127.0.0.1", port=8121)
+\end{minted}
+
+The smoke suite proves the surfaces work \emph{together} --- through one
+middleware stack, with one state --- using an in-process ASGI client, so no
+sockets, servers, or network are involved:
+
+\begin{minted}{python}
+"""In-process smoke tests for the Northwind platform slice.
+
+Every request runs through httpx + ASGITransport: no sockets, no
+network, fully deterministic. The suite proves the four surfaces
+(REST, GraphQL, SSE, problem-details errors) work together on one app.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+
+from northwind_platform import DEMO_API_KEY, create_app
+
+AUTH = {"X-API-Key": DEMO_API_KEY}
+
+
+@pytest.fixture()
+def client() -> Iterator[TestClient]:
+    """Fresh app + in-process client per test (isolated rate limiter)."""
+    with TestClient(create_app()) as c:
+        yield c
+
+
+# --- Auth and rate limiting --------------------------------------------------
+
+def test_missing_api_key_is_problem_json(client: TestClient) -> None:
+    r = client.get("/v1/products")
+    assert r.status_code == 401
+    assert r.headers["content-type"] == "application/problem+json"
+    body = r.json()
+    assert body["status"] == 401
+    assert {"type", "title", "status", "detail"} <= body.keys()
+
+
+def test_rate_limit_headers_present(client: TestClient) -> None:
+    r = client.get("/v1/products", headers=AUTH)
+    assert r.status_code == 200
+    assert "RateLimit" in r.headers
+    assert int(r.headers["RateLimit-Remaining"]) < 30
+
+
+def test_rate_limit_exhaustion_returns_429() -> None:
+    with TestClient(create_app()) as c:
+        last = None
+        for _ in range(31):
+            last = c.get("/v1/products", headers=AUTH)
+        assert last is not None and last.status_code == 429
+        assert last.headers["Retry-After"] == "30"
+
+
+# --- REST catalog ------------------------------------------------------------
+
+def test_product_page_one_and_cursor(client: TestClient) -> None:
+    page1 = client.get("/v1/products", headers=AUTH, params={"limit": 2}).json()
+    assert len(page1["items"]) == 2
+    assert page1["next_cursor"] is not None
+    assert page1["api_version"]
+
+    page2 = client.get(
+        "/v1/products",
+        headers=AUTH,
+        params={"limit": 2, "cursor": page1["next_cursor"]},
+    ).json()
+    assert len(page2["items"]) == 1
+    assert page2["next_cursor"] is None
+    ids = [p["id"] for p in page1["items"] + page2["items"]]
+    assert ids == [1, 2, 3]
+
+
+def test_bad_cursor_is_problem_400(client: TestClient) -> None:
+    r = client.get(
+        "/v1/products", headers=AUTH, params={"cursor": "not-a-cursor"}
+    )
+    assert r.status_code == 400
+    assert r.json()["title"] == "Invalid Cursor"
+
+
+def test_validation_error_is_problem_422(client: TestClient) -> None:
+    r = client.get("/v1/products", headers=AUTH, params={"limit": 0})
+    assert r.status_code == 422
+    assert r.headers["content-type"] == "application/problem+json"
+
+
+# --- Orders + idempotency -----------------------------------------------------
+
+def test_order_requires_idempotency_key(client: TestClient) -> None:
+    r = client.post("/v1/orders", headers=AUTH, json={"sku": "NWR-ARM-6X", "quantity": 1})
+    assert r.status_code == 400
+
+
+def test_order_replay_returns_same_order_id(client: TestClient) -> None:
+    headers = {**AUTH, "Idempotency-Key": "smoke-key-1"}
+    payload = {"sku": "NWR-LDR-360", "quantity": 2}
+    first = client.post("/v1/orders", headers=headers, json=payload)
+    second = client.post("/v1/orders", headers=headers, json=payload)
+    assert first.status_code == 201
+    assert second.json()["order_id"] == first.json()["order_id"]
+
+
+def test_idempotency_key_conflict_is_422(client: TestClient) -> None:
+    headers = {**AUTH, "Idempotency-Key": "smoke-key-2"}
+    client.post("/v1/orders", headers=headers, json={"sku": "NWR-ARM-6X", "quantity": 1})
+    conflict = client.post(
+        "/v1/orders", headers=headers, json={"sku": "NWR-ARM-6X", "quantity": 9}
+    )
+    assert conflict.status_code == 422
+    assert conflict.json()["title"] == "Idempotency Conflict"
+
+
+def test_unknown_sku_is_problem_404(client: TestClient) -> None:
+    headers = {**AUTH, "Idempotency-Key": "smoke-key-3"}
+    r = client.post("/v1/orders", headers=headers, json={"sku": "NOPE-1", "quantity": 1})
+    assert r.status_code == 404
+    assert r.json()["status"] == 404
+
+
+# --- GraphQL read model --------------------------------------------------------
+
+def test_graphql_catalog_joins_availability(client: TestClient) -> None:
+    query = "{ catalog { sku name availability } }"
+    r = client.post("/graphql", headers=AUTH, json={"query": query})
+    assert r.status_code == 200
+    rows = {item["sku"]: item for item in r.json()["data"]["catalog"]}
+    assert rows["NWR-LDR-360"]["availability"] == 12
+
+
+def test_graphql_robot_status(client: TestClient) -> None:
+    query = '{ robotStatus(robotId: "R-101") { robotId motorTempC cycles } }'
+    r = client.post("/graphql", headers=AUTH, json={"query": query})
+    assert r.status_code == 200
+    status = r.json()["data"]["robotStatus"]
+    assert status["robotId"] == "R-101"
+    assert status["motorTempC"] == pytest.approx(41.2)
+
+
+# --- SSE telemetry --------------------------------------------------------------
+
+def test_sse_stream_yields_three_robot_events(client: TestClient) -> None:
+    with client.stream("GET", "/v1/telemetry/stream", headers=AUTH) as r:
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        body = "".join(r.iter_text())
+    events = [chunk for chunk in body.strip().split("\n\n") if chunk]
+    assert len(events) == 3
+    assert all(chunk.startswith("id: ") for chunk in events)
+    payload = events[0].split("data: ", 1)[1]
+    assert json.loads(payload)["robot_id"] == "R-101"
+\end{minted}
+
+\subsection{Listing 3 --- The Architecture Conformance Checker}
+\label{sec:code-checker}
+
+Chapter~\ref{ch:lifecycle} argued that governance must be executable or it
+is decorative. This checker is the proof: it loads every OpenAPI
+\cite{openapi31} and AsyncAPI \cite{asyncapi} manifest in a folder and
+verifies the platform's invariants --- security schemes with descriptions
+and a global \texttt{security} requirement (O-001), RFC~9457 error shapes on
+every 4xx/5xx response (O-002) \cite{rfc9457}, keyset pagination conventions
+on collection GETs (O-003), date-based version identifiers (O-004), and the
+event envelope on AsyncAPI publish payloads (A-001). Local
+\texttt{\$ref} resolution keeps the checker honest against real spec style.
+
+\begin{minted}{python}
+"""Architecture conformance checker (Chapter 21).
+
+Turns the book's governance rules into executable policy. Given a
+manifests folder of OpenAPI (YAML/JSON) and AsyncAPI documents, the
+checker verifies the platform invariants that Chapter 20 establishes
+as linted, CI-enforced rules:
+
+* O-001: every spec declares a security scheme with a non-empty
+  ``description`` and applies ``security`` globally.
+* O-002: every 4xx/5xx response references the shared
+  ``ProblemDetails`` component (RFC 9457).
+* O-003: every collection GET documents ``limit`` and ``cursor``
+  query parameters and a ``nextCursor`` response field.
+* O-004: the ``info.version`` header version matches
+  ``YYYY-MM-DD`` (the platform's date-based versioning rule).
+* A-001: every AsyncAPI publish payload message defines ``event_id``
+  and ``occurred_at`` (the platform's event envelope).
+
+Offline, deterministic. Requires only PyYAML. Python 3.11+.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+DATE_VERSION = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ENVELOPE_FIELDS = ("event_id", "occurred_at")
+
+
+@dataclass(frozen=True)
+class Violation:
+    """A single governance rule breach in one manifest."""
+
+    rule: str
+    spec: str
+    detail: str
+
+    def render(self) -> str:
+        return f"[{self.rule}] {self.spec}: {self.detail}"
+
+
+def _load_specs(folder: Path) -> dict[str, Any]:
+    specs: dict[str, Any] = {}
+    for path in sorted(folder.rglob("*")):
+        if path.suffix.lower() in {".yaml", ".yml", ".json"}:
+            specs[str(path.relative_to(folder))] = yaml.safe_load(
+                path.read_text(encoding="utf-8")
+            )
+    return specs
+
+
+def _resolve_local_ref(document: Any, node: Any, depth: int = 0) -> Any:
+    """Resolve one local ``#/...`` reference against its own document."""
+    if depth > 10 or not isinstance(node, dict) or "$ref" not in node:
+        return node
+    ref = str(node["$ref"])
+    if not ref.startswith("#/"):
+        return node  # external refs are out of scope for the offline checker
+    target: Any = document
+    for part in ref[2:].split("/"):
+        if not isinstance(target, dict) or part not in target:
+            return node
+        target = target[part]
+    return _resolve_local_ref(document, target, depth + 1)
+
+
+def _schema_has_property(document: Any, schema: Any, name: str) -> bool:
+    """True when ``name`` appears in the schema or any composed/ref'd part."""
+    schema = _resolve_local_ref(document, schema)
+    if not isinstance(schema, dict):
+        return False
+    if name in (schema.get("properties") or {}):
+        return True
+    for key in ("allOf", "anyOf", "oneOf"):
+        if any(
+            _schema_has_property(document, part, name) for part in schema.get(key, [])
+        ):
+            return True
+    return False
+
+
+def _collect_refs(document: Any, schema: Any, depth: int = 0) -> list[str]:
+    """Collect every ``$ref`` target reachable from a schema (any depth)."""
+    schema = _resolve_local_ref(document, schema)
+    if depth > 10 or not isinstance(schema, dict):
+        return []
+    refs: list[str] = []
+    raw = schema.get("$ref")
+    if isinstance(raw, str):
+        refs.append(raw)
+    for key in ("allOf", "anyOf", "oneOf"):
+        for part in schema.get(key, []):
+            refs.extend(_collect_refs(document, part, depth + 1))
+    return refs
+
+
+def _content_schemas(content: Any) -> list[Any]:
+    if not isinstance(content, dict):
+        return []
+    return [media.get("schema") for media in content.values() if isinstance(media, dict)]
+
+
+def _check_openapi(name: str, spec: Any) -> list[Violation]:
+    violations: list[Violation] = []
+    if not isinstance(spec, dict) or "openapi" not in spec:
+        return violations
+
+    # O-001: auth scheme presence and global security requirement.
+    schemes = (
+        (spec.get("components") or {}).get("securitySchemes") or {}
+    )
+    if not schemes:
+        violations.append(Violation("O-001", name, "no securitySchemes defined"))
+    for scheme_name, scheme in schemes.items():
+        if not (scheme or {}).get("description"):
+            violations.append(
+                Violation("O-001", name, f"scheme {scheme_name!r} lacks a description")
+            )
+    if not spec.get("security"):
+        violations.append(
+            Violation("O-001", name, "no global security requirement applied")
+        )
+
+    # O-002: error responses must reference ProblemDetails.
+    paths = spec.get("paths") or {}
+    for path, item in paths.items():
+        for method, operation in (item or {}).items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            responses = (operation or {}).get("responses") or {}
+            for status, response in responses.items():
+                if not str(status).startswith(("4", "5")):
+                    continue
+                schemas = _content_schemas((response or {}).get("content"))
+                refs: list[str] = []
+                for schema in schemas:
+                    raw = (schema or {}).get("$ref") if isinstance(schema, dict) else None
+                    if raw:
+                        refs.append(raw)
+                    else:
+                        refs.extend(_collect_refs(spec, schema))
+                if not any(r.endswith("/ProblemDetails") for r in refs):
+                    violations.append(
+                        Violation(
+                            "O-002",
+                            name,
+                            f"{method.upper()} {path} {status} does not reference "
+                            "ProblemDetails",
+                        )
+                    )
+
+    # O-003: collection GETs must document limit/cursor pagination.
+    for path, item in paths.items():
+        get_op = (item or {}).get("get")
+        if not get_op or not path.rstrip("/").endswith("s"):
+            continue
+        params = {
+            (p or {}).get("name")
+            for p in get_op.get("parameters") or []
+            if isinstance(p, dict) and p.get("in") == "query"
+        }
+        missing = {"limit", "cursor"} - params
+        if missing:
+            violations.append(
+                Violation(
+                    "O-003",
+                    name,
+                    f"GET {path} missing query params: {sorted(missing)}",
+                )
+            )
+        ok_schemas = _content_schemas(
+            ((get_op.get("responses") or {}).get("200") or {}).get("content")
+        )
+        if not any(
+            _schema_has_property(spec, s, "nextCursor") for s in ok_schemas
+        ):
+            violations.append(
+                Violation("O-003", name, f"GET {path} 200 schema lacks nextCursor")
+            )
+
+    # O-004: date-based version header convention.
+    version = str((spec.get("info") or {}).get("version", ""))
+    if not DATE_VERSION.match(version):
+        violations.append(
+            Violation(
+                "O-004",
+                name,
+                f"info.version {version!r} is not a YYYY-MM-DD date version",
+            )
+        )
+    return violations
+
+
+def _check_asyncapi(name: str, spec: Any) -> list[Violation]:
+    violations: list[Violation] = []
+    if not isinstance(spec, dict) or "asyncapi" not in spec:
+        return violations
+    channels = spec.get("channels") or {}
+    for channel, item in channels.items():
+        publish = (item or {}).get("publish")
+        if not publish:
+            continue
+        message = _resolve_local_ref(spec, publish.get("message") or {})
+        payload = _resolve_local_ref(spec, (message or {}).get("payload") or {})
+        missing = [
+            f for f in ENVELOPE_FIELDS if not _schema_has_property(spec, payload, f)
+        ]
+        if missing:
+            violations.append(
+                Violation(
+                    "A-001",
+                    name,
+                    f"channel {channel!r} publish payload missing envelope "
+                    f"fields: {missing}",
+                )
+            )
+    return violations
+
+
+def check_folder(folder: Path) -> list[Violation]:
+    """Check every spec under ``folder`` and return all violations."""
+    specs = _load_specs(folder)
+    if not specs:
+        raise FileNotFoundError(f"no YAML/JSON manifests found under {folder}")
+    violations: list[Violation] = []
+    for name, spec in specs.items():
+        violations.extend(_check_openapi(name, spec))
+        violations.extend(_check_asyncapi(name, spec))
+    return violations
+
+
+def main(argv: list[str]) -> int:
+    folder = Path(argv[1]) if len(argv) > 1 else Path("manifests")
+    try:
+        violations = check_folder(folder)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if violations:
+        print(f"FAIL: {len(violations)} governance violation(s)")
+        for v in violations:
+            print(f"  {v.render()}")
+        return 1
+    print(f"PASS: all governance invariants hold under {folder}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+\end{minted}
+
+The checker is validated against two synthetic manifest folders shipped with
+the lab: a compliant Northwind folder and a legacy folder that breaches every
+rule family. A dedicated test proves that \texttt{\$ref}-based AsyncAPI
+payloads resolve instead of false-positiving.
+
+\begin{minted}{python}
+"""Tests for the architecture conformance checker.
+
+Runs against two synthetic fixture folders: ``fixtures_pass`` (a
+compliant Northwind manifests folder) and ``fixtures_fail`` (a legacy
+folder that breaches every rule family).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from conformance_checker import check_folder, main
+
+HERE = Path(__file__).parent
+PASS_DIR = HERE / "fixtures_pass"
+FAIL_DIR = HERE / "fixtures_fail"
+
+
+def test_compliant_folder_passes() -> None:
+    assert check_folder(PASS_DIR) == []
+
+
+def test_legacy_folder_fails() -> None:
+    violations = check_folder(FAIL_DIR)
+    assert violations, "legacy folder must produce violations"
+
+
+def test_every_rule_family_fires_on_legacy_folder() -> None:
+    rules = {v.rule for v in check_folder(FAIL_DIR)}
+    assert {"O-001", "O-002", "O-003", "O-004", "A-001"} <= rules
+
+
+def test_main_exit_codes() -> None:
+    assert main(["prog", str(PASS_DIR)]) == 0
+    assert main(["prog", str(FAIL_DIR)]) == 1
+
+
+def test_missing_folder_exit_code() -> None:
+    assert main(["prog", str(HERE / "no_such_dir")]) == 2
+
+
+def test_checker_is_deterministic() -> None:
+    assert check_folder(FAIL_DIR) == check_folder(FAIL_DIR)
+
+
+def test_asyncapi_ref_payload_is_resolved(tmp_path: Path) -> None:
+    """A publish payload referenced via components must not false-positive."""
+    spec = tmp_path / "ref.asyncapi.yaml"
+    spec.write_text(
+        "\n".join(
+            [
+                'asyncapi: "2.6.0"',
+                "info: { title: Ref Events, version: '1.0.0' }",
+                "channels:",
+                "  robot.readings:",
+                "    publish:",
+                "      message: { $ref: '#/components/messages/Reading' }",
+                "components:",
+                "  messages:",
+                "    Reading:",
+                "      payload: { $ref: '#/components/schemas/Envelope' }",
+                "  schemas:",
+                "    Envelope:",
+                "      type: object",
+                "      properties:",
+                "        event_id: { type: string }",
+                "        occurred_at: { type: string, format: date-time }",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert check_folder(tmp_path) == []
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
+\end{minted}
+
+The compliant manifests folder (abridged here to the catalog spec; the
+AsyncAPI telemetry spec follows the same shape):
+
+\begin{minted}{yaml}
+openapi: 3.1.0
+info:
+  title: Northwind Catalog API
+  version: "2026-09-01"
+security:
+  - ApiKeyAuth: []
+paths:
+  /v1/products:
+    get:
+      summary: List catalog products
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Page of products
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Product" }
+                  nextCursor: { type: string }
+        "400":
+          description: Invalid cursor
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/ProblemDetails" }
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/ProblemDetails" }
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Partner API key issued via the Northwind developer portal.
+  schemas:
+    Product:
+      type: object
+      properties:
+        id: { type: integer }
+        sku: { type: string }
+        name: { type: string }
+        category: { type: string }
+        unit_price_cents: { type: integer }
+    ProblemDetails:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+\end{minted}
+
+\section{Common Pitfalls \& Anti-Patterns}
+
+The failure modes below are synthesis-level: they appear only when you
+combine everything, which is exactly why they are common at platform scale.
+
+\subsection{Resume-Driven Protocol Selection}
+
+Choosing GraphQL or gRPC because it is fashionable, then discovering the
+public partner audience cannot consume it, is the canonical platform mistake.
+The decision card exists precisely to make this failure awkward: if you
+cannot fill in the six criteria, you have not done the analysis. The repair
+--- a BFF shim, a gRPC-Web proxy, a parallel REST surface --- always costs
+more than the analysis would have.
+
+\subsection{One-Protocol-Fits-All Mandates}
+
+The mirror image of fashion is the organizational mandate: ``everything is
+REST'' or ``everything is gRPC.'' Mandates feel like governance but are
+actually the refusal to govern. The reference architecture of
+Section~\ref{sec:ref-arch} runs four profiles simultaneously \emph{because
+the constraints differ per consumer}; a mandate forces the worst profile onto
+at least one consumer class. Govern invariants (errors, auth, pagination,
+observability), not protocols.
+
+\subsection{Big-Bang Platform Builds}
+
+Attempting all four milestones of the Grand Capstone in one heroic push
+produces a platform that is 90\,\% built and 0\,\% operable. The phased plan
+of Table~\ref{tab:milestones} is ordered so that each milestone is
+independently shippable and teaches the organization something the next one
+needs. If M1's REST core cannot pass its contract tests, M3's event pipeline
+will not save you.
+
+\subsection{Skipping Governance Until Fifty APIs Exist}
+
+Governance feels premature with three APIs and impossible with fifty. The
+cheap moment is the beginning: three rules (error shape, auth scheme,
+pagination convention) in a conformance checker like
+Listing~3 (Section~\ref{sec:code-checker}) cost an afternoon when you have three specs and a
+quarter when you have fifty --- and retrofitting means negotiating with fifty
+teams' shipped contracts \cite{gehl2021apidesign}.
+
+\subsection{Adopting Frontiers Without Operational Maturity}
+
+HTTP/3, edge runtimes, and MCP tool surfaces amplify whatever you already
+are. Teams without SLOs, traces, and rollback discipline do not get faster
+from QUIC; they get \emph{less debuggable}. Table~\ref{tab:frontiers} lists a
+prerequisite per frontier; treat it as a gate, not a suggestion.
+
+\subsection{Synthesis Without Ownership}
+
+A reference architecture diagram that no team owns decays into a poster.
+Every box in Figure~\ref{fig:ref-arch} must have a named owning team, an SLO,
+and a runbook, or the architecture is fiction
+\cite{newman2021microservices}.
+
+\section{Hands-On Production Lab \& Real-World Case Study}
+
+\subsection{Lab: Run the Full Toolkit}
+
+\textbf{Goal:} exercise all three listings end to end, offline, in under ten
+minutes.
+
+\textbf{Steps (PowerShell):}
+
+\begin{minted}{powershell}
+cd "code\ch21"
+.\.venv\Scripts\Activate.ps1
+
+# 1. Prove all 30 tests pass (advisor + platform + checker).
+python -m pytest -q
+
+# 2. Run the decision advisor against the five canonical scenarios.
+python protocol_advisor.py
+
+# 3. Check governance: compliant folder passes, legacy folder fails.
+python conformance_checker.py fixtures_pass
+python conformance_checker.py fixtures_fail
+
+# 4. Boot the platform slice and probe every surface.
+python northwind_platform.py   # serves http://127.0.0.1:8121
+\end{minted}
+
+In a second PowerShell window:
+
+\begin{minted}{powershell}
+$h = @{ "X-API-Key" = "dev-key-northwind" }
+
+# REST catalog with keyset pagination (note RateLimit-* headers).
+curl.exe -s -D - "http://127.0.0.1:8121/v1/products?limit=2" -H "X-API-Key: dev-key-northwind"
+
+# Problem-details error: no auth header.
+curl.exe -s "http://127.0.0.1:8121/v1/products"
+
+# Idempotent order placement: run twice, compare order_id.
+$body = '{"sku":"NWR-LDR-360","quantity":2}'
+curl.exe -s -X POST "http://127.0.0.1:8121/v1/orders" -H "X-API-Key: dev-key-northwind" -H "Idempotency-Key: lab-1" -H "Content-Type: application/json" -d $body
+curl.exe -s -X POST "http://127.0.0.1:8121/v1/orders" -H "X-API-Key: dev-key-northwind" -H "Idempotency-Key: lab-1" -H "Content-Type: application/json" -d $body
+
+# GraphQL read model.
+$q = '{"query":"{ catalog { sku name availability } }"}'
+curl.exe -s -X POST "http://127.0.0.1:8121/graphql" -H "X-API-Key: dev-key-northwind" -H "Content-Type: application/json" -d $q
+
+# SSE telemetry stream (three robot events, then the demo stream ends).
+curl.exe -s -N "http://127.0.0.1:8121/v1/telemetry/stream" -H "X-API-Key: dev-key-northwind"
+\end{minted}
+
+\textbf{Expected results:} 30 tests pass; the advisor prints REST, gRPC,
+GraphQL, event-driven, and event-driven for scenarios A--E with rationale
+traces; the checker prints \texttt{PASS} for \texttt{fixtures\_pass} and
+seven violations for \texttt{fixtures\_fail}; the live server returns a
+paginated product page with \texttt{RateLimit-Remaining}, an
+\texttt{application/problem+json} 401 without the key, the same
+\texttt{order\_id} on both POSTs, three catalog rows from GraphQL with
+joined availability, and three \texttt{robot-reading} SSE events.
+
+\textbf{Extensions:} (a) flip one scenario's constraints in the advisor
+(e.g., make scenario~C cacheable) and watch the recommendation change;
+(b) add a violating spec to \texttt{fixtures\_fail} and predict the rule
+codes before running; (c) exhaust the 30-request rate limit against the live
+server and confirm the 429 carries \texttt{Retry-After}.
+
+\subsection{Case Study: Three Years of an Enterprise API Platform}
+
+\textbf{Year 1 --- the product year.} Northwind Robotics ships a public REST
+catalog and orders API to resellers: OpenAPI-first, RFC~9457 errors from day
+one, keyset pagination, idempotency keys on orders. The team debates GraphQL
+for the partner audience and rejects it with the decision card: unknown third
+parties plus a cacheable catalog is a REST scenario, full stop. A two-rule
+conformance linter (error shape, auth scheme) runs in CI from the first
+spec. Year-end incident count: one --- a pagination drift bug caught by a
+contract test, not a partner.
+
+\textbf{Year 2 --- the platform year.} The mobile app launches, and its
+nested screens justify a GraphQL read model (scenario~C) with depth limits
+and persisted queries. Inventory moves to internal gRPC when the checkout hot
+path misses its latency budget under REST-over-JSON. Order events go through
+a transactional outbox to signed partner webhooks after one painful week in
+which a dual-write bug (database committed, webhook never sent) teaches the
+team why Chapter~\ref{ch:async_apis} insists on the outbox
+\cite{kleppmann2017ddia}. Rate tiers launch with IETF headers; the noisy
+top-1\,\% integrators get quota offers instead of silent 429s. The
+conformance checker, now five rules, blocks two specs that would have shipped
+undocumented breaking changes.
+
+\textbf{Year 3 --- the strategy year.} OTel traces span edge to outbox; SLOs
+with error budgets replace uptime folklore \cite{beyer2016sre}. The platform
+team evaluates HTTP/3 (adopted free at the CDN edge; internal gRPC stays on
+HTTP/2), runs a pilot exposing read-only catalog tools via MCP to an internal
+support copilot with tool schemas generated from the same OpenAPI source, and
+declines an edge-compute rewrite of the order write path --- regional
+affinity could not satisfy the single-region consistency requirement, a
+\texttt{wait} decision the frontier table predicts. The year's most quoted
+internal document is not a design doc but the conformance checker's violation
+log: governance-as-code turned fifty APIs into one coherent platform.
+
+\textbf{Lessons:} protocols were chosen per consumer and revisited only when
+constraints changed; governance was cheapest on day one; the outbox and
+idempotency investments paid out every incident; and every frontier decision
+had an explicit adopt/trial/wait rationale tied to measured constraints.
+
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+
+Work these without rereading the chapter; then check your reasoning against
+the decision card and the reference architecture.
+
+\subsection{Concept Review}
+
+\begin{enumerate}
+  \item Why is the delivery model the \emph{first} question in the decision
+        tree rather than the consumer type? Give an example where ordering
+        them the other way produces a wrong recommendation.
+  \item The comparison matrix calls its entries ``tendencies, not laws.''
+        Pick one cell and construct a legitimate exception.
+  \item In the reference architecture, why does the outbox relay read from
+        the database instead of the service publishing to the broker
+        directly? What exactly can go wrong otherwise
+        \cite{kleppmann2017ddia}?
+  \item Which single header pair makes a public REST catalog dramatically
+        cheaper to operate, and why do GraphQL endpoints not benefit equally
+        \cite{rfc9110}?
+  \item The conformance checker's O-002 rule requires a
+        \texttt{ProblemDetails} reference on every 4xx/5xx response. What
+        failure class of Table~\ref{tab:failure-taxonomy} does this prevent,
+        and for whom?
+  \item Why does the advisor break ties deterministically instead of
+        reporting ``either is fine''? What property of the test suite
+        depends on it?
+  \item Explain why MCP tool schemas should be \emph{generated from} the
+        OpenAPI source of truth rather than maintained by hand.
+  \item The case study's year-3 team declined an edge-compute rewrite of the
+        order path. Reconstruct their reasoning using
+        Table~\ref{tab:frontiers}.
+\end{enumerate}
+
+\subsection{Architecture-Design Drills}
+
+Each drill gives a consumer, a constraint set, and asks for a defended
+design. Use the decision card, name the profile(s), sketch the surfaces, and
+state the top two failure modes with mitigations.
+
+\begin{enumerate}
+  \item \textbf{Drill 1 --- Hospital device monitoring.} Bedside devices
+        emit vitals every second; nurses view live dashboards; auditors pull
+        historical ranges. Constraints: no public internet exposure, p99
+        dashboard freshness $<$ 2\,s, audit reads cacheable for 24\,h,
+        small disciplined team. Design all three surfaces.
+  \item \textbf{Drill 2 --- Marketplace payout API.} Sellers trigger
+        payouts; duplicates are catastrophic; partner banks are slow and
+        flaky. Constraints: public consumers, strict exactly-once semantics
+        at the boundary, audit trail, 100 requests/min typical with 10$\times$
+        month-end bursts. Which chapters' patterns combine here?
+  \item \textbf{Drill 3 --- Multi-tenant analytics backend.} A SPA renders
+        arbitrary user-configured dashboards over 40 entity types.
+        Constraints: payload shape unknowable at design time, metered mobile
+        variant planned next year, team of four. Defend or reject GraphQL
+        using the card, and design the guardrails whichever way you land.
+  \item \textbf{Drill 4 --- Fleet firmware update orchestration.} 50\,000
+        devices must receive signed update commands and report progress;
+        connectivity is intermittent. Constraints: server-initiated delivery,
+        resume across disconnects, no inbound connections to devices allowed
+        on some networks. Choose between SSE, WebSockets, gRPC streaming,
+        and polling-with-ETags --- and defend the choice.
+  \item \textbf{Drill 5 --- Your own platform.} Take a system you know
+        professionally. Fill in the six criteria for each of its API
+        surfaces. Does the card reproduce the choices that were actually
+        made? Where it does not, was the card wrong or was the choice?
+\end{enumerate}
+
+\section{Interview Q\&A Vault}
+
+Thirty-two synthesis-level questions, ordered junior $\rightarrow$ staff.
+Answers are deliberately terse; the chapters cited hold the depth.
+
+\subsection*{Junior}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3em]
+  \item \textbf{When would you choose REST over GraphQL for a new public
+        API?} --- When consumers are unknown third parties, payloads are
+        fixed resources, and CDN caching matters: REST's addressable GETs are
+        the only profile that exploits shared HTTP caches \cite{rfc9110}, and
+        OpenAPI tooling is universally understood \cite{openapi31}.
+        (Ch.~\ref{ch:rest_style})
+  \item \textbf{What is RFC~9457 and why should every error use it?} ---
+        A standard JSON problem-details shape (\texttt{type},
+        \texttt{title}, \texttt{status}, \texttt{detail}) so clients handle
+        errors programmatically instead of parsing prose \cite{rfc9457}.
+        (Ch.~\ref{ch:problem_details})
+  \item \textbf{Offset or keyset pagination --- and why?} --- Keyset:
+        stable under concurrent inserts, $O(1)$ deep pages, and it composes
+        with cursors; offset drifts and scans \cite{rfc8288}.
+        (Ch.~\ref{ch:pagination})
+  \item \textbf{What does an idempotency key buy you?} --- Safe retries:
+        the server deduplicates replays of the same key, so a flaky network
+        cannot double-charge or double-order. (Ch.~\ref{ch:idempotency})
+  \item \textbf{REST vs.\ gRPC in one sentence?} --- REST optimizes for
+        reach and cacheability over standard HTTP; gRPC optimizes for typed,
+        low-latency service-to-service RPC over HTTP/2
+        \cite{rfc9113,grpcdocs}. (Ch.~\ref{ch:grpc})
+  \item \textbf{What headers belong on a rate-limited response?} ---
+        \texttt{429} with \texttt{Retry-After} plus the IETF
+        \texttt{RateLimit} family so well-behaved clients can self-throttle
+        \cite{ietf_ratelimit_headers}. (Ch.~\ref{ch:rate_limiting})
+  \item \textbf{Why pin timeouts on every outbound call?} --- An unbounded
+        wait turns a slow dependency into your outage; timeouts plus retries
+        with backoff bound the blast radius \cite{nygard2018releaseit}.
+        (Ch.~\ref{ch:consuming_python})
+  \item \textbf{What is the OpenAPI document's role in a team?} --- The
+        machine-readable source of truth for the contract: docs, tests,
+        lint, and SDKs all derive from it \cite{openapi31}.
+        (Ch.~\ref{ch:lifecycle})
+\end{enumerate}
+
+\subsection*{Mid}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3em, start=9]
+  \item \textbf{How do you version an API without breaking consumers?} ---
+        Additive changes within a version; date-based versions for breaking
+        ones; \texttt{Sunset} headers and a published deprecation policy
+        \cite{rfc8594}. (Ch.~\ref{ch:versioning})
+  \item \textbf{Explain the transactional outbox in ninety seconds.} ---
+        Write the state change \emph{and} the event row in one transaction;
+        a relay publishes from the outbox; consumers get at-least-once
+        delivery and the dual-write anomaly disappears
+        \cite{kleppmann2017ddia}. (Ch.~\ref{ch:async_apis})
+  \item \textbf{When is GraphQL the wrong answer?} --- Cacheable public
+        reads, teams without schema-governance maturity, and payloads that
+        are actually fixed resources; you pay resolver complexity and lose
+        HTTP caching for nothing \cite{graphqlspec}.
+        (Ch.~\ref{ch:graphql})
+  \item \textbf{How do you secure a webhook?} --- HMAC signatures with
+        rotated secrets, timestamp tolerance against replay, delivery logs,
+        and a replay endpoint; treat inbound signature failures as security
+        events \cite{owaspapisecurity}. (Ch.~\ref{ch:async_apis})
+  \item \textbf{SSE or WebSockets?} --- SSE when the flow is server-to-client
+        text events: it rides plain HTTP, auto-reconnects, and resumes via
+        \texttt{Last-Event-ID}; WebSockets when you need bidirectional or
+        binary. (Ch.~\ref{ch:async_apis})
+  \item \textbf{What belongs in a health endpoint vs.\ a readiness
+        endpoint?} --- Liveness: process is up. Readiness: dependencies
+        (database, broker) verified, safe to route traffic. Conflating them
+        turns dependency blips into restart storms.
+        (Ch.~\ref{ch:deployment})
+  \item \textbf{How do circuit breakers and retries interact?} --- Retries
+        handle transient faults; the breaker stops hammering a down
+        dependency; retry budgets prevent retry storms from becoming a
+        self-inflicted DDoS \cite{nygard2018releaseit}.
+        (Ch.~\ref{ch:microservices})
+  \item \textbf{Walk through what the gateway should and should not do.} ---
+        Should: auth offload \cite{rfc6749,rfc7519}, rate tiers, correlation
+        IDs, request validation. Should not: business logic, data
+        transformation that services then cannot evolve independently.
+        (Ch.~\ref{ch:microservices}, Ch.~\ref{ch:rate_limiting})
+\end{enumerate}
+
+\subsection*{Senior}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3em, start=17]
+  \item \textbf{Design the API surface for a real-time bidding system under
+        a 50\,ms budget.} --- gRPC streaming between participants and the
+        auction core for latency; events for post-trade fan-out; REST only
+        for management; the decision card lands here via consumer=internal,
+        latency=extreme. (Ch.~\ref{ch:grpc}, this chapter)
+  \item \textbf{When would you expose gRPC publicly?} --- Rarely, and only
+        for machine consumers you influence: SDK-shipped partners, not
+        browsers. Budget for a gRPC-Web/JSON transcoding proxy, dual
+        documentation, and firewall pain; if any of those is unacceptable,
+        it was a REST API. (Ch.~\ref{ch:grpc})
+  \item \textbf{How do you make four protocol stacks feel like one
+        platform?} --- Govern the invariants, not the protocols: one error
+        model (RFC~9457 \cite{rfc9457}), one auth story, one pagination
+        convention, one tracing context, one portal --- enforced by
+        executable policy. (Ch.~\ref{ch:lifecycle}, this chapter)
+  \item \textbf{Your GraphQL gateway is melting under expensive queries.
+        Now what?} --- Persisted queries, depth and cost limits, dataloaders
+        for N+1, per-field tracing to find the hot resolvers, and caching at
+        the edge only for truly public anonymous queries \cite{graphqlspec}.
+        (Ch.~\ref{ch:graphql}, Ch.~\ref{ch:observability})
+  \item \textbf{How do you roll out a breaking change to 200 partners?} ---
+        You do not: you add the new shape alongside, emit \texttt{Sunset}
+        and \texttt{Link} headers \cite{rfc8594,rfc8288}, measure old-version
+        traffic, contact the long tail, and only then schedule removal.
+        (Ch.~\ref{ch:versioning})
+  \item \textbf{What does your error budget buy you operationally?} --- A
+        neutral throttle: budget remaining $\Rightarrow$ ship; budget burned
+        $\Rightarrow$ freeze features and invest in reliability
+        \cite{beyer2016sre}. It converts reliability arguments into
+        arithmetic. (Ch.~\ref{ch:observability})
+  \item \textbf{Design the telemetry pipeline for 3\,000 robots.} ---
+        Event-driven ingestion to a broker with envelope fields
+        (\texttt{event\_id}, \texttt{occurred\_at}), consumer-side
+        idempotency, SSE fan-out to dashboards, and AsyncAPI contracts
+        linted in CI \cite{asyncapi}. (Ch.~\ref{ch:async_apis})
+  \item \textbf{How do you test a platform, not a service?} ---
+        Consumer-driven contract tests per surface \cite{pactdocs},
+        in-process smoke suites proving surfaces coexist, conformance
+        policy on every spec, and chaos drills on the integration points.
+        (Ch.~\ref{ch:testing})
+\end{enumerate}
+
+\subsection*{Staff}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3em, start=25]
+  \item \textbf{Design the API strategy for a marketplace startup that will
+        become a platform.} --- Year one: REST + OpenAPI public core,
+        RFC~9457 and pagination conventions as day-one lint rules. Year two:
+        add the profiles constraints demand (webhooks for partners, GraphQL
+        if app payload graphs justify it), never by mandate. Year three:
+        governance as code, rate tiers as a product, SLOs and error budgets,
+        and a conformance checker gating every spec
+        \cite{gehl2021apidesign}. (This chapter)
+  \item \textbf{Walk me through your reference architecture's request
+        lifecycle.} --- Edge (TLS, WAF, cache) $\rightarrow$ gateway (JWT
+        verify, rate tier, correlation ID) $\rightarrow$ service (validate,
+        idempotency check, gRPC inventory call, transaction + outbox)
+        $\rightarrow$ relay $\rightarrow$ broker $\rightarrow$ signed webhook
+        + SSE fan-out, with one OTel trace across all of it
+        \cite{opentelemetrydocs}. (Section~\ref{sec:ref-arch})
+  \item \textbf{How do MCP tool schemas change API design?} --- The consumer
+        is now a model choosing tools by reading your schema: descriptions,
+        naming, error structure, and idempotency semantics become behavioral
+        surface area. Generate tool schemas from the OpenAPI source of truth
+        \cite{openapi31,jsonschemadocs}, keep error shapes structured
+        \cite{rfc9457}, and gate agent-callable surfaces behind the same
+        authZ and audit discipline as human ones. (Section~\ref{sec:frontiers})
+  \item \textbf{Your CEO read about HTTP/3 and wants it ``everywhere by
+        Friday.'' Respond.} --- Public surfaces already inherit it at the CDN
+        via \texttt{Alt-Svc} \cite{rfc9114}; east--west gRPC gains little and
+        risks UDP filtering and CPU regressions; propose measuring p99 and
+        CPU per request before and after an edge-only rollout.
+        (Section~\ref{sec:frontiers})
+  \item \textbf{How do you keep 50 teams' APIs coherent without a review
+        board?} --- Executable policy: a handful of linted invariants
+        (errors, auth, pagination, versioning) in CI, a self-service portal
+        with templates that make the right way the easy way, and office
+        hours for the genuinely hard cases \cite{openapi31,asyncapi}.
+        (Ch.~\ref{ch:lifecycle})
+  \item \textbf{What is your post-quantum readiness plan?} --- Inventory TLS
+        termination points, track hybrid key-exchange support in your
+        edge/library stack \cite{rfc8446}, automate certificate rotation so
+        algorithm changes are routine, and watch handshake-size effects on
+        QUIC amplification limits. (Section~\ref{sec:frontiers})
+  \item \textbf{When is a second protocol stack worth its operational
+        cost?} --- When a consumer class's constraints fail on the existing
+        stack in a way money and caching cannot fix --- e.g., mobile
+        over-fetching that no amount of BFF trimming solves, or a p99 that
+        only binary framing meets. Quantify the constraint first; ``two
+        stacks'' is a conclusion, never a starting point. (This chapter)
+  \item \textbf{How do you evaluate an AI-generated API design?} --- The
+        same way as a human one, plus distrust: run it through the decision
+        card, lint it with executable policy, contract-test it against
+        consumers, and treat its plausible-but-wrong inventions as the
+        default case. AI drafts; deterministic gates decide.
+        (Section~\ref{sec:frontiers})
+\end{enumerate}
+
+\section{External Bibliography \& Further Reading}
+
+Consolidated across the book, organized by module. All entries are real,
+primary, and freely available unless noted as books.
+
+\subsection*{Module I --- Foundations}
+
+\begin{itemize}
+  \item Fielding's dissertation \cite{fielding2000rest} --- the REST
+        constraints from the source; reread it after Chapter~\ref{ch:rest_style}.
+  \item HTTP semantics and wire formats: RFC~9110 \cite{rfc9110},
+        RFC~9112 \cite{rfc9112}, and for the modern transports RFC~9113
+        \cite{rfc9113} with HPACK \cite{rfc7541}, and RFC~9114 over QUIC
+        \cite{rfc9114,rfc9000}.
+  \item JSON \cite{rfc8259} and JSON Schema \cite{jsonschemadocs} --- the
+        serialization contract layer of Chapter~\ref{ch:serialization}.
+  \item REST in practice: Richardson's maturity model book
+        \cite{richardson2013restful}; API design craft in
+        \cite{gehl2021apidesign}.
+  \item Python HTTP clients: httpx \cite{httpxdocs} and requests
+        \cite{requestsdocs}.
+  \item TLS 1.3 \cite{rfc8446} for the transport security underpinning of
+        Chapter~\ref{ch:client_security}.
+\end{itemize}
+
+\subsection*{Module II --- Building APIs}
+
+\begin{itemize}
+  \item FastAPI \cite{fastapidocs} and Pydantic \cite{pydanticdocs} ---
+        the reference stack of Chapter~\ref{ch:fastapi}.
+  \item RFC~9457 problem details \cite{rfc9457} --- the error interface of
+        Chapter~\ref{ch:problem_details}.
+  \item RFC~8288 Web Linking \cite{rfc8288} and RFC~8594 \texttt{Sunset}
+        \cite{rfc8594} --- pagination links and deprecation signaling.
+\end{itemize}
+
+\subsection*{Module III --- Protocols \& Scale}
+
+\begin{itemize}
+  \item AsyncAPI \cite{asyncapi} --- the event-contract counterpart of
+        OpenAPI for Chapter~\ref{ch:async_apis}.
+  \item The GraphQL specification \cite{graphqlspec} --- read the execution
+        section, not just the schema language.
+  \item gRPC \cite{grpcdocs} and Protocol Buffers \cite{protobufdocs} ---
+        including the versioning rules for \texttt{proto} files.
+  \item The IETF RateLimit header draft \cite{ietf_ratelimit_headers} ---
+        the emerging standard behind Chapter~\ref{ch:rate_limiting}.
+  \item Kleppmann \cite{kleppmann2017ddia} (book) --- the data-systems
+        foundation for outboxes, logs, and consistency reasoning.
+  \item Nygard \cite{nygard2018releaseit} (book) --- the failure-mode
+        catalog behind Chapter~\ref{ch:microservices}.
+  \item Newman \cite{newman2021microservices} (book) --- service boundaries
+        and decomposition strategy.
+\end{itemize}
+
+\subsection*{Module IV --- Production \& Governance}
+
+\begin{itemize}
+  \item OAuth~2.0 \cite{rfc6749}, PKCE \cite{rfc7636}, and JWT
+        \cite{rfc7519} --- the token stack of
+        Chapters~\ref{ch:client_security} and \ref{ch:api_security}.
+  \item OWASP API Security Top 10 \cite{owaspapisecurity} --- the standing
+        checklist; reread at every major release.
+  \item OpenTelemetry \cite{opentelemetrydocs} and the Google SRE book
+        \cite{beyer2016sre} --- instrumentation and SLO discipline for
+        Chapter~\ref{ch:observability}.
+  \item The twelve-factor methodology \cite{twelvefactor} --- configuration
+        and deployment hygiene for Chapter~\ref{ch:deployment}.
+  \item Pact \cite{pactdocs} --- consumer-driven contract testing for
+        Chapter~\ref{ch:testing}.
+  \item OpenAPI 3.1 \cite{openapi31} --- the governance source of truth for
+        Chapter~\ref{ch:lifecycle}.
+\end{itemize}
+
+\section{Capstone Projects}
+\label{sec:capstones}
+
+Five integrative projects. Each builds on multiple chapters; datasets and
+services are synthetic and offline.
+
+\subsection{[junior] Project 1: Extend the Decision Advisor}
+
+\textbf{Objective:} deepen Listing~1 (Section~\ref{sec:code-advisor}) into a usable team
+tool.
+
+\textbf{Inputs/Datasets:} \texttt{protocol\_advisor.py}, its test file, and
+Table~\ref{tab:decision-criteria}.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Add an interactive questionnaire mode that prompts for the six
+        criteria and prints the recommendation with its rationale trace.
+  \item Add a seventh criterion (data-residency constraint) with signals
+        that penalize public-CDN-dependent profiles when residency forbids
+        edge caching.
+  \item Add a \texttt{--explain} flag that prints the full score table for
+        all five profiles, not only the winner.
+  \item Extend the tests: the new criterion must change at least one
+        canonical scenario's runner-up margin without flipping any existing
+        winner.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Questionnaire mode runs offline and rejects invalid
+        answers with a clear message.
+  \item[$\square$] All pre-existing advisor tests pass unmodified.
+  \item[$\square$] New tests cover the residency criterion and
+        \texttt{--explain} output.
+  \item[$\square$] Rationale traces mention the residency criterion when it
+        moved a score.
+\end{itemize}
+
+\textbf{Stretch Goals:} emit the score table as JSON for CI consumption;
+add a ``confidence'' metric based on the winner's margin.
+
+\subsection{[mid] Project 2: Governance Toolchain}
+
+\textbf{Objective:} grow the conformance checker of
+Listing~3 (Section~\ref{sec:code-checker}) into a team-grade lint gate.
+
+\textbf{Inputs/Datasets:} \texttt{conformance\_checker.py}, both fixture
+folders, and the invariants of Chapter~\ref{ch:lifecycle}.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Add three new rules: every operation has an \texttt{operationId}
+        matching \texttt{camelCase}; every error schema is registered in
+        \texttt{components}, not inlined; AsyncAPI channel names follow
+        \texttt{domain.noun.verb}.
+  \item Produce both a console report and a machine-readable JSON report
+        with stable rule codes.
+  \item Add a \texttt{--fix-hints} mode that prints the smallest suggested
+        remediation per violation.
+  \item Wire the checker into a script that fails CI on any violation in a
+        changed spec only (accept a folder pair: baseline vs.\ candidate).
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All five original rule families plus the three new rules
+        fire on \texttt{fixtures\_fail} and pass on \texttt{fixtures\_pass}.
+  \item[$\square$] JSON report parses and round-trips deterministically.
+  \item[$\square$] Changed-only mode ignores pre-existing violations in
+        untouched files.
+  \item[$\square$] Tests cover each new rule with a positive and negative
+        fixture.
+\end{itemize}
+
+\textbf{Stretch Goals:} severity levels (error/warning) with per-rule
+overrides in a policy file; SARIF output for code-scanning integration.
+
+\subsection{[senior] Project 3: Multi-Protocol Read/Write Split}
+
+\textbf{Objective:} build a domain where writes are REST, reads are GraphQL,
+and internal coordination is gRPC --- over one shared store --- and prove
+consistency.
+
+\textbf{Inputs/Datasets:} Listing~2 (Section~\ref{sec:code-platform}) as the starting
+skeleton; synthetic catalog/orders datasets from the Northwind universe.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Split Listing~2 (Section~\ref{sec:code-platform}) into a write service (REST,
+        idempotent commands) and a read service (GraphQL projections).
+  \item Propagate writes to the read store through an outbox-backed event
+        stream (in-process broker fake is fine; keep the interface
+        broker-shaped).
+  \item Model the internal inventory check as a gRPC contract (write the
+        \texttt{.proto}; an in-process stub implementation is acceptable
+        offline).
+  \item Write a consistency test: concurrent orders never oversell stock;
+        the GraphQL read model converges within a bounded number of polls.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] REST writes return RFC~9457 errors and honor idempotency
+        keys.
+  \item[$\square$] GraphQL reads never expose uncommitted state.
+  \item[$\square$] The concurrency test passes deterministically in 100
+        runs.
+  \item[$\square$] OpenAPI and GraphQL SDL artifacts both exist and pass
+        the Project-2 checker.
+\end{itemize}
+
+\textbf{Stretch Goals:} add a CDC-style lag metric to the read model and an
+SLO on projection freshness; simulate broker outage and show recovery
+without loss.
+
+\subsection{[senior] Project 4: Webhook Notification Pipeline with Outbox Replay}
+
+\textbf{Objective:} implement the partner-notification subsystem of the
+reference architecture end to end.
+
+\textbf{Inputs/Datasets:} the outbox pattern of
+Chapter~\ref{ch:async_apis}; synthetic partner endpoint (a local FastAPI
+receiver you also build).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Add an outbox table and relay loop to Listing~2 (Section~\ref{sec:code-platform})
+        (in-process, polling, with exponential backoff).
+  \item Sign every webhook with HMAC; build the receiving endpoint to verify
+        signatures and reject replays outside a timestamp window.
+  \item Persist a delivery log with attempt counts and last error; expose
+        \texttt{POST /v1/webhooks/\{id\}/replay}.
+  \item Emit AsyncAPI documentation for the event catalog; extend the
+        conformance checker's A-001 to cover it.
+  \item Add an SSE fallback stream carrying the same events for partners
+        who cannot receive inbound webhooks.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] No event is lost across a simulated broker/receiver
+        outage (test proves it).
+  \item[$\square$] Signature failures and stale timestamps are rejected
+        with 401/422 problem details.
+  \item[$\square$] Replay re-sends exactly the logged event payload.
+  \item[$\square$] AsyncAPI spec passes the conformance checker.
+\end{itemize}
+
+\textbf{Stretch Goals:} dead-letter queue with operator triage endpoint;
+delivery-latency histogram exported as an OTel-style metric.
+
+\subsection{[staff] Project 5: The Grand Capstone --- Northwind Robotics API Platform}
+
+\textbf{Objective:} build the complete platform of
+Section~\ref{sec:grand-capstone}: all five surfaces of
+Table~\ref{tab:capstone-surfaces}, the four milestones of
+Table~\ref{tab:milestones}, and the acceptance rubric --- as a coherent,
+governed, observable system.
+
+\textbf{Inputs/Datasets:} the full chapter (reference architecture, NFRs,
+milestone plan); synthetic Northwind datasets; in-process fakes for broker,
+payments, and identity provider.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item M1: REST catalog + orders core with keyset pagination, date
+        versioning, RFC~9457 errors, idempotency keys, and contract tests.
+  \item M2: GraphQL read model with depth limits and persisted queries;
+        inventory gRPC service; gateway-simulating middleware for auth and
+        rate tiers with IETF headers \cite{ietf_ratelimit_headers}.
+  \item M3: outbox relay, signed webhooks with delivery log and replay
+        (Project~4 folded in), SSE telemetry stream; OpenAPI + AsyncAPI
+        manifests under conformance CI.
+  \item M4: OTel-style trace context propagated across all surfaces; SLO
+        definitions with a load test harness; chaos drill (kill inventory
+        mid-order) demonstrating circuit-breaker behavior; developer-portal
+        pages generated from the specs.
+  \item Final: a written design review --- decision-card rationale per
+        surface, frontier assessment for HTTP/3 and MCP, and a one-year
+        evolution plan.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All five surfaces respond per spec in one offline
+        in-process test run.
+  \item[$\square$] Conformance checker passes on the full manifests folder.
+  \item[$\square$] SLOs from Section~\ref{sec:grand-capstone} measured green
+        against a recorded load test.
+  \item[$\square$] Chaos drill produces the designed failure behavior with
+        zero data loss (outbox replay verified).
+  \item[$\square$] Rubric score $\geq$ 16/20 with no dimension below 3.
+\end{itemize}
+
+\textbf{Stretch Goals:} canary deployment simulation with traffic splitting;
+MCP tool surface generated from the OpenAPI spec for the read-only catalog;
+regional-affinity design document for a hypothetical EU expansion.
+
+\section{Python Dependencies Appendix}
+
+This chapter's code targets Python 3.11+ and pins minimum versions only,
+per the book's convention:
+
+\begin{minted}{text}
+# requirements.txt
+fastapi>=0.110
+strawberry-graphql[fastapi]>=0.230
+pydantic>=2.7
+pyyaml>=6.0
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+All installation commands below assume an activated virtual environment in
+PowerShell (\texttt{.\textbackslash{}.venv\textbackslash{}Scripts\textbackslash{}Activate.ps1}).
+
+\subsection{fastapi}
+
+\textbf{Description:} the ASGI web framework used for every HTTP surface in
+the platform slice \cite{fastapidocs}.
+
+\textbf{Why included:} it is the book's reference framework
+(Chapter~\ref{ch:fastapi}): type-driven validation, automatic OpenAPI
+generation, and first-class streaming responses for SSE.
+
+\textbf{Alternatives:} Flask (simpler, weaker typing), Django REST Framework
+(heavier, ORM-coupled), Litestar (comparable, smaller ecosystem).
+
+\textbf{Installation:}
+\begin{minted}{powershell}
+pip install "fastapi>=0.110"
+\end{minted}
+
+\subsection{strawberry-graphql[fastapi]}
+
+\textbf{Description:} a code-first GraphQL library; the
+\texttt{[fastapi]} extra provides the ASGI router used to mount the read
+model at \texttt{/graphql}.
+
+\textbf{Why included:} implements the GraphQL surface of the platform slice
+with typed Python resolvers instead of a separate schema language
+(Chapter~\ref{ch:graphql}); the extra keeps integration to one line.
+
+\textbf{Alternatives:} Graphene (older API style), Ariadne (schema-first),
+or hand-rolled JSON-over-POST (not recommended).
+
+\textbf{Installation:}
+\begin{minted}{powershell}
+pip install "strawberry-graphql[fastapi]>=0.230"
+\end{minted}
+
+\subsection{pydantic}
+
+\textbf{Description:} the data-validation library underlying FastAPI's
+request/response models \cite{pydanticdocs}.
+
+\textbf{Why included:} all request and response schemas in
+Listing~2 (Section~\ref{sec:code-platform}) are Pydantic models; version 2's validator
+performance and stricter typing matter at platform scale.
+
+\textbf{Alternatives:} dataclasses + manual validation (verbose), msgspec
+(faster, smaller ecosystem), attrs + cattrs (mature, more boilerplate).
+
+\textbf{Installation:}
+\begin{minted}{powershell}
+pip install "pydantic>=2.7"
+\end{minted}
+
+\subsection{pyyaml}
+
+\textbf{Description:} the YAML parser used by the conformance checker to
+load OpenAPI and AsyncAPI manifests.
+
+\textbf{Why included:} real-world API manifests are overwhelmingly YAML;
+the checker needs nothing more than \texttt{yaml.safe\_load} plus structural
+traversal, so a heavy spec parser would be over-engineering.
+
+\textbf{Alternatives:} ruamel.yaml (round-trip preservation, heavier),
+strictyaml (schema-restricted subset), or JSON-only manifests (loses
+comments).
+
+\textbf{Installation:}
+\begin{minted}{powershell}
+pip install "pyyaml>=6.0"
+\end{minted}
+
+\subsection{httpx}
+
+\textbf{Description:} the modern sync/async HTTP client
+\cite{httpxdocs}; pulled in by FastAPI's \texttt{TestClient} and used
+throughout the book's client chapters.
+
+\textbf{Why included:} the smoke suite's in-process client is built on it;
+its transport abstraction is what makes network-free tests possible
+(Chapter~\ref{ch:consuming_python}).
+
+\textbf{Alternatives:} requests \cite{requestsdocs} (sync-only, no ASGI
+transport), aiohttp (async-only, larger API surface).
+
+\textbf{Installation:}
+\begin{minted}{powershell}
+pip install "httpx>=0.27"
+\end{minted}
+
+\subsection{pytest}
+
+\textbf{Description:} the test runner and fixture framework for all three
+listings' suites.
+
+\textbf{Why included:} fixtures give each test an isolated platform
+instance; \texttt{pytest.approx} and parametrization keep the suites terse;
+it is the ecosystem default (Chapter~\ref{ch:testing}).
+
+\textbf{Alternatives:} unittest (stdlib, more boilerplate), nose2 (fading),
+doctest (documentation tests only).
+
+\textbf{Installation:}
+\begin{minted}{powershell}
+pip install "pytest>=8"
+\end{minted}
+
+\section{Chapter Summary \& Key Takeaways}
+
+\begin{itemize}
+  \item Protocol selection is constraint satisfaction. Six criteria ---
+        consumer, payload, latency, delivery, caching, team maturity ---
+        determine the interaction profile; the Master Decision Card and its
+        executable advisor make the choice auditable and teachable.
+  \item Production platforms are multi-protocol by design. The Northwind
+        reference architecture runs REST, GraphQL, gRPC, webhooks, and SSE
+        simultaneously, unified by governed invariants rather than mandates.
+  \item The transactional outbox, idempotency keys, and RFC~9457 errors are
+        the three cheapest reliability investments in the entire book ---
+        and the three most often deferred \cite{kleppmann2017ddia,rfc9457}.
+  \item Governance is cheapest on day one and must be executable; a
+        conformance checker turns architectural intent into CI reality
+        \cite{openapi31,asyncapi}.
+  \item Frontiers (HTTP/3, MCP, edge, post-quantum TLS, security automation)
+        amplify existing maturity; adopt/trial/wait with explicit
+        prerequisites, never enthusiasm alone.
+  \item Mastery is a pathway: consume and build (junior), correctness
+        (mid), scale and resilience (senior), strategy and governance
+        (staff). The book's twenty-one chapters map one-to-one onto it.
+\end{itemize}
+
+\section{Quick-Reference Card}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \multicolumn{3}{l}{\textbf{THE MASTER DECISION CARD --- pin this page.}} \\
+    \midrule
+    \textbf{If the constraint says\ldots} & \textbf{Then choose\ldots} & \textbf{And remember\ldots} \\
+    \midrule
+    unknown public consumers &
+      REST + OpenAPI \cite{openapi31} &
+      curl-ability is a feature; govern with lint from day one \\
+    cacheable reads at scale &
+      REST GETs \cite{rfc9110} &
+      POST-based GraphQL bypasses every shared cache \\
+    nested graphs, mobile/SPA &
+      GraphQL \cite{graphqlspec} &
+      depth limits + persisted queries are not optional \\
+    internal, p99 $<$ 50\,ms &
+      gRPC \cite{grpcdocs} &
+      contract-first protos; version fields, never renumber \\
+    fire-and-forget, machines &
+      events / webhooks \cite{asyncapi} &
+      transactional outbox or lose events silently \\
+    server must push to browsers &
+      SSE (WebSockets if bidirectional) &
+      unary APIs cannot push --- structural, not preferential \\
+    exploratory team &
+      REST &
+      maturity is a constraint, not an insult \\
+    \midrule
+    \textbf{Always} &
+      RFC~9457 errors \cite{rfc9457}, idempotent writes, IETF rate headers
+      \cite{ietf_ratelimit_headers}, OTel traces \cite{opentelemetrydocs},
+      linted specs &
+      these are protocol-independent invariants --- the actual platform \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The one-page Master Decision Card. Photocopy freely.}
+  \label{tab:master-card}
+\end{table}
+
+\section{Closing Thoughts}
+
+Twenty chapters ago, an API was a URL you fetched. It is now --- if this
+book did its job --- a contract you design, a system you operate, a product
+you govern, and a career you build deliberately. The tools will keep
+changing: HTTP/3 will finish arriving, agents will become first-class
+consumers, something not yet named will be next year's conference darling.
+The disciplines will not change: say what you mean in a machine-readable
+contract, fail in ways callers can handle, make retries safe, watch your
+systems with honest telemetry, and govern invariants rather than tastes.
+Engineers who internalize those sentences will never be behind the
+frontier --- they will be the ones defining it. Go build platforms worth
+depending on.
+
+\input{chapters/_standard_addendum}

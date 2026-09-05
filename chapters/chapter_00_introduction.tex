@@ -1,0 +1,2366 @@
+\chapter{Introduction: The API Economy \& How to Use This Book}
+\label{ch:introduction}
+
+\section*{Executive Summary}
+\addcontentsline{toc}{section}{Executive Summary}
+
+Every system you will build, operate, or integrate over the next decade will
+either expose an Application Programming Interface (API) or depend on one ---
+usually both. The modern enterprise is no longer a monolith behind a firewall;
+it is a mesh of services communicating over versioned contracts, where the
+interface \emph{is} the product and the contract \emph{is} the engineering
+artifact of record. Industry analysts have estimated for years that the large
+majority of enterprise workloads now traverse an API boundary at some point in
+their lifecycle, and the economic consequences are measurable: entire
+companies (payments processors, communications platforms, mapping providers)
+sell nothing except well-designed interfaces over HTTP. This is the
+\emph{API economy}: interfaces priced, versioned, secured, and observed with
+the same rigor once reserved for physical supply chains.
+
+This book is an engineering curriculum for that reality. It treats APIs not
+as an afterthought bolted onto an application but as \textbf{products},
+\textbf{contracts}, and \textbf{failure surfaces} --- three mental models
+that recur in every chapter. As products, APIs have consumers, developer
+experience, pricing, and lifecycles. As contracts, they have formal,
+machine-checkable semantics: operations, representations, status codes, and
+failure behavior, all versioned over time. As failure surfaces, they are the
+exact location where distributed systems hurt you: timeouts, retries, partial
+failures, and misaligned assumptions between provider and consumer. Mastering
+APIs means mastering all three perspectives simultaneously.
+
+You are reading Chapter 0, the orientation chapter. Its job is fourfold.
+First, it defines terms \emph{formally} --- we will not wave our hands at
+words like ``REST,'' ``contract,'' or ``latency percentile.'' Second, it maps
+the territory: four modules, twenty-one technical chapters, and the
+dependency structure between them, so you can plan a path whether you are a
+consumer of APIs, a producer of them, an architect governing a platform, or a
+data engineer moving records across boundaries. Third, it installs the
+evaluation discipline used throughout the book: latency measured in
+percentiles rather than averages, error budgets derived from service-level
+objectives, and benchmark protocols that a skeptical reviewer can reproduce.
+Fourth, it gets your hands dirty within the first three hours: an offline,
+stdlib-only lab in which you build a working HTTP API and client on your own
+machine and measure its latency distribution.
+
+\begin{keyconceptbox}
+An API is a \textbf{versioned contract} between a provider and its consumers.
+The contract specifies \emph{operations} (what you may ask), \emph{representations}
+(the shape of data exchanged), and \emph{failure semantics} (what happens when
+things go wrong), all carried over a \emph{transport protocol}. Everything else
+in this book --- frameworks, gateways, meshes, observability --- exists to make
+that contract reliable, secure, and evolvable at scale.
+\end{keyconceptbox}
+
+The tone throughout is pragmatic and production-focused. Every technique is
+introduced because it prevents a real failure mode, and every chapter closes
+with measurable success criteria rather than vague encouragement. Code is
+Python 3.11+, fully typed, stdlib-first, and runnable offline --- no cloud
+accounts, no API keys, no network access required. Where third-party services
+appear (payment gateways, identity providers), they are simulated with
+deterministic local stubs. All datasets are synthetic, drawn from the
+fictional \emph{Northwind Robotics} universe used across this curriculum.
+
+By the end of this chapter you will have a precise vocabulary, a working local
+environment, a verified benchmark harness, and a map of the road ahead. Let us
+begin.
+
+%% ============================================================================
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch0-objectives}
+
+\subsection{Learning Objectives}
+
+After completing this chapter and its lab, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}]
+  \item Define an API formally as a versioned contract (operations,
+        representations, failure semantics, transport) and explain the API
+        value chain from provider to consumer to end user.
+  \item Apply the three mental models --- API as product, API as contract,
+        API as failure surface --- to reason about design decisions.
+  \item Classify real incidents into the five-category API failure taxonomy
+        (transport, contract, semantic, operational, security) and select an
+        appropriate detection strategy for each.
+  \item Locate any system on the five-level API Maturity Model (L0--L4) and
+        articulate the concrete capabilities required to advance one level.
+  \item Measure client-observed latency correctly using percentiles
+        (p50/p95/p99), explain why arithmetic means mislead, and run the
+        minimal benchmark protocol defined in this chapter.
+  \item Decompose a request's latency budget across TLS setup, validation,
+        business logic, and serialization, and compute an error budget from
+        an SLO target (e.g.\ 99.9\% monthly availability $= 43.2$ minutes of
+        downtime).
+  \item Set up a reproducible Python development environment on Windows
+        PowerShell and verify it with an automated sanity-check script.
+  \item Build, run, and measure a minimal stdlib-only HTTP API and client
+        offline, forming the baseline for every subsequent chapter.
+  \item Choose the correct reader pathway (consumer, producer, architect,
+        data engineer) and locate prerequisite chapters for any topic.
+  \item State the governance, threat-modeling (STRIDE), and ethics baselines
+        that frame all production work in this book.
+\end{enumerate}
+
+\subsection{Prerequisites}
+
+This is an intensive curriculum aimed at practicing engineers. We assume:
+
+\begin{itemize}
+  \item \textbf{Python 3.11 or newer.} You should be comfortable with
+        functions, classes, type hints (PEP 484), context managers, and
+        virtual environments. You do \emph{not} need prior web-framework
+        experience; FastAPI is taught from first principles in
+        Chapter~\ref{ch:fastapi}.
+  \item \textbf{Basic networking literacy.} You should know what an IP
+        address, a TCP connection, a DNS lookup, and a port are. We teach
+        HTTP from the wire up in Chapter~\ref{ch:http_wire}, so deep protocol
+        knowledge is \emph{not} a prerequisite --- but nothing in that
+        chapter should be your first exposure to the word ``packet.''
+  \item \textbf{Git.} Cloning, branching, committing. All sample code is
+        versioned, and the labs assume you can diff and revert.
+  \item \textbf{A Windows workstation with PowerShell.} All setup and run
+        instructions are given in PowerShell idioms. Everything also works on
+        macOS/Linux, but those commands are intentionally out of scope.
+\end{itemize}
+
+\subsection{How to Use This Textbook}
+
+The book supports three modes of use, and you may move between them freely:
+
+\begin{description}
+  \item[Self-paced study (16 weeks).] One module per four weeks, one to two
+    chapters per week. Do every lab; the labs are where the learning
+    consolidates. Budget 6--10 hours per week including exercises.
+  \item[Team workshops.] Each chapter's lab and capstone are scoped for a
+    half-day workshop. A common pattern is a ``guild'' format: one engineer
+    presents the chapter's failure taxonomy section, the team then runs the
+    lab against a shared repository, and the session closes with the
+    self-assessment questions answered collaboratively.
+  \item[Reference.] Chapters are cross-referenced rather than strictly
+    linear. If you arrive with production experience, jump directly to the
+    chapter you need and use the dependency map
+    (Section~\ref{sec:ch0-depmap}) to backfill prerequisites.
+\end{description}
+
+\subsection{Reader Pathways}
+\label{sec:ch0-pathways}
+
+Four curated tracks through the same twenty-one chapters. Every track reads
+Chapters 0--4; divergence is deliberate, and each track rejoins the shared
+core where its role demands it.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Track} & \textbf{Chapter sequence} \\
+    \midrule
+    Consumer-only &
+      0--5, 8 (as a client), 10, 14 (as a client), 19 (consumer contract
+      tests). Skip provider build chapters; read their ``contract'' sections
+      only. \\
+    Producer &
+      0--10, 16--20. Add 11--13 selectively per your product's protocol
+      surface. This is the default full-stack track. \\
+    Architect &
+      0--1, 3--4, 9--15, 17--21. Skim implementation detail in 2 and 6--8;
+      go deep on versioning, resilience, observability, and governance. \\
+    Data engineer &
+      0--5, 8, 10--11, 14--15, 18. Emphasis on pagination, idempotent
+      pipelines, webhooks/streams, and backpressure; GraphQL (12) if your
+      warehouse feeds BI consumers. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Reader pathways. Chapter numbers refer to the dependency map in
+    Table~\ref{tab:ch0-deps}.}
+  \label{tab:ch0-pathways}
+\end{table}
+
+\subsection{Conventions Used in This Book}
+
+\begin{itemize}
+  \item \textbf{Code listings} are complete and runnable. Nothing is elided;
+    there are no ``left as an exercise'' gaps in production listings.
+    Python listings are typed (PEP 484) and lint-clean (PEP 8).
+  \item \textbf{Boxes.} \emph{Key Concept} boxes state load-bearing ideas you
+    must internalize. \emph{Warning} boxes mark mistakes that cause
+    production incidents. \emph{Example} boxes ground abstractions in the
+    Northwind Robotics universe.
+  \item \textbf{Formal definitions} appear in numbered Definition blocks and
+    are the canonical meaning of the term for the rest of the book.
+  \item \textbf{Math notation.} Latency percentiles are written
+    $p_{50}, p_{95}, p_{99}$; rates are written as $\lambda$ (arrival rate,
+    requests/second) and $\mu$ (service rate); queueing formulas are stated
+    precisely when used. Scalars are italic ($x$), vectors bold
+    ($\mathbf{x}$).
+  \item \textbf{Paths and commands} are Windows-native. In prose, a path such
+    as the virtual-environment activation script is written
+    \texttt{.venv\textbackslash Scripts\textbackslash Activate.ps1}; inside
+    code blocks, backslashes are literal.
+  \item \textbf{Citations} refer to the bibliography; foundational references
+    such as Fielding's dissertation \cite{fielding2000rest} and the HTTP
+    semantics standard \cite{rfc9110} are cited at first substantive use.
+\end{itemize}
+
+\begin{warningbox}
+\textbf{Offline-first is a hard constraint, not a suggestion.} Every listing,
+lab, and test in this book runs with the network cable unplugged. If you find
+yourself reaching for a live third-party API while doing an exercise, stop:
+the chapter provides a deterministic local stub for it. This discipline is
+deliberate --- it forces you to understand the protocol rather than the
+vendor SDK, and it makes every result in the book reproducible on a fresh
+machine.
+\end{warningbox}
+%% ============================================================================
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch0-mechanics}
+
+\subsection{What an API Is: A Formal Definition}
+
+The word ``API'' is used so loosely in industry that it has nearly lost its
+meaning. In this book it has exactly one meaning, and we will use it
+consistently for twenty-one chapters.
+
+\begin{definition}[Application Programming Interface]
+\label{def:api}
+An \emph{API} is a \textbf{versioned contract} between a \emph{provider} and
+one or more \emph{consumers}, specifying:
+\begin{enumerate}
+  \item a set of \textbf{operations} $O = \{o_1, o_2, \dots, o_n\}$, each with
+        a name, input parameters, and preconditions;
+  \item \textbf{representations} $R$: the serialized data shapes exchanged in
+        requests and responses (schemas, media types, encodings);
+  \item \textbf{failure semantics} $F$: for each operation, the complete set
+        of failure modes (status codes, error representations, retryability,
+        and side-effect guarantees); and
+  \item a \textbf{transport protocol} $T$ over which operations are invoked
+        (e.g.\ HTTP/1.1 or HTTP/2 per RFC~9110 \cite{rfc9110}, gRPC over
+        HTTP/2, or a message broker binding).
+\end{enumerate}
+A \emph{version} $v$ of the contract is an immutable snapshot
+$\langle O_v, R_v, F_v, T \rangle$; evolving any component produces a new
+version governed by a compatibility policy (Chapter~\ref{ch:versioning}).
+\end{definition}
+
+Three consequences of Definition~\ref{def:api} are worth stating now because
+they drive everything that follows. First, an API is \emph{not} the
+implementation; two services with identical contracts are substitutable,
+which is precisely what makes mocking, contract testing, and the
+offline-first discipline of this book possible. Second, failure semantics are
+part of the contract --- a provider that changes which errors it returns has
+broken its contract just as surely as one that renames a field. Third,
+versioning is not optional metadata; it is part of the definition. An
+unversioned API is an incomplete contract whose terms can change under the
+consumer at any moment.
+
+\subsection{The API Value Chain}
+
+APIs exist to move value across organizational and machine boundaries. The
+canonical value chain has five links:
+
+\begin{enumerate}
+  \item \textbf{Capability.} Something the provider can do: charge a card,
+        forecast demand, retrieve a robot's telemetry.
+  \item \textbf{Interface.} The versioned contract exposing the capability.
+  \item \textbf{Distribution.} How consumers discover and integrate:
+        documentation, catalogs, SDKs, developer portals.
+  \item \textbf{Consumption.} Client applications composed from one or more
+        APIs.
+  \item \textbf{End-user value.} The business outcome, measured in revenue,
+        cost avoided, or risk reduced.
+\end{enumerate}
+
+Value leaks at every seam. A capability without a contract is unreachable; a
+contract without distribution is undiscovered; consumption without
+observability is unbillable and un-debuggable. The maturity model in
+Section~\ref{sec:ch0-maturity} is, at heart, a checklist for sealing those
+seams. Treating the API \emph{as a product} \cite{gehl2021apidesign} means
+assigning an owner to the whole chain, not merely to link two.
+
+\begin{examplebox}
+\textbf{Northwind Robotics.} Northwind builds warehouse robots. Its telemetry
+platform (capability) exposes \texttt{GET /v1/robots/\{id\}/telemetry}
+(interface), published through an internal developer portal with an OpenAPI
+3.1 document \cite{openapi31} (distribution), consumed by the fleet-dashboard
+web app and a nightly data-pipeline job (consumption), which together cut
+unplanned robot downtime by 18\% last quarter (end-user value). When the
+pipeline team complains that ``the API is slow,'' every link of this chain is
+a suspect --- and this chapter's diagnostic playbook
+(Section~\ref{sec:ch0-playbook}) tells you how to isolate which one.
+\end{examplebox}
+
+\subsection{Three Mental Models: Product, Contract, Failure Surface}
+
+\begin{description}
+  \item[API as product.] The API has customers (developers), a funnel
+    (discovery $\to$ first successful call $\to$ production traffic),
+    competitors, and a lifecycle from beta to deprecation and sunset
+    (Chapter~\ref{ch:lifecycle}). Product thinking forces you to budget for
+    documentation, changelogs, and developer experience (DX) as
+    first-class engineering deliverables.
+  \item[API as contract.] The contract is machine-checkable. OpenAPI
+    documents, JSON Schemas, and protocol-buffer definitions are not
+    documentation \emph{about} the system; they are artifacts \emph{of} the
+    system, diffed in code review and enforced in CI
+    (Chapters~\ref{ch:serialization} and \ref{ch:testing}). Contract
+    thinking turns ``we changed a field, hope nobody noticed'' into a build
+    failure.
+  \item[API as failure surface.] Every API call is a distributed-systems
+    event: it can be delayed, duplicated, dropped, reordered, or partially
+    applied. The consumer and provider hold independent, possibly
+    inconsistent views of the world \cite{kleppmann2017ddia}. Failure-surface
+    thinking is why this book spends entire chapters on idempotency
+    (Chapter~\ref{ch:idempotency}), rate limiting
+    (Chapter~\ref{ch:rate_limiting}), and resilience patterns
+    (Chapter~\ref{ch:microservices}).
+\end{description}
+
+\subsection{The Five-Category API Failure Taxonomy}
+\label{sec:ch0-taxonomy}
+
+Debugging is classification before it is repair. Nearly every API incident
+you will ever meet belongs to exactly one of five categories. Learn the
+taxonomy now; every subsequent chapter deepens one or more rows of it.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Category} & \textbf{Example} & \textbf{Primary detection strategy} \\
+    \midrule
+    Transport &
+      TCP connect timeout; TLS handshake failure; DNS resolution error;
+      HTTP 502 from an intermediate proxy. &
+      Connection-level metrics, synthetic probes, TCP/TLS handshake
+      timing, load-balancer logs. \\
+    Contract &
+      Provider renames \texttt{unit\_price} to \texttt{unitPrice}; consumer
+      deserializer throws; HTTP 400 on previously valid payload. &
+      Schema-diff gates in CI, consumer-driven contract tests, canary
+      traffic replay. \\
+    Semantic &
+      Call succeeds (HTTP 200) but means the wrong thing: price returned in
+      cents instead of dollars; ``deleted'' flag inverted. &
+      Property-based tests, reconciliation jobs, business-metric anomaly
+      detection. \\
+    Operational &
+      Latency p99 degrades from 120\,ms to 4\,s under load; retry storm
+      after a partial outage; connection-pool exhaustion. &
+      Percentile latency dashboards, saturation metrics, distributed
+      tracing, load tests. \\
+    Security &
+      Broken object-level authorization (BOLA); leaked API key in a client
+      bundle; unsanitized input reaching a SQL query. &
+      Authz fuzzing, secret scanning, WAF/IDS alerts, penetration tests,
+      OWASP API Top 10 audits. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The API failure taxonomy used throughout this book.}
+  \label{tab:ch0-taxonomy}
+\end{table}
+
+Two rules make the taxonomy actionable. Rule one: \textbf{classify before you
+mitigate.} Retrying a contract failure is waste; retrying a transport failure
+with exponential backoff is correct; retrying a non-idempotent semantic
+operation is a corruption vector. Rule two: \textbf{each category has a
+natural home in the stack.} Transport failures live below HTTP semantics,
+contract failures at the schema layer, semantic failures in business logic,
+operational failures in capacity and dependency management, and security
+failures at every boundary --- which is why Chapter~\ref{ch:api_security}
+treats the OWASP API Security Top 10 as a cross-cutting concern rather than a
+bolt-on.
+
+\subsection{The API Maturity Model (L0--L4)}
+\label{sec:ch0-maturity}
+
+Organizations do not leap from shell scripts to governed platforms; they
+climb. The five-level model below is the book's yardstick --- you will be
+asked to place real systems on it in the exercises.
+
+\begin{description}
+  \item[L0 --- Ad-hoc scripts.] Calls are made with one-off scripts, copied
+    curl commands, and hardcoded credentials. No versioning, no tests, no
+    runbooks. Characteristic quote: ``it works on my machine.''
+  \item[L1 --- Documented REST.] Endpoints follow REST constraints
+    \cite{fielding2000rest}, ship human-readable documentation, and use
+    structured errors. Contracts exist but are enforced by convention, not
+    by machines.
+  \item[L2 --- Contract-tested in CI.] OpenAPI/JSON Schema artifacts are
+    generated or validated in CI; breaking changes fail the build; consumer
+    contract tests run before deploys (Chapter~\ref{ch:testing}).
+  \item[L3 --- Resilient, observable services.] Timeouts, retries with
+    budgets, circuit breakers, and idempotency keys are standard
+    \cite{nygard2018releaseit}; SLOs with error budgets are defined and
+    alerted on \cite{beyer2016sre}; traces and structured logs make every
+    request explainable (Chapters \ref{ch:observability} and
+    \ref{ch:microservices}).
+  \item[L4 --- Governed API platform.] A developer portal, catalog,
+    lifecycle policies, automated governance linting, security baselines,
+    and paved-road templates make the compliant path the easy path
+    (Chapter~\ref{ch:lifecycle}).
+\end{description}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      level/.style={draw, rounded corners, minimum width=11.8cm,
+                    minimum height=1.05cm, align=center},
+      arr/.style={->, >=stealth, thick, packtgray}
+    ]
+    \node[level, fill=red!8]     (l0) {\textbf{L0 Ad-hoc scripts} --- curl in a wiki page; secrets in code};
+    \node[level, fill=orange!10, above=0.35cm of l0] (l1) {\textbf{L1 Documented REST} --- style guide, docs, structured errors};
+    \node[level, fill=yellow!12, above=0.35cm of l1] (l2) {\textbf{L2 Contract-tested CI} --- schema diff gates, consumer contracts};
+    \node[level, fill=green!10, above=0.35cm of l2] (l3) {\textbf{L3 Resilient \& observable} --- SLOs, error budgets, tracing, breakers};
+    \node[level, fill=blue!8, above=0.35cm of l3] (l4) {\textbf{L4 Governed platform} --- portal, catalog, lifecycle policy, paved road};
+    \draw[arr] (l0) -- (l1);
+    \draw[arr] (l1) -- (l2);
+    \draw[arr] (l2) -- (l3);
+    \draw[arr] (l3) -- (l4);
+    \node[right=0.25cm of l0, anchor=west] {\footnotesize Module 1};
+    \node[right=0.25cm of l2, anchor=west] {\footnotesize Modules 2--3};
+    \node[right=0.25cm of l4, anchor=west] {\footnotesize Module 4};
+  \end{tikzpicture}
+  \caption{The API Maturity Model. Each level is a prerequisite for the next;
+    the right margin shows which module of this book builds that level's
+    capabilities.}
+  \label{fig:ch0-maturity}
+\end{figure}
+
+\subsection{Map of the Book: Four Modules and a Synthesis}
+\label{sec:ch0-depmap}
+
+The curriculum is a 16-week intensive organized into four modules plus a
+synthesis chapter.
+
+\paragraph{Module 1 --- Foundations (Chapters 1--5).}
+Chapter~\ref{ch:http_wire} opens the wire: requests, responses, headers, and
+status codes per RFC~9110 \cite{rfc9110}, captured and decoded by hand.
+Chapter~\ref{ch:consuming_python} builds disciplined HTTP clients in Python:
+sessions, timeouts, retries, and connection pooling.
+Chapter~\ref{ch:rest_style} formalizes REST as an architectural style
+\cite{fielding2000rest} --- resources, representations, hypermedia, and the
+constraints that actually matter. Chapter~\ref{ch:serialization} covers
+JSON, schema languages, and contract artifacts. Chapter~\ref{ch:client_security}
+secures the consumer side: credential storage, TLS verification, and token
+handling.
+
+\paragraph{Module 2 --- Designing \& Building (Chapters 6--10).}
+Chapter~\ref{ch:fastapi} builds production services with FastAPI.
+Chapter~\ref{ch:problem_details} standardizes errors with RFC~9457 problem
+details. Chapter~\ref{ch:pagination} solves pagination, filtering, and
+sorting over large collections. Chapter~\ref{ch:versioning} is the contract
+evolution chapter: compatibility classes, version negotiation, deprecation
+policy. Chapter~\ref{ch:idempotency} closes the module with the trinity of
+safe repetition: idempotency keys, HTTP caching, and concurrency control.
+
+\paragraph{Module 3 --- Advanced Architecture (Chapters 11--15).}
+Chapter~\ref{ch:async_apis} covers webhooks, Server-Sent Events, and
+WebSockets. Chapters \ref{ch:graphql} and \ref{ch:grpc} teach the two major
+alternative paradigms --- GraphQL's client-driven queries and gRPC's
+schema-first, high-performance RPC. Chapter~\ref{ch:rate_limiting} derives
+rate limiting and throttling algorithms from queueing first principles.
+Chapter~\ref{ch:microservices} assembles resilience patterns for
+service-to-service calls \cite{newman2021microservices}.
+
+\paragraph{Module 4 --- Enterprise Production \& Security (Chapters 16--20).}
+Chapter~\ref{ch:api_security} works through the OWASP API Security Top 10
+with exploitable labs and fixes. Chapter~\ref{ch:deployment} covers
+deployment, gateways, and Kubernetes. Chapter~\ref{ch:observability} is SRE
+applied to APIs: SLIs, SLOs, error budgets, tracing \cite{beyer2016sre}.
+Chapter~\ref{ch:testing} is quality engineering: contract, property-based,
+chaos, and load testing. Chapter~\ref{ch:lifecycle} closes with governance,
+lifecycle management, and developer experience.
+
+\paragraph{Synthesis (Chapter 21).}
+Chapter~\ref{ch:synthesis} integrates everything into a capstone
+architecture and looks ahead at emerging protocol and platform trends.
+
+\paragraph{Chapter dependency map.}
+Solid knowledge of a chapter requires its ancestors. The edges below are the
+\emph{hard} prerequisites; all other cross-references are enrichment.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Chapter} & \textbf{Requires} & \textbf{Why} \\
+    \midrule
+    1 HTTP wire & 0 & Baseline environment and vocabulary. \\
+    2 Consuming APIs & 1 & Clients are built on raw protocol semantics. \\
+    3 REST style & 1 & Constraints are stated in protocol terms. \\
+    4 Serialization \& contracts & 2--3 & Schemas describe REST payloads. \\
+    5 Client-side security & 2, 4 & Secures typed, contract-aware clients. \\
+    6 FastAPI & 3--4 & Framework routes map to resources and schemas. \\
+    7 Problem details & 6 & Error media types plug into the framework. \\
+    8 Pagination/filter/sort & 4, 6 & Collection contracts over real services. \\
+    9 Versioning & 4, 7 & Compatibility is defined over schemas \& errors. \\
+    10 Idempotency/caching & 1, 6--7 & Safe retries need protocol \& error semantics. \\
+    11 Async APIs & 1, 6 & Webhooks/SSE/WebSockets extend the HTTP mental model. \\
+    12 GraphQL & 3--4 & A different contract style over the same wire. \\
+    13 gRPC & 4 & Schema-first RPC; protobuf is a serialization contract. \\
+    14 Rate limiting & 2, 10 & Builds on client behavior and safe retries. \\
+    15 Microservices resilience & 10, 14 & Breakers and budgets compose earlier patterns. \\
+    16 API security & 5, 6 & Threats are mapped onto real services and clients. \\
+    17 Deployment \& gateways & 6, 15 & Ships resilient services behind gateways. \\
+    18 Observability \& SRE & 14--15 & SLOs sit on rate-limited, resilient services. \\
+    19 Testing \& quality & 4, 6--7 & Contract tests need schemas and error models. \\
+    20 Lifecycle \& governance & 9, 16, 19 & Governance composes versioning, security, testing. \\
+    21 Synthesis & all & Integrative capstone. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Hard prerequisite edges between chapters.}
+  \label{tab:ch0-deps}
+\end{table}
+
+\subsection{Reference Architecture Variants}
+\label{sec:ch0-refarch}
+
+Four deployment topologies recur across the book. Each chapter states which
+variant its listings target; the evaluation protocol
+(Section~\ref{sec:ch0-eval}) is defined identically for all four so that
+results are comparable.
+
+\begin{description}
+  \item[V1 --- Client-only consumer.] Your code calls an external (simulated)
+    provider. Used in Chapters \ref{ch:http_wire}--\ref{ch:client_security}.
+  \item[V2 --- Single FastAPI service.] One process, one datastore, local
+    clients. Used in Chapters \ref{ch:fastapi}--\ref{ch:idempotency}.
+  \item[V3 --- Gateway-fronted microservices.] An edge gateway routes to
+    multiple services with resilience policies. Used in Chapters
+    \ref{ch:rate_limiting}--\ref{ch:observability}.
+  \item[V4 --- Event-driven.] Producers and consumers decoupled through
+    topics; webhooks and streams. Used in Chapter~\ref{ch:async_apis} and
+    parts of \ref{ch:lifecycle}.
+\end{description}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      box/.style={draw, rounded corners, minimum height=0.95cm,
+                  align=center, fill=blue!6},
+      datastore/.style={draw, cylinder, shape border rotate=90,
+                        aspect=0.28, minimum height=1.0cm, align=center,
+                        fill=green!8},
+      arr/.style={->, >=stealth, thick},
+      lbl/.style={midway, above, font=\footnotesize, align=center}
+    ]
+    % Actors
+    \node[box, minimum width=2.2cm] (client) {\textbf{Client}\\consumer app};
+    \node[box, minimum width=2.6cm, right=1.6cm of client, fill=orange!12]
+      (gateway) {\textbf{Edge gateway}\\authn, routing, quotas};
+    \node[box, minimum width=2.4cm, right=1.6cm of gateway] (svcA)
+      {\textbf{Service A}\\orders (FastAPI)};
+    \node[box, minimum width=2.4cm, below=1.1cm of svcA] (svcB)
+      {\textbf{Service B}\\telemetry (FastAPI)};
+    \node[datastore, right=1.5cm of svcA] (dbA) {DB\\A};
+    \node[datastore, right=1.5cm of svcB] (dbB) {DB\\B};
+    \node[box, minimum width=2.6cm, below=1.1cm of svcB, fill=yellow!14]
+      (bus) {\textbf{Event bus}\\topics / webhooks};
+    % Edges
+    \draw[arr] (client) -- node[lbl]{HTTPS / JSON} (gateway);
+    \draw[arr] (gateway) -- node[lbl]{route \texttt{/orders}} (svcA);
+    \draw[arr] (gateway) |- node[lbl, near end]{route \texttt{/telemetry}} (svcB);
+    \draw[arr] (svcA) -- (dbA);
+    \draw[arr] (svcB) -- (dbB);
+    \draw[arr] (svcA) |- node[lbl, near start]{publish events} (bus);
+    \draw[arr] (bus) -| node[lbl, near end, below]{push / webhook} (client);
+    % Variant markers
+    \node[draw, densely dashed, rounded corners, inner sep=0.12cm,
+          fit=(client)(svcA), label={[font=\footnotesize]south:{V1--V2 collapse to client $\to$ one service}}] {};
+  \end{tikzpicture}
+  \caption{Reference architecture (variant V3 shown with V4 event leg).
+    Variant V1 uses only the client against a stubbed provider; V2 removes
+    the gateway and second service.}
+  \label{fig:ch0-refarch}
+\end{figure}
+
+\subsection{Cost and Latency Budgeting}
+\label{sec:ch0-budget}
+
+A request's end-to-end latency $L$ decomposes into additive stages:
+
+\begin{equation}
+  L \;=\; L_{\mathrm{TLS}} + L_{\mathrm{queue}} + L_{\mathrm{validate}}
+        + L_{\mathrm{logic}} + L_{\mathrm{serialize}} + L_{\mathrm{egress}}
+  \label{eq:ch0-budget}
+\end{equation}
+
+where $L_{\mathrm{TLS}}$ is connection setup (amortized to near zero by
+keep-alive), $L_{\mathrm{queue}}$ is time waiting for a worker,
+$L_{\mathrm{validate}}$ is schema and authz checking, $L_{\mathrm{logic}}$ is
+business logic including downstream calls, and
+$L_{\mathrm{serialize}} + L_{\mathrm{egress}}$ is response encoding and
+transmission. A \emph{latency budget} assigns each stage a target share of
+the SLO; Table~\ref{tab:ch0-budget} shows the starter budget used in labs.
+Cost budgeting mirrors the same decomposition: TLS and egress are dominated
+by network, validation and serialization by CPU, logic by I/O and downstream
+fan-out. When p99 violates the SLO,
+Equation~\eqref{eq:ch0-budget} tells you where to spend optimization effort
+\emph{before} you profile anything: measure each stage, compare to its
+budget, and fix the largest overrun first.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c X}
+    \toprule
+    \textbf{Stage} & \textbf{Starter budget} & \textbf{Dominant cost driver} \\
+    \midrule
+    TLS / connection setup & $\leq 10\%$ & Handshake round trips; keep-alive hit rate. \\
+    Queueing & $\leq 10\%$ & Worker pool saturation; arrival bursts. \\
+    Request validation & $\leq 10\%$ & Schema complexity; CPU per request. \\
+    Business logic \& I/O & $\leq 55\%$ & Downstream fan-out; query cost. \\
+    Serialization \& egress & $\leq 15\%$ & Payload size; compression ratio. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Starter latency budget decomposition (share of p99 target).}
+  \label{tab:ch0-budget}
+\end{table}
+
+\subsection{Governance, SLOs, and Threat Modeling: The Baseline}
+\label{sec:ch0-governance}
+
+\paragraph{Governance baseline.}
+Every API in this book, including toy ones, carries five artifacts: an owner,
+a version, a machine-readable contract, a changelog, and a deprecation
+policy. That is the minimum bar for L1 on the maturity ladder, and it costs
+almost nothing at small scale. Governance at L4 adds catalogs, automated
+linting of contracts, and lifecycle state machines (Chapter~\ref{ch:lifecycle}).
+
+\paragraph{SLO and error-budget starter.}
+A service-level objective states a target for a measurable indicator. The
+canonical first SLO is availability: the fraction of requests answered with a
+non-5xx status within the latency threshold. The \emph{error budget} is the
+allowed shortfall. Worked example: a 99.9\% monthly availability SLO over a
+30-day month permits
+\begin{equation}
+  (1 - 0.999) \times 30 \times 24 \times 60 \;=\; 43.2
+  \ \text{minutes of downtime per month.}
+  \label{eq:ch0-errorbudget}
+\end{equation}
+The budget converts reliability from a vibe into a spendable resource: when
+more than half the budget is gone mid-month, you freeze feature releases and
+spend engineering on reliability instead \cite{beyer2016sre}. We compute
+budgets for every lab from Chapter~\ref{ch:observability} onward.
+
+\paragraph{Threat model primer (STRIDE).}
+Before any endpoint ships, ask six questions --- one per STRIDE category
+\cite{gehl2021apidesign}:
+
+\begin{itemize}
+  \item \textbf{S}poofing: can a caller impersonate another principal?
+        (Control: authentication on every request; no anonymous writes.)
+  \item \textbf{T}ampering: can a caller modify data in transit or at rest?
+        (Control: TLS everywhere; integrity checks on stored payloads.)
+  \item \textbf{R}epudiation: can an actor deny an action?
+        (Control: immutable audit logs with actor identity.)
+  \item \textbf{I}nformation disclosure: can a caller read data beyond its
+        authorization? (Control: object-level authorization on every
+        resource fetch; minimal response fields.)
+  \item \textbf{D}enial of service: can a caller exhaust capacity?
+        (Control: rate limits, quotas, payload-size caps.)
+  \item \textbf{E}levation of privilege: can a low-privilege caller perform
+        high-privilege operations? (Control: server-side role checks; never
+        trust client-supplied roles.)
+\end{itemize}
+
+Chapter~\ref{ch:api_security} turns each row into executable tests.
+
+\paragraph{Ethics and responsible use.}
+APIs move power: they decide whose data flows where, at what price, under
+whose surveillance. The professional baseline adopted throughout this book:
+collect the minimum data the operation requires; never log credentials,
+tokens, or personal data; honor the provider's terms and the user's consent
+when consuming; publish honest deprecation timelines when producing; and
+treat synthetic-data discipline (never real PII in examples, tests, or
+datasets) as non-negotiable. All datasets in this curriculum are fictional,
+set in the Northwind Robotics universe.
+
+\subsection{Scope Boundaries, Assumptions, and Risks}
+\label{sec:ch0-scope}
+
+\paragraph{Scope boundaries.}
+This book teaches API engineering, not: frontend frameworks, database
+administration, Kubernetes cluster operation (Chapter~\ref{ch:deployment}
+uses it, does not teach it), language-agnostic theory for its own sake, or
+vendor-specific cloud certifications. Where a vendor service is the
+industry-standard reference (e.g.\ a managed gateway), we name it but
+implement with local, offline equivalents.
+
+\paragraph{Assumption register.}
+Assumptions the rest of the book makes, stated once so later chapters can
+build on them:
+
+\begin{enumerate}[label=\textbf{A\arabic*.}]
+  \item Python 3.11+ on Windows with PowerShell; commands are
+        PowerShell-native.
+  \item All network dependencies are simulated locally; no cloud accounts or
+        API keys are available or required.
+  \item Readers control a machine where they may open localhost ports and
+        install packages into a virtual environment.
+  \item Synthetic data only; the Northwind Robotics datasets in
+        \texttt{datasets\textbackslash} are the canonical fixtures.
+  \item Latency claims are always percentile claims; no claim is made from
+        averages alone.
+\end{enumerate}
+
+\paragraph{Risk register (top entries).}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{X l l X}
+    \toprule
+    \textbf{Risk} & \textbf{Likelihood} & \textbf{Impact} & \textbf{Mitigation} \\
+    \midrule
+    Reader environment diverges from baseline & Medium & High &
+      Sanity-check script (Listing~\ref{lst:ch0-sanity}) gates every lab. \\
+    Percentile measurements misread due to tiny samples & High & Medium &
+      Benchmark protocol fixes $n \geq 200$ and warmup discipline. \\
+    Learners copy toy auth patterns into real systems & Medium & High &
+      Warning boxes flag every non-production pattern in place. \\
+    Offline stubs create false confidence about real services & Low & Medium &
+      Chapters state exactly which behaviors the stub does not model. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Initial risk register for the curriculum itself.}
+  \label{tab:ch0-risk}
+\end{table}
+
+\paragraph{Success criteria template.}
+Every chapter closes with measurable criteria of this form: \emph{Given
+(prerequisites), when (procedure), then (observable outcome with a number).}
+Example for this chapter: ``Given a fresh venv, when the quick-start lab is
+executed per Section~\ref{sec:ch0-lab}, then the client completes 200
+measured requests with zero errors and reports p50, p95, and p99, and the
+learner can state which latency stage dominates on localhost.''
+
+\paragraph{Terminology normalization.}
+To keep twenty-one chapters unambiguous: \emph{endpoint} means one operation
+on one path; \emph{resource} means a domain entity addressable by URI;
+\emph{representation} means a serialized form of a resource;
+\emph{consumer/provider} are roles, not machines (one service is often both);
+\emph{error} is any non-success outcome; \emph{fault} is a defect that causes
+errors; \emph{failure} is user-visible loss of service. Latency is always
+client-observed unless marked \emph{server-side}.
+%% ============================================================================
+\section{Production-Ready Code Implementation}
+\label{sec:ch0-code}
+
+This section installs the two disciplines every later chapter assumes:
+a \emph{reproducible environment} and a \emph{reproducible measurement
+protocol}. All three listings are complete, typed, stdlib-only, and offline.
+
+\subsection{Environment Setup Baseline}
+\label{sec:ch0-env}
+
+\paragraph{Minimal local stack (used from Chapter 1).}
+Python 3.11+, a virtual environment, and the packages in this chapter's
+appendix. From the repository root in PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+\end{minted}
+
+If activation is blocked by policy, run
+\texttt{Set-ExecutionPolicy -Scope CurrentUser RemoteSigned} once, or invoke
+\texttt{.\textbackslash .venv\textbackslash Scripts\textbackslash python.exe}
+directly without activating.
+
+\paragraph{Cloud-ready stack (used from Chapter 17).}
+The local stack plus Docker Desktop (for container labs), a local Kubernetes
+distribution, and a tunnel-free mindset: all ``cloud'' deployments in this
+book target local clusters and local registries so the exercises remain
+offline. The cloud-ready stack adds no Python dependencies beyond the
+minimal stack.
+
+\paragraph{Sanity check.}
+Run Listing~\ref{lst:ch0-sanity} once per machine and once after any
+environment change. It verifies the interpreter version, importability of
+required packages, and availability of the localhost ports used by the labs
+--- and it never touches the network beyond loopback.
+
+\begin{minted}{python}
+"""Environment sanity check for the API curriculum (offline, stdlib-only).
+
+Verifies: interpreter version, required packages, localhost port
+availability, and writes a structured report via logging.
+Run:  python sanity_check.py
+Exit code 0 means the environment is ready for every lab in the book.
+"""
+from __future__ import annotations
+
+import importlib.util
+import logging
+import socket
+import sys
+from dataclasses import dataclass, field
+
+MIN_PYTHON: tuple[int, int] = (3, 11)
+REQUIRED_PACKAGES: tuple[str, ...] = (
+    "fastapi", "uvicorn", "httpx", "pydantic", "pytest",
+)
+REQUIRED_PORTS: tuple[int, ...] = (8000, 8001, 8765)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)-7s %(message)s",
+)
+logger = logging.getLogger("sanity_check")
+
+
+@dataclass
+class CheckReport:
+    """Accumulates named check results for a final verdict."""
+
+    failures: list[str] = field(default_factory=list)
+
+    def record(self, name: str, ok: bool, detail: str) -> None:
+        status = "PASS" if ok else "FAIL"
+        logger.info("[%s] %s: %s", status, name, detail)
+        if not ok:
+            self.failures.append(name)
+
+
+def check_python_version(report: CheckReport) -> None:
+    current = sys.version_info[:2]
+    ok = current >= MIN_PYTHON
+    detail = f"found {current[0]}.{current[1]}, require >= {MIN_PYTHON[0]}.{MIN_PYTHON[1]}"
+    report.record("python-version", ok, detail)
+
+
+def check_packages(report: CheckReport) -> None:
+    for package in REQUIRED_PACKAGES:
+        found = importlib.util.find_spec(package) is not None
+        detail = "importable" if found else "NOT INSTALLED"
+        report.record(f"package:{package}", found, detail)
+
+
+def check_port_available(port: int) -> tuple[bool, str]:
+    """A port is 'available' if we can bind it on loopback right now."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+        return True, "free"
+    except OSError as exc:
+        return False, f"unavailable ({exc.strerror or exc})"
+
+
+def check_ports(report: CheckReport) -> None:
+    for port in REQUIRED_PORTS:
+        ok, detail = check_port_available(port)
+        report.record(f"port:{port}", ok, detail)
+
+
+def main() -> int:
+    report = CheckReport()
+    check_python_version(report)
+    check_packages(report)
+    check_ports(report)
+    if report.failures:
+        logger.error("Environment NOT ready; failed checks: %s",
+                     ", ".join(report.failures))
+        return 1
+    logger.info("Environment ready for all labs.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+\label{lst:ch0-sanity}
+
+\subsection{Evaluation Primer: Measuring Latency Correctly}
+\label{sec:ch0-eval}
+
+\paragraph{Why averages lie.}
+Latency distributions of network services are heavy-tailed: most requests are
+fast, a few are catastrophically slow, and the tail is where user pain lives.
+The arithmetic mean of a heavy-tailed distribution is dominated by rare
+outliers in small samples and hides them in large ones --- either way it
+describes no actual user's experience. The standard remedy is
+\emph{percentiles}: the value below which a given fraction of observations
+falls. We always report three:
+
+\begin{definition}[Latency percentile]
+\label{def:percentile}
+Given $n$ sorted latency samples $t_{(1)} \le t_{(2)} \le \dots \le t_{(n)}$,
+the $q$-th percentile $p_q$ is $t_{(\lceil q n / 100 \rceil)}$. Thus $p_{50}$
+(the median) is the typical request, $p_{95}$ is what the slowest 5\%
+experience at best, and $p_{99}$ exposes the tail that averages conceal.
+\end{definition}
+
+\paragraph{Throughput vs.\ latency.}
+Throughput $\lambda$ (requests/second) and latency $L$ are not independent.
+By Little's Law, concurrency $C = \lambda \cdot L$; as load approaches
+capacity, queueing theory predicts latency grows non-linearly even while
+throughput still rises. Benchmark claims must therefore state the offered
+load: ``p99 = 45\,ms at 200\,rps'' is a measurement; ``p99 = 45\,ms'' is
+marketing. Throughout this book, benchmarks pin the load first.
+
+\paragraph{Minimal benchmark protocol.}
+Every performance claim in this book is produced by this protocol:
+
+\begin{enumerate}
+  \item \textbf{Warmup:} issue 50 unmeasured requests to stabilize caches,
+        JIT-like effects, and connection pools.
+  \item \textbf{Measure:} issue $n \geq 200$ sequential requests, timing each
+        with \texttt{time.perf\_counter\_ns()} on the client.
+  \item \textbf{Record:} keep raw samples; never aggregate before storing.
+  \item \textbf{Report:} p50, p95, p99, max, error count, achieved
+        throughput, and the exact configuration (variant V1--V4, payload
+        size, machine class).
+  \item \textbf{Repeat:} results quoted in prose are medians of 3 runs.
+\end{enumerate}
+
+\begin{warningbox}
+Two measurement sins invalidate benchmarks silently. First, measuring with
+\texttt{time.time()} or \texttt{datetime.now()}: wall clocks can jump
+backwards under NTP corrections; always use a monotonic clock
+(\texttt{time.perf\_counter\_ns}). Second, timing server-side only: the user
+experiences the client-observed latency, which includes queueing and network
+--- server logs systematically under-report it.
+\end{warningbox}
+
+\paragraph{The benchmark harness.}
+Listing~\ref{lst:ch0-bench} is the harness used (and extended) throughout the
+book. It is transport-agnostic: pass any callable and it returns a typed
+\texttt{BenchmarkResult}. It deliberately uses only the standard library so
+it runs in every chapter's environment.
+
+\begin{minted}{python}
+"""Reusable latency benchmark harness (stdlib-only, deterministic protocol).
+
+Implements the book's minimal benchmark protocol: warmup, timed samples via
+a monotonic clock, raw-sample retention, percentile reporting. No network
+code lives here; the caller supplies a `send` callable so the same harness
+measures urllib clients, httpx clients, or in-process fakes.
+
+Run the built-in self-test:  python bench.py --selftest
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import math
+import statistics
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+logger = logging.getLogger("bench")
+
+MIN_SAMPLES = 200
+DEFAULT_WARMUP = 50
+
+
+class BenchmarkError(RuntimeError):
+    """Raised when the benchmark configuration is invalid."""
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    """Immutable outcome of one benchmark run."""
+
+    samples_ms: tuple[float, ...]
+    errors: int
+    wall_seconds: float
+    label: str = ""
+
+    @property
+    def n(self) -> int:
+        return len(self.samples_ms)
+
+    @property
+    def throughput_rps(self) -> float:
+        if self.wall_seconds <= 0.0:
+            raise BenchmarkError("wall time must be positive")
+        return (self.n + self.errors) / self.wall_seconds
+
+    def percentile(self, q: float) -> float:
+        """Nearest-rank percentile per the book's Definition."""
+        if not self.samples_ms:
+            raise BenchmarkError("no samples collected")
+        if not 0.0 < q <= 100.0:
+            raise BenchmarkError(f"q must be in (0, 100], got {q}")
+        ordered = sorted(self.samples_ms)
+        rank = max(1, math.ceil(q * len(ordered) / 100.0))
+        return ordered[rank - 1]
+
+    def summary(self) -> dict[str, float | int | str]:
+        return {
+            "label": self.label,
+            "n": self.n,
+            "errors": self.errors,
+            "p50_ms": round(self.percentile(50), 3),
+            "p95_ms": round(self.percentile(95), 3),
+            "p99_ms": round(self.percentile(99), 3),
+            "max_ms": round(max(self.samples_ms), 3),
+            "throughput_rps": round(self.throughput_rps, 1),
+        }
+
+
+def run_benchmark(
+    send: Callable[[], None],
+    *,
+    samples: int = MIN_SAMPLES,
+    warmup: int = DEFAULT_WARMUP,
+    label: str = "",
+) -> BenchmarkResult:
+    """Execute the warmup + measured-runs protocol against `send`.
+
+    `send` must perform exactly one request and raise on failure; raised
+    exceptions are counted as errors and excluded from latency samples.
+    """
+    if samples < MIN_SAMPLES:
+        raise BenchmarkError(
+            f"samples must be >= {MIN_SAMPLES} for stable percentiles")
+    if warmup < 0:
+        raise BenchmarkError("warmup must be >= 0")
+
+    for _ in range(warmup):
+        try:
+            send()
+        except Exception:  # noqa: BLE001 -- warmup failures are tolerated
+            logger.debug("warmup request failed", exc_info=True)
+
+    timings: list[float] = []
+    errors = 0
+    start_ns = time.perf_counter_ns()
+    for _ in range(samples):
+        t0 = time.perf_counter_ns()
+        try:
+            send()
+        except Exception:  # noqa: BLE001 -- errors are data, not crashes
+            errors += 1
+            logger.debug("measured request failed", exc_info=True)
+            continue
+        timings.append((time.perf_counter_ns() - t0) / 1_000_000.0)
+    wall_seconds = (time.perf_counter_ns() - start_ns) / 1_000_000_000.0
+
+    return BenchmarkResult(
+        samples_ms=tuple(timings), errors=errors,
+        wall_seconds=wall_seconds, label=label,
+    )
+
+
+def _selftest() -> int:
+    """Deterministic offline self-test against an in-process fake."""
+    state = {"calls": 0}
+
+    def fake_send() -> None:
+        state["calls"] += 1
+        time.sleep(0.0005)  # deterministic-ish work, no wall-clock asserts
+        if state["calls"] % 97 == 0:
+            raise ConnectionError("simulated transient failure")
+
+    result = run_benchmark(fake_send, samples=200, warmup=10,
+                           label="selftest")
+    report = result.summary()
+    for key, value in report.items():
+        logger.info("%-16s %s", key, value)
+    assert result.n + result.errors == 200, "sample accounting broken"
+    assert report["p50_ms"] <= report["p95_ms"] <= report["p99_ms"]
+    assert result.errors > 0, "expected simulated errors"
+    logger.info("selftest OK")
+    return 0
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args()
+    if args.selftest:
+        raise SystemExit(_selftest())
+    parser.error("pass --selftest (this module is a library otherwise)")
+\end{minted}
+\label{lst:ch0-bench}
+
+Note the deliberate design choices: errors are \emph{counted, not raised},
+because a benchmark that crashes on the first failure measures nothing;
+exceptions are caught broadly only at this boundary, logged with
+\texttt{exc\_info}, and converted into data; and the self-test asserts
+ordering invariants ($p_{50} \le p_{95} \le p_{99}$) rather than absolute
+timings, keeping it deterministic and machine-independent.
+
+\subsection{A Complete Offline API and Client in the Standard Library}
+\label{sec:ch0-miniapi}
+
+Before frameworks, you must see the primitives. Listing~\ref{lst:ch0-miniapi}
+implements a working JSON API with \texttt{http.server} --- the Northwind
+Robotics parts catalog --- plus a client built on \texttt{urllib}. It
+enforces the disciplines this book demands everywhere: explicit timeouts on
+every call, structured JSON errors, input validation with specific
+exceptions, and logging instead of \texttt{print}. Chapter~\ref{ch:fastapi}
+will replace the plumbing with FastAPI; the disciplines remain.
+
+\begin{minted}{python}
+"""Northwind Robotics parts API + client, stdlib-only and fully offline.
+
+Server:  GET /healthz                 -> {"status": "ok"}
+         GET /v1/parts                -> {"items": [...]}
+         GET /v1/parts/<sku>          -> part object or RFC-shaped error
+Client:  typed functions with explicit timeouts and error mapping.
+
+Run server:  python mini_api.py serve --port 8000
+Run client demo (spawns server in-process):  python mini_api.py demo
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import threading
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+logger = logging.getLogger("mini_api")
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
+CLIENT_TIMEOUT_S = 2.0  # every network call in this book carries a timeout
+
+# Synthetic fixture data (Northwind Robotics universe). No real PII.
+PARTS: dict[str, dict[str, Any]] = {
+    "NR-AXLE-001": {"sku": "NR-AXLE-001", "name": "Drive axle, Mk IV",
+                    "unit_price_cents": 4599, "stock": 37},
+    "NR-LIDAR-204": {"sku": "NR-LIDAR-204", "name": "LiDAR puck, 16-channel",
+                     "unit_price_cents": 189900, "stock": 4},
+    "NR-GRIP-011": {"sku": "NR-GRIP-011", "name": "Parallel gripper jaw",
+                    "unit_price_cents": 12350, "stock": 120},
+}
+
+
+def problem(status: int, title: str, detail: str) -> bytes:
+    """RFC 9457-flavored error body (formalized in Chapter 7)."""
+    body = {
+        "type": "about:blank",
+        "title": title,
+        "status": status,
+        "detail": detail,
+    }
+    return json.dumps(body).encode("utf-8")
+
+
+class PartsHandler(BaseHTTPRequestHandler):
+    server_version = "NorthwindParts/0.1"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        logger.info("%s - %s", self.address_string(), fmt % args)
+
+    def _send_json(self, status: int, payload: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:  # noqa: N802 -- stdlib naming contract
+        if self.path == "/healthz":
+            self._send_json(200, json.dumps({"status": "ok"}).encode())
+            return
+        if self.path == "/v1/parts":
+            payload = json.dumps({"items": list(PARTS.values())}).encode()
+            self._send_json(200, payload)
+            return
+        if self.path.startswith("/v1/parts/"):
+            sku = self.path.removeprefix("/v1/parts/").strip()
+            part = PARTS.get(sku)
+            if part is None:
+                self._send_json(404, problem(
+                    404, "Not Found", f"no part with sku '{sku}'"))
+                return
+            self._send_json(200, json.dumps(part).encode())
+            return
+        self._send_json(404, problem(
+            404, "Not Found", f"unknown path '{self.path}'"))
+
+
+def make_server(host: str = DEFAULT_HOST,
+                port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), PartsHandler)
+
+
+# ------------------------------- client side -------------------------------
+
+class ApiClientError(RuntimeError):
+    """Base class for client-side failures."""
+
+
+class ApiHttpError(ApiClientError):
+    """The server answered with a non-2xx status."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"HTTP {status}: {detail}")
+        self.status = status
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class PartsClient:
+    """Minimal typed client for the parts API."""
+
+    base_url: str = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
+    timeout_s: float = CLIENT_TIMEOUT_S
+
+    def _get_json(self, path: str) -> Any:
+        if not path.startswith("/"):
+            raise ValueError(f"path must start with '/', got {path!r}")
+        request = urllib.request.Request(self.base_url + path, method="GET")
+        try:
+            with urllib.request.urlopen(request,
+                                        timeout=self.timeout_s) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ApiHttpError(exc.code, detail) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ApiClientError(f"transport failure: {exc}") from exc
+
+    def health(self) -> bool:
+        return self._get_json("/healthz")["status"] == "ok"
+
+    def list_parts(self) -> list[dict[str, Any]]:
+        return list(self._get_json("/v1/parts")["items"])
+
+    def get_part(self, sku: str) -> dict[str, Any]:
+        if not sku:
+            raise ValueError("sku must be non-empty")
+        return dict(self._get_json(f"/v1/parts/{sku}"))
+
+
+def demo() -> int:
+    """Start the server in-process and exercise the client. Offline."""
+    server = make_server()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = PartsClient()
+        logger.info("health: %s", client.health())
+        parts = client.list_parts()
+        logger.info("catalog size: %d", len(parts))
+        part = client.get_part("NR-LIDAR-204")
+        logger.info("fetched: %s (%d cents)",
+                    part["name"], part["unit_price_cents"])
+        try:
+            client.get_part("NO-SUCH-SKU")
+        except ApiHttpError as exc:
+            logger.info("expected 404 mapped cleanly: status=%d", exc.status)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+    return 0
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)-7s %(message)s")
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    serve = sub.add_parser("serve", help="run the server in the foreground")
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT)
+    sub.add_parser("demo", help="in-process server + client round trip")
+    args = parser.parse_args()
+
+    if args.command == "serve":
+        if not 1024 <= args.port <= 65535:
+            parser.error("port must be in [1024, 65535]")
+        server = make_server(port=args.port)
+        logger.info("serving on http://%s:%d", DEFAULT_HOST, args.port)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("shutting down")
+        finally:
+            server.server_close()
+        return 0
+    return demo()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+\label{lst:ch0-miniapi}
+
+\begin{keyconceptbox}
+Every listing in this book obeys five rules, visible already in these three:
+(1)~explicit timeouts on every network call; (2)~typed function signatures
+and dataclasses; (3)~specific exceptions with chained causes
+(\texttt{raise ... from exc}); (4)~logging instead of \texttt{print};
+(5)~offline determinism --- no listing requires the internet, a cloud
+account, or an API key.
+\end{keyconceptbox}
+%% ============================================================================
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch0-pitfalls}
+
+These are the failure patterns this book's authors see most often in code
+reviews and incident post-mortems. Each is stated with its detection signal
+and its fix; the chapters referenced contain the full treatment.
+
+\subsection{Consumer-Side Pitfalls}
+
+\begin{description}
+  \item[Missing timeouts (the cardinal sin).] Any network call without a
+    timeout can block \emph{forever}; TCP's default retransmission behavior
+    happily waits minutes. Detection: thread dumps full of blocked I/O
+    threads; fix: a connect \emph{and} read timeout on every call
+    (Section~\ref{sec:ch0-warstory} shows what happens otherwise).
+  \item[Retrying everything, immediately, forever.] Unbounded retries turn a
+    partial outage into a self-inflicted denial of service. Fix: bounded
+    retries with exponential backoff and jitter, only on retryable
+    (idempotent or explicitly safe) operations (Chapters
+    \ref{ch:consuming_python}, \ref{ch:idempotency}, \ref{ch:rate_limiting}).
+  \item[Parsing errors by string-matching.] Matching on
+    \texttt{"something went wrong"} in a response body is a contract bug
+    waiting to be renamed. Fix: branch on status codes and
+    machine-readable error types (Chapter~\ref{ch:problem_details}).
+  \item[Ignoring the contract until runtime.] Discovering a renamed field in
+    production is a process failure. Fix: schema validation in CI
+    (Chapters \ref{ch:serialization}, \ref{ch:testing}).
+  \item[Secrets in source or logs.] API keys committed to git or printed in
+    debug logs are the most common real-world API breach vector. Fix:
+    environment variables, secret stores, log redaction
+    (Chapter~\ref{ch:client_security}).
+\end{description}
+
+\subsection{Provider-Side Pitfalls}
+
+\begin{description}
+  \item[Leaky abstraction responses.] Returning stack traces, ORM errors, or
+    internal hostnames in error bodies leaks your architecture to attackers.
+    Fix: RFC~9457 problem details with safe, curated fields.
+  \item[Breaking changes in place.] ``It's an internal API'' is how
+    distributed monoliths are born; consumers couple silently. Fix: version
+    every contract and automate compatibility checks
+    (Chapter~\ref{ch:versioning}).
+  \item[Offset pagination on mutating collections.] Items inserted while a
+    consumer pages shift every window, duplicating or skipping records. Fix:
+    cursor-based pagination (Chapter~\ref{ch:pagination}).
+  \item[200 OK with an error inside.] Wrapping failures in success envelopes
+    defeats HTTP intermediaries, caches, and every monitoring tool. Fix:
+    correct status codes; bodies carry detail, statuses carry semantics.
+  \item[No resource limits.] Unbounded page sizes, payload sizes, and query
+    complexity are invitations to accidental (or deliberate) denial of
+    service. Fix: caps plus rate limiting (Chapter~\ref{ch:rate_limiting}).
+\end{description}
+
+\subsection{Organizational Anti-Patterns}
+
+\begin{description}
+  \item[The API as afterthought.] Designing the UI first and exposing
+    whatever it needed produces chatty, anemic APIs. Fix: contract-first
+    design reviews.
+  \item[Docs as a wiki page.] Unversioned prose documentation decays within
+    weeks. Fix: machine-readable contracts as the source of truth, docs
+    generated from them \cite{openapi31}.
+  \item[No owner.] An API owned by ``the team'' is owned by no one;
+    deprecation, incidents, and consumer questions all stall. Fix: a named
+    owner per contract (governance baseline,
+    Section~\ref{sec:ch0-governance}).
+\end{description}
+
+\subsection{Common Myths About APIs}
+\label{sec:ch0-myths}
+
+\begin{description}
+  \item[``If it returns JSON over HTTP, it is REST.''] False. REST is a set
+    of architectural constraints \cite{fielding2000rest}; most
+    JSON-over-HTTP APIs are RPC-flavored HTTP interfaces. That is often fine
+    --- but call things by their names, because the constraints you actually
+    honor determine which guarantees (cacheability, statelessness) you may
+    assume.
+  \item[``HTTP 200 means it worked.''] It means the server produced a
+    response it considers successful. Semantic failures ride inside 200
+    bodies all the time; monitoring that counts only status codes is blind
+    to them.
+  \item[``Internal APIs don't need contracts or versioning.''] Internal
+    consumers are still consumers, and they couple silently. The blast
+    radius of an unversioned internal API is often \emph{larger} than a
+    public one because nobody tracks who depends on it.
+  \item[``Timeouts make systems slower.''] Timeouts cap the blast radius of
+    slow dependencies; the slow path exists whether or not you bound it.
+    The unbounded version is strictly worse (Section~\ref{sec:ch0-warstory}).
+  \item[``Retries fix flakiness.''] Retries fix \emph{transient transport}
+    failures and amplify everything else: they multiply load during
+    outages and duplicate non-idempotent effects. A retry policy is a
+    designed artifact, not a default.
+  \item[``The gateway will handle security.''\/] Gateways terminate TLS and
+    enforce coarse policies; they cannot fix broken object-level
+    authorization or injection inside business logic. Security is layered,
+    and the innermost layer is your code (Chapter~\ref{ch:api_security}).
+  \item[``Average latency is a fine health metric.''] Averages hide the
+    tail where user pain lives. Percentiles under stated load, or it did
+    not happen (Section~\ref{sec:ch0-eval}).
+  \item[``Documentation keeps itself up to date.''] Only generated
+    artifacts stay honest. Hand-written prose decays; machine-readable
+    contracts with docs rendered from them do not \cite{openapi31}.
+\end{description}
+
+\subsection{Common Mistakes \& Debugging Gallery}
+\label{sec:ch0-gallery}
+
+A field guide to symptoms you will meet in the labs:
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{X X X}
+    \toprule
+    \textbf{Symptom} & \textbf{Likely cause} & \textbf{First check} \\
+    \midrule
+    \texttt{ConnectionRefusedError} on localhost &
+      Server not running, or bound to a different port/interface &
+      \texttt{Test-NetConnection 127.0.0.1 -Port 8000} in PowerShell. \\
+    Request hangs, no exception &
+      Missing client timeout; server accepted but never answered &
+      Add/verify connect + read timeouts; check server logs. \\
+    Intermittent \texttt{RemoteDisconnected} &
+      Server closed an idle keep-alive connection the client reused &
+      Retry once on idempotent methods; shorten client keep-alive. \\
+    HTTP 415 Unsupported Media Type &
+      Missing or wrong \texttt{Content-Type} header &
+      Compare request headers against the contract's media type. \\
+    JSON decode error on error paths &
+      Error body is not JSON (proxy HTML page, empty body) &
+      Log status + first 200 bytes of body before decoding. \\
+    p99 spike with flat p50 &
+      Queueing at saturation, GC pauses, or one slow downstream &
+      Decompose per Equation~\eqref{eq:ch0-budget}; check pool metrics. \\
+    Works in demo, fails under load test &
+      Connection exhaustion, thread-pool starvation, retry storms &
+      Count open sockets; check retry policy and pool sizing. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Symptom-to-cause gallery for the most common lab failures.}
+  \label{tab:ch0-gallery}
+\end{table}
+
+%% ============================================================================
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch0-lab}
+
+\subsection{Quick-Start Lab: Build, Run, Measure (2--3 Hours, Offline)}
+
+\textbf{Objective.} Stand up the reference stack at variant V1+V2, run the
+benchmark protocol against it, and produce your first honest percentile
+report.
+
+\textbf{Prerequisites.} Sanity check green
+(Listing~\ref{lst:ch0-sanity}).
+
+\paragraph{Step 1 --- Environment (15 min).}
+Create and activate the virtual environment and install dependencies exactly
+as in Section~\ref{sec:ch0-env}. Run the sanity check and keep its output;
+labs in later chapters assume it.
+
+\paragraph{Step 2 --- Save the code (15 min).}
+Save Listing~\ref{lst:ch0-miniapi} as \texttt{mini\_api.py} and
+Listing~\ref{lst:ch0-bench} as \texttt{bench.py} in a lab folder. Verify the
+harness self-test:
+
+\begin{minted}{text}
+python bench.py --selftest
+\end{minted}
+
+Expect the summary keys (\texttt{p50\_ms}, \texttt{p95\_ms},
+\texttt{p99\_ms}, \texttt{errors}, \texttt{throughput\_rps}) and a final
+\texttt{selftest OK}.
+
+\paragraph{Step 3 --- Run the server (10 min).}
+In one PowerShell window:
+
+\begin{minted}{text}
+python mini_api.py serve --port 8000
+\end{minted}
+
+In a second window, smoke-test with the stdlib client:
+
+\begin{minted}{text}
+python mini_api.py demo
+\end{minted}
+
+\paragraph{Step 4 --- Measure (45 min).}
+Write \texttt{lab0\_measure.py} that imports both modules and measures the
+real client against the real server:
+
+\begin{minted}{python}
+"""Lab 0 measurement driver: benchmark the stdlib client end to end."""
+from __future__ import annotations
+
+import logging
+import threading
+
+from bench import run_benchmark
+from mini_api import PartsClient, make_server
+
+logger = logging.getLogger("lab0")
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)-7s %(message)s")
+    server = make_server(port=8000)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = PartsClient(base_url="http://127.0.0.1:8000")
+        result = run_benchmark(
+            lambda: client.get_part("NR-AXLE-001"),
+            samples=500, warmup=50, label="stdlib-local",
+        )
+        for key, value in result.summary().items():
+            logger.info("%-16s %s", key, value)
+        if result.errors != 0:
+            logger.error("expected zero errors on localhost, got %d",
+                         result.errors)
+            return 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+\label{lst:ch0-labdriver}
+
+\paragraph{Step 5 --- Analyze (45 min).}
+Answer in writing: (a)~Which latency stage of
+Equation~\eqref{eq:ch0-budget} dominates on localhost, and why does
+$L_{\mathrm{TLS}}$ not appear? (b)~What is the ratio $p_{99}/p_{50}$? What
+does a ratio above 3 suggest? (c)~Repeat with the server under a second
+concurrent client; how do p50 and p99 move relative to each other?
+
+\paragraph{Step 6 --- Break it deliberately (30 min).}
+Introduce one controlled fault at a time and record which taxonomy category
+(Table~\ref{tab:ch0-taxonomy}) each produces: stop the server mid-benchmark
+(transport); request a nonexistent SKU and count 404s (contract/semantic
+boundary --- argue which); remove the client timeout and kill the server
+before answering (transport, and observe the hang); send a malformed path
+(contract). This fault-injection habit is the seed of Chapter 19's chaos
+testing.
+
+\paragraph{Acceptance criteria.}
+\begin{itemize}
+  \item[$\square$] Sanity check reports all PASS.
+  \item[$\square$] 500-request benchmark completes with zero errors.
+  \item[$\square$] Written answers name the dominant latency stage and the
+    $p_{99}/p_{50}$ ratio.
+  \item[$\square$] Fault-injection table maps each induced failure to a
+    taxonomy category.
+\end{itemize}
+
+\subsection{Production War Story: The Missing Timeout}
+\label{sec:ch0-warstory}
+
+Names are fictionalized; the failure pattern is one of the most common in the
+industry \cite{nygard2018releaseit}.
+
+\paragraph{Background.}
+Northwind Robotics' fleet dashboard (consumer) called the inventory service
+(provider) over HTTP to render each robot's parts manifest. The client
+library defaulted to \emph{no timeout} --- ``we'll add timeouts later'' had
+been on the backlog for two quarters. The inventory service, in turn,
+depended on a catalog database.
+
+\paragraph{Trigger.}
+At 14:07 on a Tuesday, a routine database failover made catalog queries slow:
+not failing, just slow --- 30 seconds instead of 30 milliseconds. Slow
+failures are the dangerous kind; nothing alarms because nothing has
+``failed.''
+
+\paragraph{Cascade.}
+Inventory-service workers blocked on catalog queries. Its thread pool (64
+threads) exhausted in under a minute, so inventory requests from the
+dashboard queued, then blocked. Dashboard server workers, holding open
+requests with no timeout, blocked in turn; its pool (128 threads) exhausted
+four minutes later. The load balancer, seeing all dashboard workers busy,
+began returning 503s for \emph{every} route --- including
+\texttt{/healthz} and the static marketing pages that had no dependency on
+inventory at all. By 14:19, a slow SELECT statement had taken down the
+entire customer-facing site. Retry logic in a third system (the mobile app's
+aggressive immediate-retry policy) tripled the offered load during the
+incident, deepening the queue.
+
+\paragraph{Detection and recovery.}
+The on-call engineer's percentile dashboards told the story in one glance:
+p50 dashboard latency flat until 14:07, then p99 vertical. Recovery was
+manual thread-pool drainage via rolling restarts; the catalog failover
+completed on its own at 14:31. Total customer-visible outage: 24 minutes ---
+more than half a 99.9\% monthly error budget
+(Equation~\eqref{eq:ch0-errorbudget}) spent in one afternoon.
+
+\paragraph{Root cause and fixes.}
+The post-mortem classified the incident across three taxonomy categories: an
+\emph{operational} trigger (slow dependency), amplified by a \emph{transport}
+defect (missing timeouts --- no failure semantics defined between the
+systems), worsened by a \emph{semantic} one (immediate unbounded retries).
+Fixes, in order of leverage: (1)~connect and read timeouts on every call
+(500\,ms / 2\,s); (2)~bounded retries with exponential backoff and jitter on
+idempotent reads only; (3)~bulkheads --- separate thread pools per
+dependency so one slow dependency cannot starve unrelated routes;
+(4)~circuit breakers to fail fast while the dependency recovers; (5)~a load
+test reproducing the scenario in CI. Chapters \ref{ch:consuming_python},
+\ref{ch:idempotency}, \ref{ch:rate_limiting}, and \ref{ch:microservices}
+implement each fix; Chapter~\ref{ch:observability} builds the dashboards that
+caught it.
+
+\begin{warningbox}
+The default timeout of most HTTP client libraries is \emph{infinite} or
+absurdly long. Treat any client configuration without an explicit timeout as
+a Sev-2 defect. There is no safe default; there is only your latency budget.
+\end{warningbox}
+
+\subsection{Diagnostic Playbook: ``The API Is Slow'' / ``The API Is Broken''}
+\label{sec:ch0-playbook}
+
+When the page arrives, run this sequence before forming theories:
+
+\begin{enumerate}
+  \item \textbf{Define the symptom precisely.} Which operation, which
+    consumers, since when? Get a failing request ID or a reproducible call.
+    ``Slow'' and ``broken'' are different playbooks from here.
+  \item \textbf{Reproduce from a neutral client.} A single measured call from
+    outside the complaining system (your Chapter 2 client) isolates
+    consumer-side causes.
+  \item \textbf{Classify into the taxonomy.} Transport (cannot connect,
+    TLS errors, 502s)? Contract (400/422, schema mismatches)? Semantic
+    (200 with wrong data)? Operational (latency tail, saturation)? Security
+    (401/403, blocked IPs)? Table~\ref{tab:ch0-taxonomy} maps each to its
+    detection strategy.
+  \item \textbf{Localize with the budget.} Decompose latency per
+    Equation~\eqref{eq:ch0-budget}; the stage that exceeds its budget is
+    your suspect. For errors, walk the request path hop by hop.
+  \item \textbf{Check the tail, not the mean.} p99 first; if p99 is fine,
+    the complaint is about a specific consumer segment, not the fleet.
+  \item \textbf{Form one hypothesis, test one change.} Change a single
+    variable, re-measure with the benchmark protocol, keep the raw samples.
+  \item \textbf{Write it down.} Every incident ends with the taxonomy
+    classification, the fix, and the test that prevents recurrence.
+\end{enumerate}
+%% ============================================================================
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch0-selfassess}
+
+\subsection{Readiness Self-Assessment}
+
+Score yourself honestly (0 = no idea, 1 = heard of it, 2 = can do it) before
+starting Chapter 1. Total $\geq 14$ means you are ready; any 0 identifies a
+topic to shore up first.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{X c}
+    \toprule
+    \textbf{Skill} & \textbf{Score (0--2)} \\
+    \midrule
+    Create and activate a Python virtual environment in PowerShell & \\
+    Write a typed Python function with a dataclass return value & \\
+    Explain what happens between \texttt{urlopen} and receiving bytes & \\
+    Read an HTTP request/response pair in raw text form & \\
+    Branch on HTTP status codes and content types & \\
+    Explain the difference between TCP and HTTP & \\
+    Compute a percentile from a sorted list by hand & \\
+    Use git to clone, branch, commit, and diff & \\
+    Explain what TLS authenticates and encrypts & \\
+    State one reason an average is a bad latency summary & \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Readiness self-assessment (target: total $\geq 14$, no zeros).}
+  \label{tab:ch0-readiness}
+\end{table}
+
+\subsection{Exercises}
+
+\begin{enumerate}[label=\textbf{E0.\arabic*.}]
+  \item \textbf{[junior] Classify the incidents.} For each: (a)~a proxy
+    returns 502 during a deploy; (b)~a field changes type from string to
+    number; (c)~prices are returned in the wrong currency with HTTP 200;
+    (d)~p99 triples every day at batch-job time; (e)~a customer reads
+    another customer's invoice by incrementing an ID. Map each to the
+    taxonomy and name its detection strategy.
+  \item \textbf{[junior] Percentiles by hand.} Given sorted latencies (ms):
+    4, 5, 5, 6, 7, 9, 12, 18, 40, 220 --- compute $p_{50}$, $p_{90}$, the
+    mean, and explain which single number you would put on a dashboard.
+  \item \textbf{[junior] Extend the mini API.} Add
+    \texttt{GET /v1/parts?in\_stock=true} filtering to
+    Listing~\ref{lst:ch0-miniapi}, returning a 400 problem body for unknown
+    query parameters. Keep it stdlib-only and typed.
+  \item \textbf{[mid] Error budget arithmetic.} Northwind's fleet API has a
+    99.95\% monthly SLO. Compute the downtime budget in minutes for a
+    30-day month, then convert it into ``allowed 5xx responses per million
+    requests.'' Which unit is easier to alert on, and why?
+  \item \textbf{[mid] Harden the benchmark.} Modify
+    Listing~\ref{lst:ch0-bench} to interleave three payload sizes in a
+    fixed, seeded pattern and report per-size percentiles. Why must the
+    pattern be seeded rather than random?
+  \item \textbf{[mid] Maturity audit.} Take the last API you worked on (or
+    Listing~\ref{lst:ch0-miniapi}) and score it L0--L4. List the three
+    cheapest changes that would raise it one level.
+  \item \textbf{[senior] Budget decomposition.} Instrument
+    Listing~\ref{lst:ch0-miniapi} to timestamp request receipt, handler
+    start, and response flush; compute a per-stage latency table over 500
+    requests and reconcile it with Equation~\eqref{eq:ch0-budget}. Which
+    stage's budget would you tighten first?
+  \item \textbf{[senior] Timeout theorem.} Using the war story's numbers,
+    estimate the maximum request rate the dashboard could have sustained
+    with 128 workers and 30-second dependency stalls. Then show how a
+    2-second timeout changes the answer (Little's Law, $C=\lambda L$).
+  \item \textbf{[senior] STRIDE the mini API.} Produce a six-row STRIDE
+    table for Listing~\ref{lst:ch0-miniapi} as written. Which threats does
+    the code actually control today? Which does it ignore?
+  \item \textbf{[staff] Design the governance gate.} Draft the CI checks
+    (as a checklist, not code) that would keep every Northwind API at L2
+    minimum: what fails a build, what warns, and who can override. Compare
+    with the addendum's CI quality-gate template.
+\end{enumerate}
+
+\subsection{Deep-Dive Questions}
+
+\begin{enumerate}[label=\textbf{D0.\arabic*.}]
+  \item Definition~\ref{def:api} makes failure semantics part of the
+    contract. Argue for and against treating a change in retryability
+    guidance (``clients may now retry POST X'') as a breaking change.
+  \item The maturity model is linear; real organizations are not. Describe a
+    plausible system that is simultaneously L4 in governance and L0 in
+    resilience, and the risk that combination creates.
+  \item Little's Law ($C = \lambda L$) assumes a stable system. Which
+    assumptions break during a retry storm, and what does the law then
+    mislead you about?
+  \item Percentile latency SLOs can be gamed by shedding load (returning
+    fast errors). Design an SLI definition that resists this gaming.
+  \item Every lab in this book is offline. What does the offline constraint
+    \emph{prevent} you from learning, and how would you compensate before
+    touching a real provider?
+\end{enumerate}
+
+%% ============================================================================
+\section{Interview Q\&A Vault}
+\label{sec:ch0-qa}
+
+Thirty-two questions, ordered junior $\to$ staff. Answers are intentionally
+concise; interviews reward precision over volume.
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em]
+  \item \textbf{[junior] What is an API?}\\
+    A versioned contract between provider and consumers specifying
+    operations, representations, and failure semantics over a transport
+    protocol (Definition~\ref{def:api}). Not the implementation --- the
+    agreement.
+  \item \textbf{[junior] What is the difference between a library and an
+    API?}\\
+    A library executes in your process and address space; an API crosses a
+    process or network boundary, so it has transport, versioning, and
+    partial-failure concerns a library never faces.
+  \item \textbf{[junior] Name the parts of an HTTP request.}\\
+    Request line (method, target, version), headers, optional body. The
+    response mirrors this: status line, headers, optional body
+    \cite{rfc9110}.
+  \item \textbf{[junior] What do the HTTP status-code classes mean?}\\
+    1xx informational, 2xx success, 3xx redirection, 4xx client fault,
+    5xx server fault. The class alone localizes responsibility before you
+    read a single body byte.
+  \item \textbf{[junior] GET vs.\ POST?}\\
+    GET retrieves a representation and must be safe and idempotent; POST
+    submits an operation the server defines, with no such guarantee.
+    Caches and retries treat them differently because the semantics
+    differ.
+  \item \textbf{[junior] What is JSON and why did it win over XML for web
+    APIs?}\\
+    A text serialization of objects, arrays, numbers, strings, booleans,
+    and null. It won on parsing simplicity, direct mapping to programming
+    language data structures, and payload size --- at the cost of no
+    native schema or comment support, which Chapter 4 addresses.
+  \item \textbf{[junior] What is a timeout and why does every call need
+    one?}\\
+    A bound on how long you wait for a connection or a response. Without
+    it, a silent peer blocks your worker forever; at scale that exhausts
+    pools and cascades (Section~\ref{sec:ch0-warstory}).
+  \item \textbf{[junior] What is an idempotent operation?}\\
+    One where performing it $n$ times has the same server-side effect as
+    performing it once. GET, PUT, and DELETE are specified idempotent;
+    POST is not, which is exactly why idempotency keys exist
+    (Chapter~\ref{ch:idempotency}).
+  \item \textbf{[junior] What is a status 404 vs.\ 410?}\\
+    404: not found, possibly transient. 410: gone permanently, a deliberate
+    deprecation signal. Returning the right one lets consumers automate
+    their response.
+  \item \textbf{[junior] What does TLS give an API connection?}\\
+    Server authentication, confidentiality, and integrity in transit ---
+    and with mutual TLS, client authentication too. It does nothing for
+    authorization or input validation.
+  \item \textbf{[mid] What is REST, precisely?}\\
+    An architectural style \cite{fielding2000rest}: client--server,
+    stateless, cacheable, uniform interface (resources identified by URIs,
+    manipulated through representations, self-descriptive messages,
+    hypermedia), layered system, optional code-on-demand. A JSON-over-HTTP
+    CRUD endpoint is not automatically REST.
+  \item \textbf{[mid] Explain the difference between authentication and
+    authorization.}\\
+    Authentication establishes \emph{who} the caller is; authorization
+    decides \emph{what} that caller may do. The most damaging modern API
+    flaw --- broken object-level authorization --- is an authenticated
+    caller reaching objects it should not, i.e.\ an authorization failure.
+  \item \textbf{[mid] Why do averages mislead for latency? What do you
+    report instead?}\\
+    Latency is heavy-tailed; the mean describes no real user and hides the
+    tail where pain concentrates. Report percentiles: p50 for the typical
+    experience, p95/p99 for the tail, always with sample size and offered
+    load.
+  \item \textbf{[mid] What is an API contract test?}\\
+    A test that verifies provider behavior against the published contract
+    (schema, status codes, error shapes), often generated from an OpenAPI
+    document, and consumer tests that pin the fields the consumer actually
+    uses. They run in CI so a breaking change fails a build, not a customer.
+  \item \textbf{[mid] Your consumer gets HTTP 429. What happened and what do
+    you do?}\\
+    The provider rate-limited you. Read \texttt{Retry-After}, back off with
+    exponential delay and jitter, reduce concurrency, and if the limit is
+    chronic, negotiate quota or cache more. Never retry immediately
+    (Chapter~\ref{ch:rate_limiting}).
+  \item \textbf{[mid] What is connection pooling and why does it matter?}\\
+    Reusing TCP/TLS connections across requests. Handshakes cost round
+    trips (budget stage $L_{\mathrm{TLS}}$); pooling amortizes them,
+    often the single largest latency win for chatty clients
+    (Chapter~\ref{ch:consuming_python}).
+  \item \textbf{[mid] When should you paginate, and offset vs.\ cursor?}\\
+    Whenever a collection can outgrow one response. Offset pagination is
+    simple but unstable under concurrent inserts and gets slower deeper in;
+    cursor (keyset) pagination is stable and index-friendly. Default to
+    cursors for large or mutating collections (Chapter~\ref{ch:pagination}).
+  \item \textbf{[mid] What belongs in an error response body?}\\
+    RFC~9457 fields: \texttt{type} (machine-readable URI), \texttt{title},
+    \texttt{status}, \texttt{detail}, \texttt{instance}, plus curated
+    extensions. Never stack traces, SQL, internal hostnames, or secrets.
+  \item \textbf{[mid] Semantic versioning for APIs: what breaks what?}\\
+    Removing or renaming fields, tightening types, changing semantics:
+    breaking, new major. Adding optional fields or new operations:
+    backward compatible, minor. Deprecating with a sunset date: policy,
+    not schema (Chapter~\ref{ch:versioning}).
+  \item \textbf{[mid] What is the N+1 problem in API composition?}\\
+    One list call followed by $n$ detail calls. It multiplies latency and
+    load; fix with batch endpoints, embedded expansions, or GraphQL-style
+    selection --- chosen consciously, since each trades server complexity
+    differently.
+  \item \textbf{[senior] Design retries correctly. What is the full
+    checklist?}\\
+    (1)~Only retry on retryable failures: transport errors, 429, 5xx ---
+    never 4xx semantics; (2)~only idempotent operations, or add
+    idempotency keys; (3)~bounded attempts (typically 3); (4)~exponential
+    backoff with full jitter; (5)~a retry budget so retries stay a small
+    fraction of traffic; (6)~respect \texttt{Retry-After}; (7)~the total
+    retry deadline must fit the caller's own latency budget.
+  \item \textbf{[senior] Explain Little's Law and one operational use.}\\
+    $C = \lambda L$: concurrency equals arrival rate times latency. Use:
+    if a dependency slows from 30\,ms to 30\,s at 100\,rps, in-flight
+    requests grow from 3 to 3000 --- you can compute the exact pool size
+    at which you die, which is why timeouts and bulkheads are sized from
+    this law.
+  \item \textbf{[senior] What is a circuit breaker and what state machine
+    does it run?}\\
+    Closed (normal) $\to$ Open (failing fast) after an error threshold
+    $\to$ Half-Open (probe with limited traffic) $\to$ Closed on success
+    or Open on failure. It converts slow failures into fast ones,
+    protecting both caller pools and the recovering dependency
+    \cite{nygard2018releaseit}.
+  \item \textbf{[senior] Error budget: what is it and how does it change
+    behavior?}\\
+    The allowed unreliability: $1 - \mathrm{SLO}$. At 99.9\% monthly, that
+    is 43.2 minutes (Equation~\eqref{eq:ch0-errorbudget}). Budget
+    remaining $\Rightarrow$ ship features; budget burning fast
+    $\Rightarrow$ freeze releases, invest in reliability. It turns the
+    reliability-vs-velocity argument into arithmetic \cite{beyer2016sre}.
+  \item \textbf{[senior] How do you make a POST safely retryable?}\\
+    Client generates an idempotency key per logical operation; server
+    stores (key, response) with a TTL and replays the stored response on
+    duplicate keys; unique constraints enforce exactly-once effects in
+    storage. Watch the races: concurrent first-delivery and retry must
+    serialize on the key (Chapter~\ref{ch:idempotency}).
+  \item \textbf{[senior] GraphQL vs.\ REST vs.\ gRPC: how do you choose?}\\
+    REST: public contracts, caching, broad interoperability. GraphQL:
+    many clients with divergent data needs, aggregating several backends,
+    at the cost of query-complexity governance. gRPC: internal
+    service-to-service, strict schemas, streaming, and low latency, at
+    the cost of browser and tooling friction. Choose per consumer, not
+    per fashion (Chapters \ref{ch:graphql}--\ref{ch:grpc}).
+  \item \textbf{[senior] What is backpressure and where does it appear in
+    APIs?}\\
+    A fast producer overwhelming a slow consumer. It appears as queue
+    growth: in connection pools, in async streams (SSE/WebSockets), and in
+    broker consumer lag. Controls: bounded queues, flow-control windows,
+    429/503 load shedding, and rate limiting upstream
+    (Chapter~\ref{ch:async_apis}).
+  \item \textbf{[senior] Walk through a webhook delivery system's failure
+    modes.}\\
+    Delivery is at-least-once, so consumers must be idempotent; ordering
+    is not guaranteed; the consumer's endpoint can be down (retry
+    schedule with backoff, dead-letter after $n$ attempts); payloads can
+    be spoofed (sign with HMAC, verify before parsing); and slow consumer
+    responses are backpressure on your fleet.
+  \item \textbf{[staff] How would you design an API platform's governance
+    so teams don't route around it?}\\
+    Make the compliant path the fastest path: templates that pass linting
+    by default, a catalog that gives discoverability in exchange for
+    metadata, CI gates that are fast and actionable, and an explicit,
+    time-boxed exception process. Governance that only says ``no'' gets
+    bypassed; governance that ships value gets adopted
+    (Chapter~\ref{ch:lifecycle}).
+  \item \textbf{[staff] A partner integrates against your API and you must
+    change a field's meaning. Walk the full process.}\\
+    You do not change meaning in place. Add the new field alongside the
+    old; publish the deprecation with a sunset date; measure usage of the
+    old field per consumer; contact stragglers through the developer
+    portal; dual-write/dual-read during transition; remove only after
+    sunset with usage at zero. Contract thinking turns a breaking change
+    into a managed migration (Chapters \ref{ch:versioning},
+    \ref{ch:lifecycle}).
+  \item \textbf{[staff] Your CEO asks for ``five-nines.'' What do you say?}\\
+    Five-nines is 5.26 minutes of downtime \emph{per year}. Price it:
+    multi-region active-active, chaos-tested failover, mature on-call,
+    and accepting that any single dependency with a weaker SLO caps you.
+    Show the marginal cost curve from 99.9 to 99.95 to 99.99 and let the
+    business buy the point it needs --- per user journey, not uniformly.
+  \item \textbf{[staff] How do you sunset a widely used public API with
+    minimal ecosystem damage?}\\
+    Announce early with a date and migration guide; sunset headers on
+    every response; staged brownouts (scheduled short outages) to flush
+    out silent consumers; direct outreach keyed off logs; a final
+    hard-stop date you actually honor. The goal is zero surprised
+    consumers, because surprised consumers write blog posts.
+\end{enumerate}
+%% ============================================================================
+\section{External Bibliography \& Further Reading}
+\label{sec:ch0-reading}
+
+\subsection{Foundational Books}
+\begin{itemize}
+  \item Roy T. Fielding, \emph{Architectural Styles and the Design of
+    Network-based Software Architectures} (2000) \cite{fielding2000rest} ---
+    the REST dissertation; read Chapter 5 before Chapter 3 of this book.
+  \item Martin Kleppmann, \emph{Designing Data-Intensive Applications}
+    \cite{kleppmann2017ddia} --- the distributed-systems foundation beneath
+    every failure mode in our taxonomy.
+  \item Betsy Beyer et al., \emph{Site Reliability Engineering}
+  \cite{beyer2016sre} --- SLOs, error budgets, and the
+    operational culture behind Module 4.
+  \item Michael T. Nygard, \emph{Release It!}, 2nd ed.
+    \cite{nygard2018releaseit} --- stability patterns and the canonical
+    timeout/bulkhead/circuit-breaker case studies.
+  \item Sam Newman, \emph{Building Microservices}, 2nd ed.
+    \cite{newman2021microservices} --- service decomposition and
+    inter-service communication for Chapters 11--15.
+  \item Lukas Gehl, \emph{API Design Patterns} \cite{gehl2021apidesign} ---
+    product-thinking and pattern language for API designers.
+\end{itemize}
+
+\subsection{Standards and Specifications}
+\begin{itemize}
+  \item RFC 9110, \emph{HTTP Semantics} \cite{rfc9110} --- the normative
+    reference for methods, status codes, and header fields.
+  \item RFC 9111, \emph{HTTP Caching}; RFC 9112, \emph{HTTP/1.1} ---
+    companions to RFC 9110 for Chapters 1 and 10.
+  \item RFC 9457, \emph{Problem Details for HTTP APIs} --- the error-format
+    standard implemented from Chapter 7 onward.
+  \item OpenAPI Specification 3.1 \cite{openapi31} --- the contract language
+    used from Chapter 4 onward.
+  \item The Twelve-Factor App \cite{twelvefactor} --- configuration and
+    operational principles assumed by our deployment chapters.
+  \item OWASP API Security Top 10 (2023) --- the threat catalog of
+    Chapter 16.
+\end{itemize}
+
+\subsection{Online Documentation and Courses}
+\begin{itemize}
+  \item FastAPI official documentation and tutorial --- the framework of
+    Module 2.
+  \item Python \texttt{http.server}, \texttt{urllib}, and \texttt{logging}
+    documentation --- the stdlib surfaces used in this chapter's listings.
+  \item Google SRE Workbook (online) --- worked SLO and alerting examples.
+  \item MDN Web Docs, \emph{HTTP} reference --- quick, accurate header and
+    status-code lookups.
+  \item \emph{Designing APIs} (public university API-economy courses and
+    conference tracks such as API City and apidays) --- current practice in
+    API product management and governance.
+\end{itemize}
+
+\subsection{Recommended Datasets (Synthetic Only)}
+\begin{itemize}
+  \item \textbf{Northwind Robotics catalog} (\texttt{datasets\textbackslash}):
+    parts, robots, and telemetry fixtures used throughout the labs;
+    entirely fictional, no real PII.
+  \item \textbf{Generated latency traces}: produce your own with the
+    benchmark harness (Listing~\ref{lst:ch0-bench}) --- real measurements
+    from your machine are the best dataset for evaluation exercises.
+  \item \textbf{Synthetic event streams} for Chapter 11: generated with
+    seeded randomness per that chapter's fixtures; never scraped or real
+    customer data.
+\end{itemize}
+
+%% ============================================================================
+\section{Capstone Projects}
+\label{sec:ch0-capstones}
+
+Five projects, one per difficulty band. Each is offline, stdlib-first, and
+built on the Northwind Robotics universe. These are portfolio pieces: keep
+them in git with measured results committed alongside the code.
+
+\subsection{Project 0.1 --- Contract Archaeology \textnormal{[junior]}}
+
+\textbf{Objective.} Reverse-engineer the complete contract of
+Listing~\ref{lst:ch0-miniapi} by observation alone, then write it down
+formally.
+
+\textbf{Inputs/Datasets.} The running mini API; the Northwind parts fixture
+embedded in it.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Probe every path and method combination; record status codes,
+        headers, and bodies.
+  \item Draft an informal OpenAPI-style description: paths, parameters,
+        response schemas, error shapes.
+  \item Deliberately trigger each failure mode and record its body.
+  \item Diff your contract against the source; note everything observation
+        could not reveal.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Written contract covers 100\% of paths and error bodies.
+  \item[$\square$] Each operation's failure semantics are enumerated.
+  \item[$\square$] A one-paragraph reflection names what black-box probing
+    cannot discover (e.g.\ retryability, rate limits).
+\end{itemize}
+
+\textbf{Stretch Goals.} Hand-write a valid OpenAPI 3.1 document for the API
+and validate it with a local linter.
+
+\subsection{Project 0.2 --- Honest Benchmarks \textnormal{[mid]}}
+
+\textbf{Objective.} Produce a defensible latency study of the mini API under
+three load shapes, exposing where averages and percentiles diverge.
+
+\textbf{Inputs/Datasets.} Listings \ref{lst:ch0-bench} and
+\ref{lst:ch0-miniapi}; self-generated latency traces.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Extend the harness to support concurrency via threads (keep the
+        protocol: warmup, $n \geq 200$, raw samples).
+  \item Run three configurations: sequential, 4 concurrent clients, 16
+        concurrent clients. Three repetitions each.
+  \item Report mean, p50, p95, p99, max, throughput, and error counts per
+        configuration in the addendum's benchmark-table format.
+  \item Quantify the divergence between mean and p99 as load rises.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Nine runs (3 configs $\times$ 3 reps) with raw samples
+    retained in CSV.
+  \item[$\square$] Written analysis: at what concurrency does p99 detach
+    from p50, and which budget stage (Equation~\eqref{eq:ch0-budget}) is
+    responsible?
+  \item[$\square$] One paragraph on why the mean understated user pain.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add payload-size as a variable and fit a simple
+model $L = a + b \cdot \text{bytes}$.
+
+\subsection{Project 0.3 --- Failure Taxonomy Field Guide \textnormal{[mid]}}
+
+\textbf{Objective.} Build a runnable gallery: one reproducible, scripted
+demonstration per taxonomy category, with detection evidence for each.
+
+\textbf{Inputs/Datasets.} The mini API; a second stdlib service you write to
+play ``flaky dependency.''
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Script five demos: transport (connection refused / hang), contract
+    (schema change), semantic (wrong-unit response), operational (injected
+    latency under load), security (missing authz check on an object).
+  \item For each, capture the client-visible symptom and the telemetry that
+    detects it (status codes, percentiles, logs).
+  \item Write the playbook entry an on-call engineer would follow.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Five scripts, each deterministic and offline.
+  \item[$\square$] Each demo maps symptom $\to$ category $\to$ detection
+    strategy per Table~\ref{tab:ch0-taxonomy}.
+  \item[$\square$] Playbook entries follow Section~\ref{sec:ch0-playbook}.
+\end{itemize}
+
+\textbf{Stretch Goals.} Package the flaky dependency as a reusable
+``chaos stub'' with configurable failure probabilities (seeded).
+
+\subsection{Project 0.4 --- Budgets and Breakers for the Mini API
+  \textnormal{[senior]}}
+
+\textbf{Objective.} Turn the mini API plus a slow dependency into a
+resilience demonstrator: timeouts, retry policy, circuit breaker, and an
+SLO with a live error-budget burn calculation.
+
+\textbf{Inputs/Datasets.} Mini API; your chaos stub from Project 0.3 (or a
+fresh one with configurable delay/failure injection).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Add a \texttt{/v1/price-check} endpoint that calls the dependency.
+  \item Implement client-side: 500\,ms connect / 2\,s read timeouts,
+        3-attempt backoff with jitter, and a closed/open/half-open breaker.
+  \item Define an SLI (non-5xx within 300\,ms) and a 99.9\% SLO; compute the
+        budget from Equation~\eqref{eq:ch0-errorbudget}.
+  \item Run a 10-minute scripted failure scenario; plot or tabulate budget
+        burn over time and show the breaker's effect.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Identical fault scenario run with and without protections;
+    the protected run shows materially lower p99 and error rate.
+  \item[$\square$] Error-budget computation shown from raw samples.
+  \item[$\square$] A post-incident report in the war-story format of
+    Section~\ref{sec:ch0-warstory}.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add a bulkhead (separate executor for the
+dependency call) and demonstrate isolation of an unrelated endpoint.
+
+\subsection{Project 0.5 --- API Platform Governance Starter
+  \textnormal{[staff]}}
+
+\textbf{Objective.} Design (and partially automate) the minimum governance
+plane that would hold a 20-team organization at maturity L2: catalogs,
+contract gates, ownership, and deprecation policy.
+
+\textbf{Inputs/Datasets.} Three or more of your own prior lab APIs as the
+``fleet''; the governance baseline of Section~\ref{sec:ch0-governance}.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Define the metadata schema for the catalog (owner, version, lifecycle
+        state, contract URI, SLO).
+  \item Write a linter (stdlib Python is fine) that scores each API's
+        contract document against your rules: has version, has problem
+        details, has pagination caps, declares auth scheme.
+  \item Author the deprecation policy: timelines, consumer notification,
+        sunset mechanics.
+  \item Produce a one-page ``maturity report'' per API with L-level and
+        next actions.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Catalog holds every lab API with complete metadata.
+  \item[$\square$] Linter runs offline and exits non-zero on violations
+    (CI-ready).
+  \item[$\square$] Deprecation policy includes measurable sunset criteria.
+  \item[$\square$] Maturity reports agree with a manual audit on at least
+    one API.
+\end{itemize}
+
+\textbf{Stretch Goals.} Generate a static HTML developer portal from the
+catalog (no frameworks; template strings are fine).
+
+%% ============================================================================
+\section{Python Dependencies Appendix}
+\label{sec:ch0-deps}
+
+This chapter's own listings are stdlib-only. The file below is the baseline
+\texttt{requirements.txt} for the whole book's companion environment; later
+chapters extend, never replace, it. Pin exactly as shown; the sanity check
+(Listing~\ref{lst:ch0-sanity}) verifies importability, not versions, so
+minor-version flexibility is acceptable in practice.
+
+\begin{minted}{text}
+# requirements.txt -- baseline environment for "Mastering APIs"
+# Python 3.11+ ; install with:  pip install -r requirements.txt
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+pytest==8.3.4
+\end{minted}
+
+\subsection{fastapi}
+
+\textbf{Description.} The ASGI web framework used from
+Chapter~\ref{ch:fastapi} onward for all provider-side services.
+
+\textbf{Why included.} Type-driven request validation, automatic OpenAPI 3.1
+generation \cite{openapi31}, and first-class async support make it the
+cleanest vehicle for teaching contract-first API design; its generated
+schemas plug directly into the contract-testing toolchain of
+Chapter~\ref{ch:testing}.
+
+\textbf{Alternatives.} Flask (simpler, but validation and OpenAPI are
+add-ons), Django REST Framework (heavier, ORM-coupled), Litestar (comparable,
+smaller ecosystem).
+
+\textbf{Installation.}
+\begin{minted}{text}
+pip install fastapi==0.115.6
+\end{minted}
+
+\subsection{uvicorn}
+
+\textbf{Description.} A minimal ASGI server that runs FastAPI applications.
+
+\textbf{Why included.} The reference server for every lab: one process, one
+command, deterministic startup on \texttt{127.0.0.1}. Chapter 17 replaces it
+behind a production gateway, where its single-process model is discussed
+honestly.
+
+\textbf{Alternatives.} Hypercorn (HTTP/2 support), Gunicorn with Uvicorn
+workers (POSIX-oriented process management), Daphne.
+
+\textbf{Installation.}
+\begin{minted}{text}
+pip install uvicorn==0.34.0
+\end{minted}
+
+\subsection{httpx}
+
+\textbf{Description.} A typed HTTP client (sync and async) with connection
+pooling, HTTP/2 support, and per-request timeouts.
+
+\textbf{Why included.} It is the consumer-side workhorse from
+Chapter~\ref{ch:consuming_python}: explicit timeout configuration, transport
+plug-ins for offline stubbing, and an API surface that mirrors the protocol
+concepts taught in Chapter~\ref{ch:http_wire} rather than hiding them.
+
+\textbf{Alternatives.} \texttt{urllib} (stdlib, used in this chapter to show
+the primitives), \texttt{requests} (synchronous only, less explicit about
+timeouts), \texttt{aiohttp} (async-first).
+
+\textbf{Installation.}
+\begin{minted}{text}
+pip install httpx==0.28.1
+\end{minted}
+
+\subsection{pydantic}
+
+\textbf{Description.} Data-validation library that parses untrusted input
+into typed Python models using standard type annotations.
+
+\textbf{Why included.} It is the concrete implementation of
+Chapter~\ref{ch:serialization}'s core idea --- validation at the system
+boundary with typed models --- and it powers FastAPI's request/response
+contracts. Its error output is also the raw material for RFC~9457 responses
+in Chapter~\ref{ch:problem_details}.
+
+\textbf{Alternatives.} \texttt{dataclasses} + manual validation (shown in
+this chapter for contrast), \texttt{marshmallow}, \texttt{msgspec}
+(faster, narrower).
+
+\textbf{Installation.}
+\begin{minted}{text}
+pip install pydantic==2.10.4
+\end{minted}
+
+\subsection{pytest}
+
+\textbf{Description.} The test runner used by every chapter's test suite.
+
+\textbf{Why included.} Deterministic, fixture-based tests are the book's
+acceptance mechanism; labs end with \texttt{pytest -q}, and
+Chapter~\ref{ch:testing} builds the full quality-engineering stack
+(contract, property-based, load) on top of it.
+
+\textbf{Alternatives.} \texttt{unittest} (stdlib; used in early offline
+drills where zero dependencies matter), \texttt{nose2} (unmaintained ---
+avoid).
+
+\textbf{Installation.}
+\begin{minted}{text}
+pip install pytest==8.3.4
+\end{minted}
+
+%% ============================================================================
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch0-summary}
+
+\begin{itemize}
+  \item An API is a \textbf{versioned contract}: operations,
+    representations, and failure semantics over a transport
+    (Definition~\ref{def:api}). Hold the product, contract, and
+    failure-surface mental models simultaneously.
+  \item Incidents classify into five categories --- transport, contract,
+    semantic, operational, security --- each with its own detection
+    strategy (Table~\ref{tab:ch0-taxonomy}). Classify before you mitigate.
+  \item Maturity climbs L0$\to$L4: scripts, documented REST, contract-tested
+    CI, resilient observable services, governed platform. Know where your
+    systems sit.
+  \item Latency is reported in percentiles under a stated load, never as a
+    bare average; budgets decompose per Equation~\eqref{eq:ch0-budget}, and
+    error budgets follow from SLOs (99.9\% monthly $=$ 43.2 minutes).
+  \item Every network call carries an explicit timeout; the war story of
+    Section~\ref{sec:ch0-warstory} is what happens when one does not.
+  \item The environment is offline-first, deterministic, typed, and
+    PowerShell-native; the sanity check gates every lab.
+  \item You now have a working stdlib API, client, and benchmark harness ---
+    the seed from which twenty-one chapters grow.
+\end{itemize}
+
+%% ============================================================================
+\section{Quick-Reference Card}
+\label{sec:ch0-quickref}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Item} & \textbf{Value / rule} \\
+    \midrule
+    API definition & Versioned contract: operations + representations +
+      failure semantics over a transport. \\
+    Failure taxonomy & Transport / contract / semantic / operational /
+      security --- classify, then mitigate. \\
+    Maturity levels & L0 scripts; L1 documented; L2 contract-tested CI;
+      L3 resilient + observable; L4 governed platform. \\
+    Latency reporting & p50 / p95 / p99, $n \geq 200$, warmup 50, state the
+      load; never averages alone. \\
+    Latency budget & $L = L_{TLS} + L_{queue} + L_{validate} + L_{logic} +
+      L_{serialize} + L_{egress}$. \\
+    Error budget & $1 - \mathrm{SLO}$; 99.9\%/month $=$ 43.2 min;
+      99.95\% $=$ 21.6 min; 99.99\% $=$ 4.32 min. \\
+    Timeouts & Explicit connect + read timeout on every call; no defaults
+      trusted. \\
+    Retries & Bounded (3), exponential backoff + jitter, idempotent ops
+      only, honor \texttt{Retry-After}. \\
+    Little's Law & $C = \lambda L$: concurrency $=$ rate $\times$ latency. \\
+    STRIDE & Spoofing, Tampering, Repudiation, Information disclosure,
+      Denial of service, Elevation of privilege. \\
+    Environment & \texttt{python -m venv .venv} then
+      \texttt{.\textbackslash .venv\textbackslash Scripts\textbackslash
+      Activate.ps1}; run the sanity check before any lab. \\
+    Golden rules & Offline-first; deterministic; stdlib-first; synthetic
+      data only; PowerShell-native docs. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Chapter 0 quick-reference card.}
+  \label{tab:ch0-quickref}
+\end{table}
+
+\input{chapters/_standard_addendum}

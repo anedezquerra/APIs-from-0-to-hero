@@ -1,0 +1,13 @@
+{
+  "name": "inventory.low_stock",
+  "description": "Stock dropped below the reorder point (valid signature).",
+  "scheme": "HMAC-SHA256 over '<timestamp>.<body>'; header X-Northwind-Signature: t=<ts>,v1=<hex>",
+  "signing_key_file": "TEST-ONLY_signing_key.txt",
+  "timestamp": 1772496000,
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Northwind-Signature": "t=1772496000,v1=88f56d7ac65f3432ffa5d6d0d2bcceb6fa482060963ac4eae980bb8eb6056388"
+  },
+  "body": "{\"id\":\"evt_01JNRWT0003SYNTHETIC000003\",\"type\":\"inventory.low_stock\",\"created\":\"2026-03-03T00:00:00Z\",\"data\":{\"part_id\":\"P-00142\",\"warehouse_id\":\"W-04\",\"on_hand\":37,\"reorder_point\":120}}",
+  "expected_verification": "pass"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "orders.created (tampered)",
+  "description": "Negative test: signature was tampered with; verification MUST fail.",
+  "scheme": "HMAC-SHA256 over '<timestamp>.<body>'; header X-Northwind-Signature: t=<ts>,v1=<hex>",
+  "signing_key_file": "TEST-ONLY_signing_key.txt",
+  "timestamp": 1772064000,
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Northwind-Signature": "t=1772064000,v1=0d4e9420964a130b260ecee3c3ede91f5311a1888c7841bd9d900d18b029b1fe"
+  },
+  "body": "{\"id\":\"evt_01JNRWT0004SYNTHETIC000004\",\"type\":\"orders.created\",\"created\":\"2026-02-26T00:00:00Z\",\"data\":{\"order_id\":\"O-100099\",\"customer_id\":\"C-0003\",\"status\":\"pending\",\"total_cents\":9900,\"currency\":\"USD\",\"region\":\"EU\"}}",
+  "expected_verification": "fail"
+}

@@ -1,0 +1,3679 @@
+%% ============================================================================
+%% Chapter 15: Microservices & Resilient Inter-Service Communication
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Microservices \& Resilient Inter-Service Communication}
+\label{ch:microservices}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Splitting a monolith into services does not remove coupling; it moves it
+from the compiler's reach, where it is cheap and visible, onto the network,
+where it is expensive, latent, and partially observable. A method call that
+used to take nanoseconds and fail only when the process died now takes
+milliseconds, fails in at least five distinguishable ways, and --- this is
+the part that hurts --- sometimes \emph{does not fail at all}, it merely
+gets slow, and slow is worse than down because slow consumes the caller's
+resources while offering no error to react to. This chapter is about
+engineering that reality rather than discovering it during an incident.
+
+We begin with the communication taxonomy: synchronous request/response
+(REST, gRPC) versus asynchronous messaging (queues, event streams), and
+orchestration versus choreography as the two ways to coordinate multi-step
+work. We then make coupling precise along three dimensions ---
+\emph{temporal} (must both parties be up simultaneously?), \emph{spatial}
+(must the caller know where the callee lives?), and \emph{logical} (must
+both agree on schema and semantics?) --- and apply the eight fallacies of
+distributed computing as a checklist to every API call you write. The
+fallacies are not trivia; each one maps to a production failure mode with a
+name, a metric, and a mitigation.
+
+The resilience core of the chapter treats five patterns with the rigor they
+deserve. Timeouts come first, because every other pattern is built on the
+assumption that failure detection is bounded; we derive the deadline budget
+rule $T_{\text{caller}} > \sum T_{\text{hops}}$ and show what breaks when it
+is violated. The circuit breaker is specified as a formal state machine ---
+\textsc{closed}, \textsc{open}, \textsc{half\_open}, with a rolling failure
+window, explicit thresholds, and recovery probes --- not as a vibes-based
+``it stops calling the broken thing.'' Bulkheads isolate failure domains by
+partitioning thread pools, connection pools, and concurrency permits.
+Hedged requests attack tail latency and we price their amplification
+honestly. Backpressure closes the loop by giving overloaded systems a way
+to say no upstream.
+
+Two phenomena get full mathematical treatment. \emph{Retry amplification}:
+we prove that an $n$-hop chain in which each hop issues $a$ attempts per
+call multiplies one client request into $a\,(a^{n}-1)/(a-1)$ downstream
+requests --- with three attempts per hop across three hops, that is $39\times$
+load from a single user click (Theorem~\ref{thm:ch15-retry-amplification})
+--- and we show how token-bucket retry budgets and jittered, deadline-aware
+backoff cap the damage. \emph{Cascading failure}: we walk the death spiral
+stage by stage, from a latency blip through pool exhaustion, queue buildup,
+and retry storms to fleet-wide outage, with a failure-mode analysis table
+that maps each stage to its early signal and its countermeasure.
+
+The architectural second half covers service discovery and load balancing
+(client-side, server-side, DNS, registries), the service mesh (sidecar
+proxies, mTLS identity, data plane versus control plane --- and a blunt
+account of what the mesh does \emph{not} fix, namely your application
+semantics), and distributed transactions without two-phase commit: sagas
+with compensating actions, the transactional outbox, idempotent consumers,
+and how to expose eventual consistency honestly in your API contracts. Every
+claim is executable: five typed Python~3.11 listings --- a production-grade
+circuit breaker, a retry-budget client, a three-service chaos drill, a
+SQLite-backed outbox with relay, and a saga orchestrator --- run fully
+offline with deterministic tests, in the Northwind Robotics universe.
+
+\begin{keyconceptbox}
+Resilience is a \textbf{budget discipline}, not a library. Every outbound
+call spends three budgets: \emph{time} (deadline), \emph{concurrency}
+(bulkhead permits), and \emph{retry allowance} (token bucket). A call site
+that cannot say how much of each budget it may spend is an unpriced risk.
+The circuit breaker then enforces the meta-rule: when a dependency proves
+it cannot honor its budget, stop paying until it recovers.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch15-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able
+to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Classify any inter-service interaction along the synchronous /
+        asynchronous axis and the orchestration / choreography axis, and
+        decompose its coupling into temporal, spatial, and logical
+        dimensions with a concrete decoupling tactic for each.
+  \item Apply the eight fallacies of distributed computing as a design
+        review checklist, naming the failure mode and the metric that
+        exposes each fallacy when an API call ignores it.
+  \item Derive deadline budgets across multi-hop call chains
+        ($T_{\text{caller}} > \sum T_{\text{hops}}$), choose timeout values
+        from measured latency distributions, and explain why a timeout
+        longer than the caller's is worse than no timeout.
+  \item Derive the retry-amplification formula
+        $S(n, a) = a\,(a^{n}-1)/(a-1)$
+        (Theorem~\ref{thm:ch15-retry-amplification}), and design retry
+        policies --- budgets, full jitter, deadlines, server-driven
+        throttling --- that provably cap amplification.
+  \item Specify, implement, and test a circuit breaker as a formal state
+        machine: rolling failure window, minimum-call floors, open
+        duration, half-open probe limits, and recovery thresholds.
+  \item Choose and combine bulkheads, hedged requests, and backpressure
+        mechanisms for a given dependency, including the tail-amplification
+        cost of hedging.
+  \item Trace a cascading failure stage by stage, attach an early-warning
+        signal and a countermeasure to each stage, and run a chaos drill
+        that measures --- not asserts --- the protection a breaker buys.
+  \item Evaluate service discovery and load-balancing topologies
+        (client-side, server-side, DNS, registry) and articulate precisely
+        which concerns a service mesh absorbs (mTLS, retries, telemetry,
+        traffic policy) and which it cannot (idempotency, sagas, schema
+        semantics).
+  \item Replace distributed transactions with sagas, compensating actions,
+        the transactional outbox, and idempotent consumers, and present the
+        resulting eventual-consistency boundaries honestly in API contracts.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes Chapters~0--14 and leans hardest on four of them:
+consuming HTTP APIs in Python, including \texttt{httpx} clients, timeouts,
+and transports (Chapter~\ref{ch:consuming_python}); idempotency keys and
+concurrency control, which become \emph{load-bearing} once retries and
+at-least-once delivery enter the picture (Chapter~\ref{ch:idempotency});
+gRPC, whose deadlines, status codes, and streaming flow control recur
+throughout (Chapter~\ref{ch:grpc}); and rate limiting, whose token-bucket
+machinery we reuse verbatim for retry budgets
+(Chapter~\ref{ch:rate_limiting}). Familiarity with building FastAPI
+services (Chapter~\ref{ch:fastapi}) and with asynchronous, event-driven API
+styles (Chapter~\ref{ch:async_apis}) is assumed in the code sections. All
+listings run offline on Python~3.11+; install the dependencies from
+Section~\ref{sec:ch15-deps} once, from PowerShell.
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch15-mechanics}
+
+\subsection{A Taxonomy of Inter-Service Communication}
+\label{subsec:ch15-taxonomy}
+
+Every interaction between two services answers four design questions,
+whether or not anyone asked them. First, \emph{does the caller block?}
+Synchronous communication (REST over HTTP, gRPC) holds the caller's
+execution until a response or a timeout arrives; asynchronous communication
+(queues, event streams) hands the work to an intermediary and returns.
+Second, \emph{who knows the workflow?} In \textbf{orchestration} a
+designated coordinator issues commands in sequence and owns the process
+state; in \textbf{choreography} each service reacts to events and emits new
+ones, and the workflow exists only as the emergent sum of those reactions.
+Third, \emph{how many consumers?} Request/response is inherently
+point-to-point; event streams are naturally one-to-many. Fourth,
+\emph{what is the consistency promise?} Synchronous chains pretend toward
+immediacy; asynchronous pipelines admit, and should advertise, eventual
+consistency.
+
+\begin{definition}[Orchestration and choreography]
+\label{def:ch15-orch-choreo}
+A multi-service workflow is \textbf{orchestrated} when one component (the
+orchestrator) explicitly invokes each participant in a known order and
+tracks overall progress. It is \textbf{choreographed} when no component
+knows the whole workflow: each participant subscribes to domain events,
+acts, and publishes its own events, and the workflow is the composition of
+those local reactions~\cite{newman2021microservices}.
+\end{definition}
+
+Neither coordination style is a resilience pattern by itself; they differ in
+\emph{where failure is managed}. An orchestrator can retry, compensate, and
+report a single workflow status --- at the cost of being a stateful
+component you must make highly available. Choreography removes the
+coordinator as a bottleneck and a single point of failure, but scatters
+workflow state across event logs and inboxes, making ``what is the status
+of order ORD-7?'' a query you must deliberately engineer (a read model, a
+status API) rather than a row you can \texttt{SELECT}. Production systems
+mix both: orchestration inside a bounded context (the order saga of
+Listing~\ref{lst:ch15-saga}), choreography across context boundaries
+(order-placed events fanning out to analytics, notifications, and fraud
+screening).
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Dimension} & \textbf{Synchronous (REST/gRPC)} & \textbf{Asynchronous (queue/stream)} \\
+    \midrule
+    Caller blocked & Yes, until response/timeout & No; hand-off to broker \\
+    Temporal coupling & High: both must be up & Low: broker buffers downtime \\
+    Failure surface & Timeouts, 5xx, partial response & Duplicates, reordering, lag, poison messages \\
+    Latency profile & Additive across hops & Broker hop + consumer pacing \\
+    Workflow visibility & Trace IDs across calls & Event correlation, read models \\
+    Best for & Queries, user-facing commands & Fan-out, long work, smoothing load \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Synchronous versus asynchronous inter-service communication.}
+  \label{tab:ch15-sync-async}
+\end{table}
+
+\subsection{Coupling Dimensions and the Fallacies of Distributed Computing}
+\label{subsec:ch15-coupling}
+
+``Loosely coupled'' is a slogan until you decompose it. Three dimensions
+cover most of what matters between services.
+
+\begin{definition}[Coupling dimensions]
+\label{def:ch15-coupling}
+Two services are \textbf{temporally coupled} if a call requires both to be
+healthy at the same instant; \textbf{spatially coupled} if the caller must
+know the callee's network location (host, port, instance identity);
+\textbf{logically coupled} if they must agree on schemas, semantics, and
+deployment cadence to interoperate.
+\end{definition}
+
+Asynchronous messaging attacks temporal coupling directly --- the broker
+holds the message while the consumer is down --- and, combined with a
+registry, spatial coupling too. Logical coupling is the stubborn one:
+schema registries, consumer-driven contracts, and explicit versioning
+(Chapter~\ref{ch:versioning}) manage it but never eliminate it, because
+semantics live in code on both sides. A useful design-review question for
+every integration: \emph{which of the three couplings does this call site
+have, and is that deliberate?}
+
+The eight fallacies of distributed computing, first catalogued by Peter
+Deutsch and colleagues at Sun Microsystems, read like a list of things
+engineers believe precisely until their first major incident. Applied to
+inter-service API calls:
+
+\begin{enumerate}
+  \item \emph{The network is reliable.} Packets vanish; TCP connections
+        half-open; the callee may process your request and lose the
+        response. Consequence: you often cannot distinguish ``not done''
+        from ``done but unacknowledged'' --- which is why idempotency keys
+        (Chapter~\ref{ch:idempotency}) are a prerequisite for safe retries,
+        not an optional garnish.
+  \item \emph{Latency is zero.} In-process calls cost nanoseconds; network
+        calls cost milliseconds, with a tail that is 10--100$\times$ the
+        median. Tail latency, not the mean, sets your timeout budget.
+  \item \emph{Bandwidth is infinite.} Chatty fine-grained APIs that were
+        free inside a process become serialization and egress bills across
+        a network. Coarse-grained payloads and pagination
+        (Chapter~\ref{ch:pagination}) exist because of this fallacy.
+  \item \emph{The network is secure.} Every hop is a trust boundary; mTLS
+        and service identity (Section~\ref{subsec:ch15-mesh}) replace the
+        fiction of a trusted LAN.
+  \item \emph{Topology doesn't change.} Autoscaling, rolling deploys, and
+        container rescheduling move your callees constantly; hardcoded
+        addresses are latent outages (spatial coupling again).
+  \item \emph{There is one administrator.} Your dependency is run by
+        another team with its own deploy cadence, SLOs, and incidents;
+        version skew is the steady state, not an anomaly.
+  \item \emph{Transport cost is zero.} Serialization, encryption, and
+        proxying burn CPU on both sides; meshes add hops. Measure the tax.
+  \item \emph{The network is homogeneous.} Mixed client libraries, proxy
+        generations, and TLS stacks mean the wire contract --- headers,
+        status codes, HTTP semantics (Chapter~\ref{ch:http_wire}) --- is
+        the only thing you can truly rely on.
+\end{enumerate}
+
+\begin{warningbox}
+The most dangerous sentence in microservice design is ``it is just an
+internal call.'' Internality does not repeal the fallacies; it usually
+means \emph{fewer} timeouts, retries, and contracts than the public API
+gets. Apply the same discipline inward that you would demand of a
+third-party integration --- your VPC is still a network.
+\end{warningbox}
+
+\subsection{Timeouts Everywhere, and How to Budget Them}
+\label{subsec:ch15-timeouts}
+
+A call without a timeout is a promise to wait forever, and ``forever'' is
+the one deadline production will always accept. Timeouts are the foundation
+every other pattern in this chapter stands on: the circuit breaker's
+failure counter is fed mostly by timeout expirations; bulkheads only help
+if blocked workers are eventually released; retry budgets assume each
+attempt has a bounded cost.
+
+Timeout selection is a measurement exercise, not a guess. Take the
+dependency's latency distribution under realistic load --- not the mean,
+the tail --- and set the timeout at a high percentile with headroom, e.g.\
+$p99.9$ plus a margin, then validate with the chaos drill of
+Section~\ref{sec:ch15-lab}. Too tight and you convert slow successes into
+failures (and retries, and amplification); too loose and you hold resources
+past the point where the caller still cares.
+
+The structural rule is the \textbf{deadline budget}: a caller's timeout
+must exceed the sum of the budgets it grants downstream, or the chain
+guarantees wasted work.
+
+\begin{definition}[Deadline budget rule]
+\label{def:ch15-deadline}
+For a call chain $C_0 \to C_1 \to \dots \to C_n$ where $T_i$ is the timeout
+$C_{i-1}$ applies to its call to $C_i$, correct budgeting requires
+$T_i > \sum_{j>i} T_j$ for every hop --- equivalently, budgets shrink
+strictly toward the leaves. gRPC makes this explicit by propagating a
+\emph{deadline} (an absolute timestamp) in metadata, so every hop derives
+its remaining budget instead of re-guessing~\cite{grpcdocs}.
+\end{definition}
+
+Concretely, for the Northwind Robotics catalog chain: the public API grants
+the catalog request a $2\,\mathrm{s}$ end-to-end deadline; catalog budgets
+$800\,\mathrm{ms}$ for its inventory call; inventory budgets
+$400\,\mathrm{ms}$ for warehouse; warehouse budgets $200\,\mathrm{ms}$ for
+its database. Each layer keeps headroom for serialization, queuing, and its
+own logic. Section~\ref{sec:ch15-pitfalls} catalogs what happens when a
+middle hop violates the rule (a timeout \emph{longer} than the caller's):
+the caller abandons the request while the callee keeps working --- the
+definition of waste, and under load, of cascading failure.
+
+\subsection{The Mathematics of Retry Amplification}
+\label{subsec:ch15-retry-math}
+
+Retries are the first resilience tool everyone reaches for and the first
+amplifier of every outage. The amplification is multiplicative across hops,
+and it is worth deriving once, carefully, because the numbers are startling
+enough to change design instincts.
+
+\begin{theorem}[Retry amplification in an $n$-hop chain]
+\label{thm:ch15-retry-amplification}
+Consider a call chain of $n$ hops $C_0 \to C_1 \to \dots \to C_n$. Suppose
+each service $C_i$ ($i < n$), upon receiving a call, issues up to $a$
+attempts to $C_{i+1}$ when attempts fail ($a = 1 + r$ for $r$ retries).
+Then one client request at $C_0$ generates up to $a^k$ calls arriving at
+hop $k$, and the total number of downstream requests in the system is
+\[
+  S(n, a) \;=\; \sum_{k=1}^{n} a^{k} \;=\; a\,\frac{a^{n} - 1}{a - 1}.
+\]
+\end{theorem}
+
+\begin{proof}
+By induction on the hop index. One request arrives at $C_0$ (base of the
+chain receives the client call). Each call arriving at $C_i$ independently
+triggers up to $a$ calls to $C_{i+1}$, so if $L_k$ denotes the number of
+calls arriving at hop $k$, then $L_{k+1} = a \cdot L_k$ with $L_0 = 1$,
+giving $L_k = a^k$. The system-wide total is the geometric sum
+$\sum_{k=1}^{n} a^k = a(a^n - 1)/(a - 1)$.
+\end{proof}
+
+The canonical numbers: a three-hop chain (edge $\to$ catalog $\to$
+inventory $\to$ warehouse) in which every hop issues up to three attempts
+($a = 3$: one initial try plus two retries) produces up to
+$3 + 9 + 27 = 39$ downstream requests per client request --- a $39\times$
+load multiplier from a single user action, with the leaf service absorbing
+$27\times$. If ``three retries'' means three retries \emph{beyond} the
+first attempt ($a = 4$), the total is $4 + 16 + 64 = 84$. During an
+outage, when failure rates approach $100\%$, these maxima are not worst-case
+theory; they are the expected case.
+
+\begin{proposition}[Retry budgets cap amplification]
+\label{prop:ch15-budget-cap}
+Let each client process hold a token bucket of capacity $B$ where every
+retry (not every attempt) consumes one token. Then regardless of configured
+\texttt{max\_retries}, the attempts issued per logical request are bounded
+by $1 + B$, and the steady-state retry rate is bounded by the refill rate.
+Amplification becomes a controlled parameter, not an emergent property.
+\end{proposition}
+
+The proof is immediate --- a token must exist for a retry to start --- but
+the consequences are deep: the budget converts retries from a per-request
+decision into a \emph{per-process allocation problem}, which is the only
+granularity at which ``how much extra load may this client add'' is
+answerable. Listing~\ref{lst:ch15-retry-budget} implements exactly this,
+and Listing~\ref{lst:ch15-retry-budget-tests} proves the cap: configured
+for five retries against an always-failing dependency, a client with a
+two-token budget issues three requests and stops.
+
+Three more disciplines complete the anti-amplification toolkit.
+\textbf{Jitter}: if $N$ clients fail together at time $t$ and all sleep the
+same deterministic backoff, they re-arrive together at $t + \Delta$ and
+re-collide; \emph{full jitter}, drawing the sleep uniformly from
+$[0, \min(c, b \cdot 2^{k})]$, decorrelates the herd while preserving the
+exponential envelope. \textbf{Deadline awareness}: a retry whose backoff
+would overshoot the caller's remaining deadline is a retry that cannot
+help; skip it (Listing~\ref{lst:ch15-retry-budget} raises
+\texttt{RetryDeadlineExceededError} rather than donating doomed work
+downstream). \textbf{Server-driven throttling}: when the server says 429 or
+503 with \texttt{Retry-After}, that signal outranks the client's local
+schedule --- the server has information the client lacks, and honoring it
+is what turns a thundering herd into an orderly queue
+(Chapter~\ref{ch:rate_limiting}).
+
+\subsection{The Circuit Breaker, Specified Formally}
+\label{subsec:ch15-breaker}
+
+The circuit breaker, named by Nygard~\cite{nygard2018releaseit}, wraps a
+dependency in a state machine that substitutes fast, cheap, honest failure
+for slow, expensive, resource-consuming failure. Everyone can draw the
+three states; production-grade breakers are distinguished by what the
+diagram leaves out: \emph{what counts} as a failure, \emph{how many}
+observations are required before the statistics mean anything, \emph{who}
+is allowed to test recovery, and \emph{when} old evidence expires.
+
+\begin{definition}[Circuit breaker]
+\label{def:ch15-breaker}
+A circuit breaker is a per-dependency state machine over
+$\{\textsc{closed}, \textsc{open}, \textsc{half\_open}\}$ with parameters
+$(\theta, W, N, d, p, s)$: failure-rate threshold $\theta \in (0,1]$,
+rolling window $W$ seconds, minimum call count $N$, open duration $d$,
+probe concurrency limit $p$, and probe successes $s$ required to close.
+Transitions: \textsc{closed} $\to$ \textsc{open} when the window holds at
+least $N$ calls with failure rate $\ge \theta$; \textsc{open} $\to$
+\textsc{half\_open} when $d$ seconds have elapsed since opening;
+\textsc{half\_open} $\to$ \textsc{closed} after $s$ consecutive probe
+successes; \textsc{half\_open} $\to$ \textsc{open} on any probe failure.
+While \textsc{open}, calls are rejected immediately without touching the
+dependency.
+\end{definition}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth, node distance=2.9cm]
+  \node[flowstep, minimum width=3.1cm, align=center] (closed)
+    {\textbf{CLOSED}\\ traffic flows\\ rolling window counts};
+  \node[flowstep, minimum width=3.1cm, align=center, right=3.4cm of closed] (open)
+    {\textbf{OPEN}\\ reject fast\\ no dependency calls};
+  \node[flowstep, minimum width=3.4cm, align=center]
+    at ($(closed)!0.5!(open) + (0,-3.0)$) (half)
+    {\textbf{HALF\_OPEN}\\ admit $\le p$ probes\\ measure recovery};
+  \draw[->, thick] (closed) to[bend left=18]
+    node[above, align=center] {failure rate $\ge \theta$\\ over $\ge N$ calls in $W$} (open);
+  \draw[->, thick] (open) to[bend left=18]
+    node[below, align=center] {$t \ge t_{\text{open}} + d$} (half);
+  \draw[->, thick, packtorange] (half) to[bend left=18]
+    node[below right=-2pt, align=left] {probe failure\\ (dependency still sick)} (open);
+  \draw[->, thick, darkblue] (half) to[bend right=18]
+    node[below left=-2pt, align=right] {$s$ consecutive\\ probe successes} (closed);
+  \node[note, align=center] at ($(closed) + (0,-1.5)$)
+    {window evicts observations older than $W$};
+  \node[note, align=center] at ($(open) + (0,-1.5)$)
+    {rejection cost $\approx$ 0;\\ caller falls back or 503s};
+\end{tikzpicture}
+\caption{Circuit breaker state machine with the parameters of
+Definition~\ref{def:ch15-breaker}. The half-open state is the recovery
+probe mechanism: a strictly limited number of trial calls decide whether
+the dependency has healed before normal traffic resumes.}
+\label{fig:ch15-breaker-fsm}
+\end{figure}
+
+Four specification details do the real work. \textbf{Minimum calls} $N$
+prevents statistical noise from tripping the breaker: two failures out of
+two calls at 3~a.m.\ must not open a circuit that carries ten thousand
+calls a minute at noon. \textbf{The rolling window} $W$ makes the decision
+a statement about the \emph{recent} past; a tumbling window would let a
+burst of failures at the boundary hide in one window and vanish in the
+next. \textbf{Probe limits} $p$ and $s$ make recovery gradual --- one probe
+at a time, several successes before closing --- because a dependency that
+has just recovered is usually fragile, and a stampede of pent-up traffic is
+how recoveries become second outages. \textbf{One breaker per dependency}:
+the breaker's state is a hypothesis about \emph{a specific} downstream
+resource; sharing one breaker across two dependencies makes a sick
+dependency poison a healthy one (Section~\ref{sec:ch15-pitfalls}).
+
+While open, the breaker reduces load on the sick dependency from this
+caller to approximately zero --- $p$ probe calls per open duration $d$ ---
+which is precisely the headroom the dependency needs to finish recovery.
+The caller, meanwhile, must decide what rejection \emph{means}: fail the
+request (503 with a problem-details body, Chapter~\ref{ch:problem_details}),
+degrade gracefully (serve a cached or partial answer), or queue for later.
+The breaker decides \emph{when} to stop calling; the application still owns
+\emph{what happens instead}.
+
+\subsection{Bulkheads, Hedged Requests, and Backpressure}
+\label{subsec:ch15-bulkheads}
+
+\textbf{Bulkheads} partition resources so that one dependency's failure
+cannot consume the capacity needed by everything else --- named, like the
+breaker, for shipbuilding, via~\cite{nygard2018releaseit}. In practice a
+bulkhead is any of: a dedicated connection pool per dependency (an
+\texttt{httpx} client per downstream, with its own \texttt{Limits}), a
+semaphore bounding concurrent calls into one dependency (the
+\texttt{BULKHEAD\_PERMITS} of Listing~\ref{lst:ch15-demo}), or a separate
+worker pool per workload class. The sizing rule: permits for dependency $d$
+should be at most what $d$ can healthily serve, and the sum of all permit
+pools must leave capacity for everything else the process does --- health
+checks, metrics, other endpoints. A bulkhead that is larger than the
+process's total capacity is decorative.
+
+\textbf{Hedged requests} attack tail latency: if a call has not answered
+within the latency budget's $p95$--$p99$, issue a second, identical call to
+a different replica and take whichever answers first. The trade-off is
+explicit --- you trade a bounded amount of extra load for a large reduction
+in tail latency. If the hedge fires when the first call exceeds delay $h$,
+and $\Pr[T > h] = q$, expected load per request becomes $1 + q$; with
+$q = 0.05$ that is a 5\% tax for cutting the $p99$ dramatically. The
+corollaries are mandatory: hedge only idempotent operations (or carry
+idempotency keys), cancel or disregard the loser, and never hedge while the
+breaker is open --- hedging into a sick dependency is amplification with a
+marketing budget.
+
+\textbf{Backpressure} is the mechanism by which an overloaded component
+pushes load back upstream instead of collapsing silently. Its forms:
+explicit rejection (429/503 with \texttt{Retry-After}), bounded queues that
+fail fast when full (an unbounded queue is not a buffer; it is a latency
+generator with a memory leak), credit-based flow control (HTTP/2 stream
+windows, gRPC flow control~\cite{grpcdocs}), and consumer-side pacing in
+event systems (consumer lag \emph{is} the backpressure signal; Chapter
+\ref{ch:async_apis}). A system without backpressure converts overload into
+latency for everyone; a system with backpressure converts it into rejection
+for some --- which is what makes the difference between a degraded service
+and a dead one.
+
+\subsection{Anatomy of a Cascading Failure}
+\label{subsec:ch15-cascade}
+
+Cascading failures are the reason this chapter exists. They are also
+boringly predictable: the same stages, in the same order, in incident
+review after incident review. Figure~\ref{fig:ch15-cascade} shows the
+spiral; Table~\ref{tab:ch15-failure-modes} attaches signals and
+countermeasures.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  \node[flowstep, minimum width=5.6cm, align=left] (s1)
+    {\textbf{1. Latency blip} --- dependency slows (GC, disk, neighbor)};
+  \node[flowstep, minimum width=5.6cm, align=left, below=0.35cm of s1] (s2)
+    {\textbf{2. Workers block} --- in-flight calls hold threads,\\ connections, memory};
+  \node[flowstep, minimum width=5.6cm, align=left, below=0.35cm of s2] (s3)
+    {\textbf{3. Pools exhaust} --- no free workers; new requests queue};
+  \node[flowstep, minimum width=5.6cm, align=left, below=0.35cm of s3] (s4)
+    {\textbf{4. Queues build} --- latency rises further; memory pressure,\\ GC churn; health checks start timing out};
+  \node[flowstep, minimum width=5.6cm, align=left, below=0.35cm of s4] (s5)
+    {\textbf{5. Timeouts fire, retries multiply} --- $a^{n}$ amplification\\ (Theorem~\ref{thm:ch15-retry-amplification}) hits the sick tier};
+  \node[flowstep, minimum width=5.6cm, align=left, below=0.35cm of s5] (s6)
+    {\textbf{6. Death spiral} --- callers saturate, load balancers eject\\ and re-add flapping instances; outage spreads upstream};
+  \foreach \a/\b in {s1/s2, s2/s3, s3/s4, s4/s5, s5/s6}{
+    \draw[->, thick] (\a) -- (\b);
+  }
+  \draw[->, thick, packtorange, dashed] (s5.west) to[out=180, in=180]
+    node[left, align=right, text=packtorange] {feedback:\\ retries make\\ stage 1 worse} (s1.west);
+  \node[note, right=0.5cm of s1, align=left] {signal: $p99 \nearrow$, error rate flat};
+  \node[note, right=0.5cm of s2, align=left] {signal: in-flight gauge $\nearrow$};
+  \node[note, right=0.5cm of s3, align=left] {signal: pool wait time $\nearrow$};
+  \node[note, right=0.5cm of s4, align=left] {signal: queue depth, heap, GC time};
+  \node[note, right=0.5cm of s5, align=left] {signal: retry rate, downstream $QPS \gg$ client $QPS$};
+  \node[note, right=0.5cm of s6, align=left] {signal: multi-service SLO burn};
+\end{tikzpicture}
+\caption{The cascading-failure death spiral. Each stage feeds the next, and
+the retry stage feeds back into the first. Every stage has an observable
+early-warning signal and a pattern that breaks the chain
+(Table~\ref{tab:ch15-failure-modes}).}
+\label{fig:ch15-cascade}
+\end{figure}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X l}
+    \toprule
+    \textbf{Stage} & \textbf{Early signal} & \textbf{Countermeasure} & \textbf{Where} \\
+    \midrule
+    Latency blip & $p99$ latency rises, errors flat & tight per-hop timeouts & \ref{subsec:ch15-timeouts} \\
+    Workers block & in-flight calls gauge climbs & bounded concurrency & \ref{subsec:ch15-bulkheads} \\
+    Pools exhaust & pool checkout wait $> 0$ & bulkheads per dependency & \ref{subsec:ch15-bulkheads} \\
+    Queues build & queue depth, GC time climb & bounded queues, load shedding & \ref{subsec:ch15-bulkheads} \\
+    Retry storm & downstream QPS $\gg$ client QPS & retry budgets, jitter, breakers & \ref{subsec:ch15-retry-math} \\
+    Death spiral & correlated multi-service burn & all of the above, drilled & \ref{sec:ch15-lab} \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Failure-mode analysis: each stage of the spiral, its observable
+  precursor, and the pattern that breaks the chain.}
+  \label{tab:ch15-failure-modes}
+\end{table}
+
+Two properties make the spiral treacherous. First, \emph{each stage is
+locally rational}: waiting a little longer, queueing a little more, and
+retrying once are all defensible decisions in isolation; the catastrophe is
+a property of the composition. Second, \emph{recovery is not symmetric with
+collapse}: a service that fell over under load $L$ cannot usually be
+restarted into load $L$ --- it must be brought back behind a breaker, a
+load shedder, or a traffic ramp, or it will fall over again immediately.
+The Google SRE book's chapter on cascading failures makes the same point
+with considerably larger blast radii; the mechanics are identical at
+Northwind Robotics scale.
+
+\subsection{Service Discovery and Load Balancing}
+\label{subsec:ch15-discovery}
+
+Resilience patterns assume a \emph{pool} of interchangeable backends behind
+each logical dependency; discovery and load balancing are how that pool is
+maintained and used. The design space has three axes: who resolves
+addresses, who picks an instance, and how membership health is known.
+
+\textbf{Server-side load balancing} puts a dedicated load balancer between
+callers and the pool: clients resolve one stable virtual address (usually
+via DNS) and the balancer owns health checking, instance selection, and
+connection management. Simple for clients, operationally centralized --- and
+an extra network hop and a component that must itself be made redundant.
+\textbf{Client-side load balancing} gives every client the instance list
+(from a registry such as Consul, Eureka, or Kubernetes' API) and lets the
+client library pick: fewer hops, per-client policy (weighted, zone-aware,
+hedged), at the cost of embedding the logic --- and its bugs --- into every
+client, in every language you support. \textbf{DNS-based discovery} is the
+lowest common denominator: SRV or A records per service, resolved by the
+client's stub resolver. It works everywhere and updates nowhere near fast
+enough for rapid membership churn, because TTLs cache staleness into the
+system by design.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    & \textbf{Server-side LB} & \textbf{Client-side LB} & \textbf{DNS-based} \\
+    \midrule
+    Extra hop & Yes & No & No \\
+    Client complexity & None & High & Low \\
+    Policy flexibility & Centralized & Per-client, rich & Nearly none \\
+    Membership freshness & Fast (active health checks) & Fast (registry watch) & Slow (TTL-bound) \\
+    Failure domain & LB tier & Each client & Resolver cache \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Discovery and load-balancing topologies.}
+  \label{tab:ch15-discovery}
+\end{table}
+
+Whichever topology you choose, the resilience-critical property is
+\emph{health-check fidelity}: an instance must be removed from rotation
+when it is actually failing to serve (not merely when it fails to respond
+to a ping), and re-added gradually, because a freshly started instance hit
+with a full share of traffic is stage one of Figure~\ref{fig:ch15-cascade}
+all over again.
+
+\subsection{Service Mesh: Data Plane versus Control Plane}
+\label{subsec:ch15-mesh}
+
+A service mesh extracts cross-cutting communication concerns --- discovery,
+load balancing, mTLS, retries, timeouts, telemetry --- from application code
+into infrastructure. The canonical architecture is a fleet of \textbf{sidecar
+proxies} (Envoy being the reference implementation) forming the
+\textbf{data plane}: every packet in or out of a service transits its local
+sidecar, so policy executes one hop from the application, without the
+application's cooperation or knowledge. Above them sits the \textbf{control
+plane} (Istio, Linkerd's control components), which distributes
+configuration --- routes, retry policies, certificates, load-balancing
+subsets --- and aggregates telemetry, but never touches a request byte.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % ---- control plane ----
+  \node[flowstep, minimum width=9.6cm, align=center, fill=lightgray] (cp)
+    {\textbf{Control plane} (e.g.\ Istio) --- config distribution, certificate authority,\\ policy API, telemetry aggregation. \emph{Not on the request path.}};
+  % ---- data plane: two services with sidecars ----
+  \node[flowstep, align=center, below=1.6cm of cp, xshift=-2.6cm, minimum width=2.4cm] (appA)
+    {\textbf{catalog}\\ (app)};
+  \node[flowstep, align=center, right=0.3cm of appA, minimum width=2.4cm, fill=blue!8] (scA)
+    {\textbf{sidecar}\\ Envoy};
+  \node[flowstep, align=center, right=2.2cm of scA, minimum width=2.4cm, fill=blue!8] (scB)
+    {\textbf{sidecar}\\ Envoy};
+  \node[flowstep, align=center, right=0.3cm of scB, minimum width=2.4cm] (appB)
+    {\textbf{inventory}\\ (app)};
+  \node[draw=packtgray, dashed, rounded corners, inner sep=6pt,
+        fit=(appA)(scA)(scB)(appB)] (dp) {};
+  \node[modcap, below=0.05cm of dp] {data plane --- request path};
+  % ---- edges ----
+  \draw[<->, thick] (appA) -- (scA);
+  \draw[<->, thick] (scB) -- (appB);
+  \draw[<->, very thick, darkblue] (scA) --
+    node[above, align=center] {mTLS: workload identity\\ retries, timeouts, LB, telemetry}
+    node[below, align=center, note] {HTTP/2 (or gRPC) between proxies} (scB);
+  \draw[->, dashed, packtgray] (cp.south -| scA) -- (scA.north);
+  \draw[->, dashed, packtgray] (cp.south -| scB) -- (scB.north);
+  \node[note, rotate=0, anchor=west] at ($(cp.south -| scB) + (0.15,-0.6)$)
+    {xDS config, cert rotation};
+\end{tikzpicture}
+\caption{Service mesh anatomy. The data plane (sidecar proxies) executes
+traffic policy on the request path: mTLS identity, retries, timeouts,
+load balancing, telemetry. The control plane distributes configuration and
+certificates but never touches a request.}
+\label{fig:ch15-mesh}
+\end{figure}
+
+Three mesh capabilities matter for this chapter. \textbf{mTLS identity}:
+each workload receives a short-lived cryptographic identity (a SPIFFE-style
+verifiable ID), and the sidecars mutually authenticate and encrypt every
+hop --- fallacy four handled by default, with identity-based authorization
+(``catalog may call inventory'') replacing network-location-based trust.
+\textbf{Data-plane traffic policy}: retries, timeouts, circuit breaking
+(Envoy calls it outlier detection plus connection-pool circuit breakers),
+and load balancing execute identically for every service regardless of
+language, which eliminates the ``every team re-implements resilience
+slightly wrong'' problem. \textbf{Uniform telemetry}: golden signals per
+hop, with consistent labels, emitted by the proxy rather than by
+application diligence.
+
+\begin{warningbox}
+The mesh does \textbf{not} fix application semantics. It cannot make your
+endpoints idempotent, cannot choose your saga compensations, cannot version
+your schemas, cannot know which failures are safe to retry (mesh-level
+retries of a non-idempotent POST are exactly as dangerous as client-level
+ones), and cannot budget your deadlines end-to-end --- it sees hops, not
+user requests. Teams that adopt a mesh and delete Chapter-10--15 discipline
+from their services get a beautifully observable, mutually authenticated
+cascading failure.
+\end{warningbox}
+
+\subsection{Distributed Transactions without 2PC}
+\label{subsec:ch15-transactions}
+
+A single database gives you ACID; five services give you a choice of which
+letter to sacrifice. Two-phase commit (2PC) --- a coordinator asks all
+participants to \emph{prepare}, then commits only if all agree --- is
+theoretically tidy and operationally avoided: it is blocking (a coordinator
+crash leaves participants holding locks in-doubt until recovery), it
+couples the availability of the whole to the availability of every
+participant, and its chatty prepare/commit rounds multiply latency across
+exactly the network boundaries this chapter has spent its length
+mistrusting~\cite{kleppmann2017ddia}. Over HTTP, where participants cannot
+even hold a lock-shaped resource across stateless requests, 2PC is an
+anti-pattern on arrival (Section~\ref{sec:ch15-pitfalls}).
+
+The pragmatic replacement is the \textbf{saga}: a sequence of local
+transactions $T_1, \dots, T_n$, each with a \textbf{compensating action}
+$C_i$ that semantically undoes $T_i$ --- \emph{semantically}, because the
+world has moved on: you cannot un-send an email, but you can send a
+correction; you cannot un-charge a card, but you can refund it.
+
+\begin{definition}[Saga]
+\label{def:ch15-saga}
+A saga is a sequence of local transactions $T_1, \dots, T_n$ with
+compensating actions $C_1, \dots, C_{n-1}$ such that if $T_k$ fails, the
+system executes $C_{k-1}, \dots, C_1$ in reverse order. The saga provides
+\emph{atomicity of outcome} (all steps complete, or all completed steps are
+compensated) without isolation: intermediate states are visible to other
+requests between steps.
+\end{definition}
+
+Sagas come in the two coordination flavors of
+Definition~\ref{def:ch15-orch-choreo}. A \emph{choreographed} saga has each
+step emit events that trigger the next participant --- simple for two or
+three steps, then increasingly difficult to reason about, because the
+compensation graph lives in nobody's code. An \emph{orchestrated} saga puts
+the sequence, the state, and the compensation logic in one explicit
+component (Listing~\ref{lst:ch15-saga}), which is why orchestration is the
+default recommendation once a flow has more than a couple of steps or any
+step with a non-trivial compensation.
+
+Two plumbing patterns make sagas reliable rather than aspirational. The
+\textbf{transactional outbox} solves the dual-write problem --- ``update my
+database \emph{and} emit an event'' cannot be done atomically against two
+systems, so you don't: in one local transaction you write the domain row
+\emph{and} an outbox row; a separate relay reads the outbox and publishes,
+marking each event published only after the broker accepts it
+(Listing~\ref{lst:ch15-outbox}). The guarantee is \textbf{at-least-once}
+delivery: a crash between publish and mark replays the event, which is why
+the second pattern, the \textbf{idempotent consumer}, is not optional ---
+the consumer records processed event IDs in the same transaction as its
+state change, so replays are absorbed
+(Chapter~\ref{ch:idempotency} generalizes this to request scopes).
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % ---- top: orchestrated saga ----
+  \node[flowstep, minimum width=2.5cm, align=center] (orch)
+    {\textbf{saga}\\ \textbf{orchestrator}};
+  \node[flowstep, minimum width=2.6cm, align=center, right=1.5cm of orch] (t1)
+    {$T_1$ reserve\\ inventory};
+  \node[flowstep, minimum width=2.6cm, align=center, right=1.1cm of t1] (t2)
+    {$T_2$ charge\\ payment};
+  \node[flowstep, minimum width=2.6cm, align=center, right=1.1cm of t2] (t3)
+    {$T_3$ schedule\\ shipment};
+  \draw[->, thick] (orch) -- (t1);
+  \draw[->, thick] (orch.north east) to[out=30, in=150] (t2.north west);
+  \draw[->, thick] (orch.north east) to[out=35, in=150] (t3.north west);
+  \draw[->, thick] (t1) -- node[above, note] {ok} (t2);
+  \draw[->, thick] (t2) -- node[above, note] {ok} (t3);
+  \draw[->, thick, packtorange] (t3.south) to[out=-90, in=-90]
+    node[below, align=center, text=packtorange]
+    {on failure: compensate in reverse --- $C_2$ refund, $C_1$ release}
+    (t1.south);
+  \node[modcap, left=0.35cm of orch] {orchestrated saga};
+  % ---- bottom: outbox flow ----
+  \node[flowstep, align=left, below=2.3cm of orch, minimum width=3.3cm] (svc)
+    {\textbf{order service}\\ domain write};
+  \node[flowstep, align=left, right=1.1cm of svc, minimum width=3.6cm] (db)
+    {\textbf{DB (one tx)}\\ \texttt{orders} + \texttt{outbox} rows};
+  \node[flowstep, align=left, right=1.1cm of db, minimum width=2.5cm] (relay)
+    {\textbf{relay}\\ poll + publish\\ + mark};
+  \node[flowstep, align=left, right=1.1cm of relay, minimum width=2.8cm] (cons)
+    {\textbf{consumer}\\ idempotent\\ (dedup table)};
+  \draw[->, thick] (svc) -- (db);
+  \draw[->, thick] (db) -- node[above, note] {unpublished} (relay);
+  \draw[->, thick] (relay) --
+    node[above, align=center, note] {at-least-once\\ (crash $\Rightarrow$ replay)} (cons);
+  \node[modcap, left=0.35cm of svc] {transactional outbox};
+\end{tikzpicture}
+\caption{Saga orchestration and the transactional outbox. Top: the
+orchestrator drives steps in order and compensates in reverse on failure.
+Bottom: the domain write and the outbox insert commit atomically; the relay
+publishes at-least-once; the idempotent consumer absorbs replays.}
+\label{fig:ch15-saga-outbox}
+\end{figure}
+
+\begin{examplebox}
+\textbf{Presenting eventual consistency in an API.} A client
+\texttt{POST /orders} against the saga system gets
+\texttt{202 Accepted} with a \texttt{Location: /orders/ORD-7} header and a
+body containing \texttt{"status": "PLACED"} and a
+\texttt{"status\_url"} poll target. The order resource exposes its saga
+state machine honestly: \texttt{PLACED $\to$ PAID $\to$ SHIPPED}, or
+\texttt{COMPENSATED} with a machine-readable \texttt{failure\_reason} and a
+\texttt{refund\_status}. What the API must never do is return
+\texttt{201 Created} with \texttt{"status": "CONFIRMED"} while shipment is
+still pending --- consistency boundaries you hide become incident pages
+someone else writes.
+\end{examplebox}
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch15-code}
+
+All five subsystems below run offline on Python~3.11+ against in-process
+ASGI transports --- no sockets, no containers, no cloud. Determinism is
+structural: time enters through injected clocks, concurrency is bounded by
+semaphores and coordinated with events and barriers, and every assertion is
+on counts and states, never on wall-clock duration. Install once, from
+PowerShell, using the requirements of Section~\ref{sec:ch15-deps}:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pytest -q
+python demo_services.py
+\end{minted}
+
+\subsection{Circuit Breaker: Full State Machine, Sync and Async}
+\label{subsec:ch15-code-breaker}
+
+Listing~\ref{lst:ch15-breaker} implements
+Definition~\ref{def:ch15-breaker} without compromise: a rolling
+\texttt{deque} of timestamped outcomes with lazy eviction, a minimum-call
+floor before the failure rate is even evaluated, lazy
+\textsc{open}~$\to$~\textsc{half\_open} transition driven by the injected
+clock, bounded concurrent probes, a configurable number of consecutive probe
+successes to close, and a metrics hook that emits \texttt{call\_success},
+\texttt{call\_failure}, \texttt{rejected}, and \texttt{state\_change}
+events --- the hook is how you will watch the drill in
+Section~\ref{sec:ch15-lab}. The sync \texttt{call} and async \texttt{acall}
+share one state machine; late completions from calls admitted before a
+transition are ignored so probe accounting stays exact. Note the deliberate
+absence of wall-clock reads: \texttt{SystemClock} is the production default,
+and tests inject \texttt{ManualClock}.
+
+\noindent\textbf{Listing 15.1 --- \texttt{circuit\_breaker.py}:
+production-grade circuit breaker with injected clock and metrics hooks.}
+\label{lst:ch15-breaker}
+\begin{minted}{python}
+"""Production-grade circuit breaker: full state machine, rolling failure
+window, half-open probes, metrics hooks, sync + async support.
+
+Deterministic: time comes from an injected ``Clock``; tests drive a manual
+clock. No wall-clock reads inside the state machine.
+"""
+from __future__ import annotations
+
+import threading
+import time
+from collections import deque
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Protocol, TypeVar
+
+T = TypeVar("T")
+
+
+class Clock(Protocol):
+    """Monotonic time source, in seconds."""
+
+    def now(self) -> float: ...
+
+
+class SystemClock:
+    """Production clock backed by ``time.monotonic``."""
+
+    def now(self) -> float:
+        return time.monotonic()
+
+
+class BreakerState(str, Enum):
+    CLOSED = "closed"        # traffic flows; failures are counted
+    OPEN = "open"            # traffic is rejected without touching the dependency
+    HALF_OPEN = "half_open"  # a limited number of probe calls are admitted
+
+
+class CircuitOpenError(RuntimeError):
+    """Raised by ``call``/``acall`` when the breaker refuses the call."""
+
+
+@dataclass(frozen=True, slots=True)
+class BreakerConfig:
+    """Tuning knobs for one circuit breaker.
+
+    failure_rate_threshold:      open when failures / calls >= this, in (0, 1]
+    window_seconds:              rolling observation window length
+    minimum_calls:               window is not evaluated until this many calls
+    open_duration:               seconds to stay open before the first probe
+    half_open_max_probes:        concurrent probe calls admitted in half-open
+    half_open_success_threshold: consecutive probe successes required to close
+    """
+
+    failure_rate_threshold: float = 0.5
+    window_seconds: float = 30.0
+    minimum_calls: int = 10
+    open_duration: float = 5.0
+    half_open_max_probes: int = 1
+    half_open_success_threshold: int = 1
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.failure_rate_threshold <= 1.0:
+            raise ValueError("failure_rate_threshold must be in (0, 1]")
+        if self.window_seconds <= 0 or self.open_duration <= 0:
+            raise ValueError("window_seconds and open_duration must be > 0")
+        if self.minimum_calls < 1 or self.half_open_max_probes < 1:
+            raise ValueError("minimum_calls and half_open_max_probes must be >= 1")
+        if self.half_open_success_threshold < 1:
+            raise ValueError("half_open_success_threshold must be >= 1")
+
+
+MetricsHook = Callable[[str, dict[str, Any]], None]
+
+
+class CircuitBreaker:
+    """A circuit breaker guarding exactly ONE dependency.
+
+    States and transitions (Section 3.5 of the chapter):
+
+        CLOSED  --[window failure rate >= threshold]--> OPEN
+        OPEN    --[open_duration elapsed]------------> HALF_OPEN
+        HALF_OPEN --[probe success x threshold]------> CLOSED
+        HALF_OPEN --[probe failure]------------------> OPEN
+
+    Thread-safe for the sync path; the async path is safe on a single
+    event loop. Late completions of calls admitted before a state change
+    are ignored, which keeps probe accounting exact.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        config: BreakerConfig | None = None,
+        *,
+        clock: Clock | None = None,
+        on_event: MetricsHook | None = None,
+        is_failure: Callable[[BaseException], bool] | None = None,
+    ) -> None:
+        if not name:
+            raise ValueError("breaker name is required (one breaker per dependency)")
+        self._name = name
+        self._config = config or BreakerConfig()
+        self._clock: Clock = clock if clock is not None else SystemClock()
+        self._on_event = on_event
+        # Caller-fault exceptions (e.g. ValueError from validation) can be
+        # excluded by supplying is_failure; they count as successes here.
+        self._is_failure = is_failure or (lambda exc: True)
+        self._state = BreakerState.CLOSED
+        self._opened_at = 0.0
+        self._window: deque[tuple[float, bool]] = deque()
+        self._probes_in_flight = 0
+        self._probe_successes = 0
+        self._lock = threading.Lock()
+
+    # ---- observability -------------------------------------------------
+    @property
+    def state(self) -> BreakerState:
+        with self._lock:
+            self._maybe_half_open(self._clock.now())
+            return self._state
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        if self._on_event is not None:
+            self._on_event(event, {"breaker": self._name, **fields})
+
+    # ---- state machine internals (call with self._lock held) ------------
+    def _transition(self, to: BreakerState, now: float) -> None:
+        if to is self._state:
+            return
+        previous = self._state
+        self._state = to
+        if to is BreakerState.OPEN:
+            self._opened_at = now
+        if to is BreakerState.HALF_OPEN:
+            self._probes_in_flight = 0
+            self._probe_successes = 0
+        self._emit("state_change", previous=previous.value, current=to.value)
+
+    def _maybe_half_open(self, now: float) -> None:
+        if (
+            self._state is BreakerState.OPEN
+            and now - self._opened_at >= self._config.open_duration
+        ):
+            self._transition(BreakerState.HALF_OPEN, now)
+
+    def _evict(self, now: float) -> None:
+        horizon = now - self._config.window_seconds
+        while self._window and self._window[0][0] <= horizon:
+            self._window.popleft()
+
+    def _admit(self) -> bool:
+        """Return True if the admitted call is a half-open probe."""
+        with self._lock:
+            now = self._clock.now()
+            self._maybe_half_open(now)
+            if self._state is BreakerState.OPEN:
+                self._emit("rejected", state=self._state.value)
+                raise CircuitOpenError(
+                    f"circuit {self._name!r} is OPEN; call rejected fast"
+                )
+            if self._state is BreakerState.HALF_OPEN:
+                if self._probes_in_flight >= self._config.half_open_max_probes:
+                    self._emit("rejected", state=self._state.value)
+                    raise CircuitOpenError(
+                        f"circuit {self._name!r} is HALF_OPEN; probe limit reached"
+                    )
+                self._probes_in_flight += 1
+                return True
+            return False
+
+    def _after_call(self, *, success: bool, probe: bool) -> None:
+        with self._lock:
+            now = self._clock.now()
+            self._emit(
+                "call_success" if success else "call_failure",
+                probe=probe,
+                state=self._state.value,
+            )
+            if probe:
+                self._probes_in_flight -= 1
+                if success:
+                    self._probe_successes += 1
+                    if (
+                        self._probe_successes
+                        >= self._config.half_open_success_threshold
+                    ):
+                        self._window.clear()
+                        self._transition(BreakerState.CLOSED, now)
+                else:
+                    # One failed probe is enough: the dependency is still sick.
+                    self._transition(BreakerState.OPEN, now)
+                return
+            if self._state is not BreakerState.CLOSED:
+                return  # admitted before a transition; late completion ignored
+            self._window.append((now, success))
+            self._evict(now)
+            if len(self._window) >= self._config.minimum_calls:
+                failures = sum(1 for _, ok in self._window if not ok)
+                if failures / len(self._window) >= self._config.failure_rate_threshold:
+                    self._transition(BreakerState.OPEN, now)
+
+    # ---- public API ------------------------------------------------------
+    def call(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        """Run ``fn`` through the breaker (synchronous path)."""
+        probe = self._admit()
+        try:
+            result = fn(*args, **kwargs)
+        except BaseException as exc:
+            self._after_call(success=not self._is_failure(exc), probe=probe)
+            raise
+        self._after_call(success=True, probe=probe)
+        return result
+
+    async def acall(self, fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
+        """Run an awaitable through the breaker (asyncio path)."""
+        probe = self._admit()
+        try:
+            result = await fn(*args, **kwargs)
+        except BaseException as exc:
+            self._after_call(success=not self._is_failure(exc), probe=probe)
+            raise
+        self._after_call(success=True, probe=probe)
+        return result
+\end{minted}
+
+Listing~\ref{lst:ch15-breaker-tests} proves the documented behavior with a
+manual clock: threshold opening at exactly $N$ calls, fail-fast rejection
+(the dependency is never invoked while open --- asserted via a counting
+stub), the probe protocol (early probe rejected, success closes, failure
+reopens and restarts the open duration), the single-concurrent-probe limit
+enforced with a real thread blocked on an event, rolling-window eviction,
+caller-fault classification, event ordering, and the async path.
+
+\noindent\textbf{Listing 15.2 --- \texttt{test\_circuit\_breaker.py}:
+deterministic state-machine proofs.}
+\label{lst:ch15-breaker-tests}
+\begin{minted}{python}
+"""Deterministic tests for the circuit breaker (injected manual clock)."""
+from __future__ import annotations
+
+import asyncio
+import threading
+
+import pytest
+
+from circuit_breaker import (
+    BreakerConfig,
+    BreakerState,
+    CircuitBreaker,
+    CircuitOpenError,
+)
+
+
+class ManualClock:
+    """Virtual clock: nothing happens unless the test advances it."""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self._now = start
+
+    def now(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        if seconds < 0:
+            raise ValueError("time only moves forward")
+        self._now += seconds
+
+
+def make_breaker(**overrides) -> tuple[CircuitBreaker, ManualClock, list]:
+    clock = ManualClock()
+    events: list[tuple[str, dict]] = []
+    config = BreakerConfig(
+        failure_rate_threshold=overrides.get("failure_rate_threshold", 0.5),
+        window_seconds=overrides.get("window_seconds", 10.0),
+        minimum_calls=overrides.get("minimum_calls", 4),
+        open_duration=overrides.get("open_duration", 5.0),
+        half_open_max_probes=overrides.get("half_open_max_probes", 1),
+        half_open_success_threshold=overrides.get("half_open_success_threshold", 1),
+    )
+    breaker = CircuitBreaker(
+        "inventory",
+        config,
+        clock=clock,
+        on_event=lambda event, fields: events.append((event, fields)),
+    )
+    return breaker, clock, events
+
+
+def boom() -> None:
+    raise ConnectionError("inventory unreachable")
+
+
+def test_closed_breaker_passes_calls_through() -> None:
+    breaker, _, _ = make_breaker()
+    assert breaker.state is BreakerState.CLOSED
+    assert breaker.call(lambda: 42) == 42
+
+
+def test_opens_when_failure_rate_threshold_is_reached() -> None:
+    breaker, _, events = make_breaker()
+    # 4 calls, 2 failures -> exactly 0.5 failure rate at minimum_calls.
+    breaker.call(lambda: "ok")
+    with pytest.raises(ConnectionError):
+        breaker.call(boom)
+    with pytest.raises(ConnectionError):
+        breaker.call(boom)
+    assert breaker.state is BreakerState.CLOSED  # 2/3 < window minimum
+    breaker.call(lambda: "ok")
+    assert breaker.state is BreakerState.OPEN  # 2/4 = 0.5 -> open
+    assert any(e == "state_change" and f["current"] == "open" for e, f in events)
+
+
+def test_open_breaker_rejects_without_calling_the_dependency() -> None:
+    breaker, _, _ = make_breaker()
+    for _ in range(2):
+        breaker.call(lambda: "ok")
+        with pytest.raises(ConnectionError):
+            breaker.call(boom)
+    assert breaker.state is BreakerState.OPEN
+    calls = 0
+
+    def counted() -> int:
+        nonlocal calls
+        calls += 1
+        return calls
+
+    for _ in range(10):
+        with pytest.raises(CircuitOpenError):
+            breaker.call(counted)
+    assert calls == 0  # fail-fast: the dependency was never touched
+
+
+def test_half_open_probe_success_closes_breaker() -> None:
+    breaker, clock, _ = make_breaker()
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            breaker.call(boom)
+        with pytest.raises(ConnectionError):
+            breaker.call(boom)
+    assert breaker.state is BreakerState.OPEN
+    clock.advance(4.9)
+    with pytest.raises(CircuitOpenError):
+        breaker.call(lambda: "too early")
+    clock.advance(0.2)  # now past open_duration
+    assert breaker.state is BreakerState.HALF_OPEN
+    assert breaker.call(lambda: "recovered") == "recovered"
+    assert breaker.state is BreakerState.CLOSED
+
+
+def test_half_open_probe_failure_reopens() -> None:
+    breaker, clock, _ = make_breaker(minimum_calls=2, failure_rate_threshold=1.0)
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            breaker.call(boom)
+    assert breaker.state is BreakerState.OPEN
+    clock.advance(5.0)
+    with pytest.raises(ConnectionError):
+        breaker.call(boom)  # probe fails
+    assert breaker.state is BreakerState.OPEN
+    # Reopened: the full open_duration restarts from now.
+    clock.advance(4.9)
+    with pytest.raises(CircuitOpenError):
+        breaker.call(lambda: "still closed to traffic")
+
+
+def test_half_open_admits_only_one_concurrent_probe() -> None:
+    breaker, clock, _ = make_breaker(minimum_calls=2, failure_rate_threshold=1.0)
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            breaker.call(boom)
+    clock.advance(5.0)
+
+    release = threading.Event()
+    probe_started = threading.Event()
+
+    def slow_probe() -> str:
+        probe_started.set()
+        assert release.wait(timeout=5.0)
+        return "healed"
+
+    result: list[str] = []
+    worker = threading.Thread(
+        target=lambda: result.append(breaker.call(slow_probe)), daemon=True
+    )
+    worker.start()
+    assert probe_started.wait(timeout=5.0)  # probe is in flight
+    with pytest.raises(CircuitOpenError):
+        breaker.call(lambda: "second probe")  # probe limit = 1
+    release.set()
+    worker.join(timeout=5.0)
+    assert result == ["healed"]
+    assert breaker.state is BreakerState.CLOSED
+
+
+def test_rolling_window_ages_out_old_failures() -> None:
+    breaker, clock, _ = make_breaker(window_seconds=10.0, minimum_calls=4)
+    # Two failures, then the window slides past them.
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            breaker.call(boom)
+    clock.advance(11.0)
+    breaker.call(lambda: "ok")
+    breaker.call(lambda: "ok")
+    breaker.call(lambda: "ok")
+    breaker.call(lambda: "ok")
+    assert breaker.state is BreakerState.CLOSED  # failures evicted: 0/4 rate
+
+
+def test_caller_fault_exceptions_count_as_successes() -> None:
+    clock = ManualClock()
+    breaker = CircuitBreaker(
+        "catalog",
+        BreakerConfig(minimum_calls=2, failure_rate_threshold=0.5),
+        clock=clock,
+        is_failure=lambda exc: isinstance(exc, ConnectionError),
+    )
+    for _ in range(5):
+        with pytest.raises(ValueError):
+            breaker.call(lambda: (_ for _ in ()).throw(ValueError("bad input")))
+    assert breaker.state is BreakerState.CLOSED
+
+
+def test_metrics_hook_receives_events_in_order() -> None:
+    breaker, _, events = make_breaker(minimum_calls=2, failure_rate_threshold=1.0)
+    with pytest.raises(ConnectionError):
+        breaker.call(boom)
+    with pytest.raises(ConnectionError):
+        breaker.call(boom)
+    with pytest.raises(CircuitOpenError):
+        breaker.call(lambda: "rejected")
+    names = [name for name, _ in events]
+    assert names == ["call_failure", "call_failure", "state_change", "rejected"]
+
+
+def test_async_path_uses_the_same_state_machine() -> None:
+    clock = ManualClock()
+
+    async def main() -> None:
+        breaker = CircuitBreaker(
+            "warehouse",
+            BreakerConfig(minimum_calls=2, failure_rate_threshold=1.0),
+            clock=clock,
+        )
+
+        async def ok() -> str:
+            return "fine"
+
+        async def bad() -> str:
+            raise ConnectionError("down")
+
+        with pytest.raises(ConnectionError):
+            await breaker.acall(bad)
+        with pytest.raises(ConnectionError):
+            await breaker.acall(bad)
+        assert breaker.state is BreakerState.OPEN
+        with pytest.raises(CircuitOpenError):
+            await breaker.acall(ok)
+        clock.advance(5.0)
+        assert await breaker.acall(ok) == "fine"
+        assert breaker.state is BreakerState.CLOSED
+
+    asyncio.run(main())
+\end{minted}
+
+\subsection{Retry-Budget Client: Token Bucket, Full Jitter, Deadlines}
+\label{subsec:ch15-code-retry}
+
+Listing~\ref{lst:ch15-retry-budget} turns
+Proposition~\ref{prop:ch15-budget-cap} into code. The first attempt is
+always free; each retry spends one token from a process-wide bucket; the
+bucket refills at a configured rate, so \emph{sustained} retry traffic is
+rate-limited even when \emph{bursts} are tolerated. Backoff ceilings grow
+exponentially and are jittered by an injectable jitter function (the default
+production choice is full jitter over a seeded \texttt{random.Random});
+\texttt{no\_jitter} exists for deterministic tests. The deadline rule of
+Definition~\ref{def:ch15-deadline} is enforced client-side: if the next
+backoff would overshoot the call deadline, the client raises
+\texttt{RetryDeadlineExceededError} instead of donating doomed work
+downstream.
+
+\noindent\textbf{Listing 15.3 --- \texttt{retry\_budget.py}:
+budgeted, jittered, deadline-aware retry client.}
+\label{lst:ch15-retry-budget}
+\begin{minted}{python}
+"""Retry-budgeted HTTP client: token-bucket retry budget + jittered
+backoff + deadline awareness.
+
+Design rules implemented (Section 3.4):
+  * The first attempt is free; every RETRY spends one budget token.
+  * Tokens refill at a fixed rate, so steady-state retry traffic cannot
+    exceed ``budget_refill_per_second`` retries/s process-wide.
+  * Backoff is exponential with full jitter from a seeded RNG.
+  * A call-level deadline caps total elapsed (virtual) time; a retry that
+    would overshoot the deadline is never attempted.
+"""
+from __future__ import annotations
+
+import random
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+import httpx
+
+
+class Clock(Protocol):
+    def now(self) -> float: ...
+    def sleep(self, seconds: float) -> None: ...
+
+
+class SystemClock:
+    def now(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+class ManualClock:
+    """Virtual clock for deterministic tests; ``sleep`` advances it."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = start
+
+    def now(self) -> float:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        if seconds < 0:
+            raise ValueError("cannot sleep for a negative duration")
+        self._now += seconds
+
+
+class RetryBudgetExhaustedError(RuntimeError):
+    """The token bucket is empty: this retry would exceed the retry budget."""
+
+
+class RetryDeadlineExceededError(RuntimeError):
+    """The next backoff sleep would overshoot the call deadline."""
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    max_retries: int = 3                      # retries, not attempts
+    base_backoff: float = 0.05                # seconds; delay = base * 2**attempt
+    max_backoff: float = 1.0
+    deadline_seconds: float = 5.0             # whole-call deadline
+    budget_tokens: float = 10.0               # bucket capacity (burst)
+    budget_refill_per_second: float = 2.0     # sustained retry allowance
+    retry_statuses: frozenset[int] = frozenset({429, 502, 503, 504})
+
+    def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        if self.base_backoff <= 0 or self.max_backoff < self.base_backoff:
+            raise ValueError("require 0 < base_backoff <= max_backoff")
+        if self.deadline_seconds <= 0:
+            raise ValueError("deadline_seconds must be > 0")
+        if self.budget_tokens < 0 or self.budget_refill_per_second <= 0:
+            raise ValueError("budget parameters must be non-negative/positive")
+
+
+class TokenBucketRetryBudget:
+    """Process-wide retry budget. Tokens are spent ONLY by retries."""
+
+    def __init__(self, capacity: float, refill_per_second: float, clock: Clock) -> None:
+        if capacity <= 0 or refill_per_second <= 0:
+            raise ValueError("capacity and refill_per_second must be > 0")
+        self._capacity = capacity
+        self._rate = refill_per_second
+        self._clock = clock
+        self._tokens = capacity
+        self._last = clock.now()
+
+    def _refill(self) -> None:
+        now = self._clock.now()
+        self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+        self._last = now
+
+    def consume(self) -> bool:
+        self._refill()
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
+    @property
+    def tokens(self) -> float:
+        self._refill()
+        return self._tokens
+
+
+# Full jitter (AWS Architecture Blog style): uniform in [0, computed cap].
+def full_jitter(rng: random.Random) -> Callable[[float], float]:
+    def apply(ceiling: float) -> float:
+        return rng.uniform(0.0, ceiling)
+
+    return apply
+
+
+def no_jitter(ceiling: float) -> float:
+    return ceiling
+
+
+@dataclass(slots=True)
+class RetryBudgetClient:
+    """Wraps an ``httpx.Client``-shaped object with budgeted retries."""
+
+    client: Any  # httpx.Client, or a stub with .request(method, url, **kw)
+    budget: TokenBucketRetryBudget
+    clock: Clock
+    policy: RetryPolicy = field(default_factory=RetryPolicy)
+    jitter: Callable[[float], float] = no_jitter
+    on_event: Callable[[str, dict[str, Any]], None] | None = None
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        if self.on_event is not None:
+            self.on_event(event, fields)
+
+    def backoff_ceiling(self, attempt: int) -> float:
+        return min(self.policy.max_backoff, self.policy.base_backoff * (2**attempt))
+
+    def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        deadline = self.clock.now() + self.policy.deadline_seconds
+        attempt = 0
+        while True:
+            self._emit("attempt", attempt=attempt, url=url)
+            response: httpx.Response | None
+            last_error: httpx.TransportError | None = None
+            try:
+                response = self.client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                response = None
+                last_error = exc
+                retryable = True
+            else:
+                retryable = response.status_code in self.policy.retry_statuses
+                if not retryable:
+                    return response
+
+            if attempt >= self.policy.max_retries:
+                self._emit("retries_exhausted", attempts=attempt + 1, url=url)
+                if response is not None:
+                    return response  # caller sees the final 5xx
+                raise last_error  # type: ignore[misc]
+
+            if not self.budget.consume():
+                self._emit("budget_exhausted", attempts=attempt + 1, url=url)
+                raise RetryBudgetExhaustedError(
+                    "retry budget exhausted; failing fast instead of amplifying"
+                ) from last_error
+
+            delay = self.jitter(self.backoff_ceiling(attempt))
+            if self.clock.now() + delay > deadline:
+                self._emit("deadline_exceeded", attempts=attempt + 1, url=url)
+                raise RetryDeadlineExceededError(
+                    f"next backoff of {delay:.3f}s would overshoot the deadline"
+                ) from last_error
+
+            self._emit("retry", attempt=attempt + 1, delay=delay, url=url)
+            self.clock.sleep(delay)
+            attempt += 1
+\end{minted}
+
+The tests in Listing~\ref{lst:ch15-retry-budget-tests} are the executable
+core of this chapter's anti-retry-storm argument:
+\texttt{test\_retry\_budget\_caps\_amplification} configures five permitted
+retries against an always-failing dependency with a two-token budget and
+asserts the client issues exactly three requests --- the budget, not the
+retry count, is the binding constraint.
+
+\noindent\textbf{Listing 15.4 --- \texttt{test\_retry\_budget.py}:
+budget-cap, refill, deadline, and jitter determinism proofs.}
+\label{lst:ch15-retry-budget-tests}
+\begin{minted}{python}
+"""Deterministic tests for the retry-budget client.
+
+The amplification test is the heart of the chapter's anti-retry-storm
+argument: with a budget of 2 tokens, a client configured for up to 5
+retries issues AT MOST 3 requests against an always-failing dependency.
+"""
+from __future__ import annotations
+
+import random
+
+import httpx
+import pytest
+
+from retry_budget import (
+    ManualClock,
+    RetryBudgetClient,
+    RetryBudgetExhaustedError,
+    RetryDeadlineExceededError,
+    RetryPolicy,
+    TokenBucketRetryBudget,
+    full_jitter,
+    no_jitter,
+)
+
+
+class StubClient:
+    """httpx.Client-shaped stub; serves queued statuses or transport errors."""
+
+    def __init__(self, script: list[int | type[Exception]]) -> None:
+        self._script = list(script)
+        self.calls = 0
+
+    def request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        self.calls += 1
+        outcome = self._script.pop(0) if self._script else 200
+        if isinstance(outcome, type) and issubclass(outcome, Exception):
+            raise outcome("injected transport failure", request=None)
+        return httpx.Response(outcome, request=httpx.Request(method, url))
+
+
+def make_client(
+    script: list[int | type[Exception]],
+    *,
+    tokens: float = 10.0,
+    policy: RetryPolicy | None = None,
+    jitter=no_jitter,
+    clock: ManualClock | None = None,
+) -> tuple[RetryBudgetClient, StubClient, ManualClock, list]:
+    clock = clock or ManualClock()
+    stub = StubClient(script)
+    events: list[tuple[str, dict]] = []
+    client = RetryBudgetClient(
+        client=stub,
+        budget=TokenBucketRetryBudget(tokens, refill_per_second=1.0, clock=clock),
+        clock=clock,
+        policy=policy or RetryPolicy(max_retries=5, deadline_seconds=60.0),
+        jitter=jitter,
+        on_event=lambda event, fields: events.append((event, fields)),
+    )
+    return client, stub, clock, events
+
+
+def test_success_first_try_spends_no_budget() -> None:
+    client, stub, _, _ = make_client([200], tokens=2.0)
+    response = client.request("GET", "http://inventory.test/availability/SKU-1")
+    assert response.status_code == 200
+    assert stub.calls == 1
+    assert client.budget.tokens == 2.0
+
+
+def test_transient_failures_then_success() -> None:
+    client, stub, _, events = make_client([503, 503, 200], tokens=5.0)
+    response = client.request("GET", "http://inventory.test/availability/SKU-1")
+    assert response.status_code == 200
+    assert stub.calls == 3
+    retries = [f for e, f in events if e == "retry"]
+    assert [r["attempt"] for r in retries] == [1, 2]
+    assert retries[0]["delay"] == pytest.approx(0.05)
+    assert retries[1]["delay"] == pytest.approx(0.10)
+
+
+def test_retry_budget_caps_amplification() -> None:
+    """5 allowed retries, budget of 2 tokens -> at most 3 requests, then fail fast."""
+    client, stub, _, events = make_client(
+        [503] * 100,
+        tokens=2.0,
+        policy=RetryPolicy(max_retries=5, deadline_seconds=60.0),
+    )
+    with pytest.raises(RetryBudgetExhaustedError):
+        client.request("GET", "http://inventory.test/availability/SKU-1")
+    assert stub.calls == 3  # 1 original + 2 budgeted retries, NOT 6
+    assert any(e == "budget_exhausted" for e, _ in events)
+
+
+def test_budget_refills_over_virtual_time() -> None:
+    clock = ManualClock()
+    client, stub, _, _ = make_client(
+        [503] * 100, tokens=1.0, clock=clock,
+        policy=RetryPolicy(max_retries=5, deadline_seconds=60.0),
+    )
+    with pytest.raises(RetryBudgetExhaustedError):
+        client.request("GET", "http://inventory.test/x")
+    assert stub.calls == 2
+    clock.sleep(2.0)  # refill 1 token/s -> 2 attempts possible again
+    with pytest.raises(RetryBudgetExhaustedError):
+        client.request("GET", "http://inventory.test/x")
+    assert stub.calls == 4
+
+
+def test_deadline_stops_retries_before_overshoot() -> None:
+    # base 0.05s backoff; deadline 0.07s: first retry (0.05) fits,
+    # second retry's 0.10s sleep would overshoot -> deadline error.
+    client, stub, _, events = make_client(
+        [503] * 100,
+        tokens=10.0,
+        policy=RetryPolicy(max_retries=5, base_backoff=0.05, deadline_seconds=0.07),
+    )
+    with pytest.raises(RetryDeadlineExceededError):
+        client.request("GET", "http://inventory.test/availability/SKU-1")
+    assert stub.calls == 2
+    assert any(e == "deadline_exceeded" for e, _ in events)
+
+
+def test_non_retryable_status_returns_immediately() -> None:
+    client, stub, _, _ = make_client([404], tokens=5.0)
+    response = client.request("GET", "http://inventory.test/missing")
+    assert response.status_code == 404
+    assert stub.calls == 1
+    assert client.budget.tokens == 5.0
+
+
+def test_transport_errors_are_retryable_and_final_error_reraises() -> None:
+    client, stub, _, _ = make_client(
+        [httpx.ConnectError, httpx.ConnectError],
+        tokens=5.0,
+        policy=RetryPolicy(max_retries=1, deadline_seconds=60.0),
+    )
+    with pytest.raises(httpx.ConnectError):
+        client.request("GET", "http://inventory.test/x")
+    assert stub.calls == 2  # 1 original + the single permitted retry
+
+
+def test_full_jitter_is_deterministic_under_a_seeded_rng() -> None:
+    rng_a = random.Random(42)
+    rng_b = random.Random(42)
+    jitter_a = full_jitter(rng_a)
+    jitter_b = full_jitter(rng_b)
+    ceilings = [0.05, 0.10, 0.20]
+    draws_a = [jitter_a(c) for c in ceilings]
+    draws_b = [jitter_b(c) for c in ceilings]
+    assert draws_a == draws_b
+    for ceiling, draw in zip(ceilings, draws_a):
+        assert 0.0 <= draw <= ceiling
+\end{minted}
+
+\subsection{Three-Service Chaos Drill: Catalog $\to$ Inventory $\to$ Warehouse}
+\label{subsec:ch15-code-demo}
+
+Listing~\ref{lst:ch15-demo} wires three FastAPI services --- catalog,
+inventory, warehouse --- with \texttt{httpx.AsyncClient} over
+\texttt{ASGITransport}: real ASGI request/response cycles and real
+\texttt{httpx} timeout machinery, zero network. The catalog edge owns the
+resilience posture: a per-hop timeout tighter than its caller's budget, a
+dedicated client with a bounded connection pool (bulkhead one), a semaphore
+bounding concurrent calls into inventory (bulkhead two), and --- switched
+by a flag so the drill can measure the difference --- the
+Listing~\ref{lst:ch15-breaker} circuit breaker. The \texttt{ChaosConfig}
+knob flips inventory into a hard-down failure mode; \texttt{run\_drill}
+then fires thirty concurrent catalog requests and counts what happens.
+
+\noindent\textbf{Listing 15.5 --- \texttt{demo\_services.py}:
+three in-process services plus a chaos harness with before/after
+measurement.}
+\label{lst:ch15-demo}
+\begin{minted}{python}
+"""Three-service Northwind Robotics demo: catalog -> inventory -> warehouse.
+
+All services are in-process FastAPI apps wired together with
+``httpx.AsyncClient`` over ``ASGITransport``: real ASGI request/response
+cycles, real timeouts, zero sockets, zero network.
+
+Resilience posture at the catalog edge:
+  * per-hop timeouts (catalog->inventory tighter than the caller's budget),
+  * a circuit breaker around the inventory dependency (optional, so the
+    chaos drill can measure before/after),
+  * a bulkhead: a semaphore bounding concurrent calls into inventory.
+
+The chaos harness flips the inventory hop into a failure or latency mode
+and measures how many requests actually reach it, with and without the
+breaker.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from circuit_breaker import (
+    BreakerConfig,
+    CircuitBreaker,
+    CircuitOpenError,
+)
+
+CATALOG_TIMEOUT = 0.25      # seconds; the caller's budget is larger
+INVENTORY_TIMEOUT = 0.20
+WAREHOUSE_TIMEOUT = 0.15
+BULKHEAD_PERMITS = 8        # max concurrent catalog -> inventory calls
+
+CATALOG = {
+    "NR-1001": {"sku": "NR-1001", "name": "Warehouse Picker Bot", "price": 18499.00},
+    "NR-2002": {"sku": "NR-2002", "name": "Conveyor Vision Kit", "price": 3299.50},
+}
+
+
+@dataclass
+class ChaosConfig:
+    """Mutable fault-injection knobs for the inventory service."""
+
+    always_fail: bool = False
+    latency_seconds: float = 0.0
+
+
+@dataclass
+class ServiceStats:
+    inventory_calls: int = 0
+    warehouse_calls: int = 0
+
+
+# --------------------------------------------------------------------------
+# Warehouse (leaf service)
+# --------------------------------------------------------------------------
+def build_warehouse_app(stats: ServiceStats) -> FastAPI:
+    app = FastAPI(title="warehouse")
+
+    @app.get("/stock/{sku}")
+    async def stock(sku: str) -> dict[str, Any]:
+        stats.warehouse_calls += 1
+        return {"sku": sku, "on_hand": 7, "reserved": 2}
+
+    return app
+
+
+# --------------------------------------------------------------------------
+# Inventory (middle service; chaos target)
+# --------------------------------------------------------------------------
+def build_inventory_app(
+    warehouse_client: httpx.AsyncClient,
+    chaos: ChaosConfig,
+    stats: ServiceStats,
+) -> FastAPI:
+    app = FastAPI(title="inventory")
+
+    @app.get("/availability/{sku}")
+    async def availability(sku: str) -> dict[str, Any]:
+        stats.inventory_calls += 1
+        if chaos.latency_seconds > 0:
+            await asyncio.sleep(chaos.latency_seconds)
+        if chaos.always_fail:
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "chaos: inventory database unreachable"},
+            )
+        stock = await warehouse_client.get(f"/stock/{sku}", timeout=WAREHOUSE_TIMEOUT)
+        body = stock.json()
+        return {
+            "sku": sku,
+            "available": body["on_hand"] - body["reserved"],
+        }
+
+    return app
+
+
+# --------------------------------------------------------------------------
+# Catalog (edge service; owns the resilience policies)
+# --------------------------------------------------------------------------
+def build_catalog_app(
+    inventory_client: httpx.AsyncClient,
+    breaker: CircuitBreaker | None,
+    bulkhead: asyncio.Semaphore,
+) -> FastAPI:
+    app = FastAPI(title="catalog")
+
+    @app.get("/products/{sku}")
+    async def product(sku: str, request: Request) -> Any:
+        product_row = CATALOG.get(sku)
+        if product_row is None:
+            return JSONResponse(status_code=404, content={"detail": "unknown sku"})
+
+        async def fetch_availability() -> dict[str, Any]:
+            async with bulkhead:  # bulkhead: bounded concurrency into inventory
+                response = await inventory_client.get(
+                    f"/availability/{sku}", timeout=CATALOG_TIMEOUT
+                )
+            response.raise_for_status()
+            return response.json()
+
+        try:
+            if breaker is not None:
+                availability = await breaker.acall(fetch_availability)
+            else:
+                availability = await fetch_availability()
+        except CircuitOpenError:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "inventory unavailable (circuit open)",
+                         "circuit_open": True},
+            )
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": f"inventory call failed: {type(exc).__name__}",
+                         "circuit_open": False},
+            )
+        return {**product_row, "availability": availability}
+
+    return app
+
+
+# --------------------------------------------------------------------------
+# Wiring + chaos drill harness
+# --------------------------------------------------------------------------
+@dataclass
+class DrillResult:
+    requests: int
+    catalog_errors: int
+    circuit_open_rejections: int
+    inventory_calls: int
+    warehouse_calls: int
+    wall_seconds: float
+
+
+@dataclass
+class DemoSystem:
+    apps: dict[str, FastAPI]
+    chaos: ChaosConfig
+    stats: ServiceStats
+    events: list[tuple[str, dict]] = field(default_factory=list)
+
+
+def build_system(*, use_breaker: bool) -> DemoSystem:
+    chaos = ChaosConfig()
+    stats = ServiceStats()
+    events: list[tuple[str, dict]] = []
+
+    warehouse_app = build_warehouse_app(stats)
+    warehouse_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=warehouse_app),
+        base_url="http://warehouse.test",
+    )
+    inventory_app = build_inventory_app(warehouse_client, chaos, stats)
+    inventory_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=inventory_app),
+        base_url="http://inventory.test",
+        # Bulkhead on the client side too: a small, dedicated pool.
+        limits=httpx.Limits(max_connections=BULKHEAD_PERMITS),
+    )
+    breaker = None
+    if use_breaker:
+        breaker = CircuitBreaker(
+            "inventory",
+            BreakerConfig(
+                failure_rate_threshold=0.5,
+                window_seconds=60.0,
+                minimum_calls=4,
+                open_duration=30.0,  # >> drill duration: no probes mid-drill
+                half_open_max_probes=1,
+            ),
+            on_event=lambda event, fields: events.append((event, fields)),
+        )
+    catalog_app = build_catalog_app(
+        inventory_client, breaker, asyncio.Semaphore(BULKHEAD_PERMITS)
+    )
+    return DemoSystem(
+        apps={"catalog": catalog_app, "inventory": inventory_app,
+              "warehouse": warehouse_app},
+        chaos=chaos,
+        stats=stats,
+        events=events,
+    )
+
+
+async def run_drill(
+    requests: int = 30, *, use_breaker: bool, sku: str = "NR-1001"
+) -> DrillResult:
+    """Fire ``requests`` concurrent catalog calls at a broken inventory."""
+    system = build_system(use_breaker=use_breaker)
+    system.chaos.always_fail = True  # inventory is hard-down for the drill
+    started = time.perf_counter()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=system.apps["catalog"]),
+        base_url="http://catalog.test",
+    ) as catalog:
+        responses = await asyncio.gather(
+            *(catalog.get(f"/products/{sku}") for _ in range(requests))
+        )
+    elapsed = time.perf_counter() - started
+    errors = sum(1 for r in responses if r.status_code >= 500)
+    open_rejections = sum(
+        1 for r in responses if r.json().get("circuit_open") is True
+    )
+    return DrillResult(
+        requests=requests,
+        catalog_errors=errors,
+        circuit_open_rejections=open_rejections,
+        inventory_calls=system.stats.inventory_calls,
+        warehouse_calls=system.stats.warehouse_calls,
+        wall_seconds=elapsed,
+    )
+
+
+async def _main() -> None:
+    print("Chaos drill: inventory hard-down, 30 concurrent catalog requests")
+    for use_breaker in (False, True):
+        result = await run_drill(use_breaker=use_breaker)
+        label = "WITH breaker " if use_breaker else "WITHOUT breaker"
+        print(
+            f"{label} | catalog 5xx: {result.catalog_errors:>2}/"
+            f"{result.requests} | circuit-open fast-fails: "
+            f"{result.circuit_open_rejections:>2} | calls reaching inventory: "
+            f"{result.inventory_calls:>2} | wall: {result.wall_seconds:.3f}s"
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())
+\end{minted}
+
+Running the drill ({\small\texttt{python demo\_services.py}}) produces the
+measured before/after comparison of Table~\ref{tab:ch15-drill}. The
+breaker does not make requests succeed --- inventory is genuinely down, and
+all thirty catalog calls return 503 either way. What changes is
+\emph{where the load goes}: without the breaker, all thirty requests reach
+the sick service; with it, four do (the minimum-calls floor plus the
+concurrent admissions before the window evaluates) and twenty-six fail fast
+and cheap. Those twenty-six unanswered invitations are the headroom in
+which inventory recovers.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c X}
+    \toprule
+    \textbf{Configuration} & \textbf{Calls reaching inventory} & \textbf{Catalog 5xx} & \textbf{Fast-fail rejections} \\
+    \midrule
+    Without breaker & 30 / 30 & 30 & 0 --- every request pays full failure latency \\
+    With breaker & 4 / 30 & 30 & 26 --- rejected in microseconds, dependency spared \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Measured chaos-drill results, Listing~\ref{lst:ch15-demo}
+  (deterministic: counts, not wall-clock). Resilience patterns do not
+  convert failure into success; they convert expensive failure into cheap
+  failure and buy recovery headroom.}
+  \label{tab:ch15-drill}
+\end{table}
+
+\noindent\textbf{Listing 15.6 --- \texttt{test\_demo\_services.py}:
+drill assertions on counts and breaker events.}
+\label{lst:ch15-demo-tests}
+\begin{minted}{python}
+"""Deterministic tests for the three-service chaos drill.
+
+Assertions are on COUNTS (how many requests reached the broken inventory),
+never on wall-clock latency. The 30 catalog calls run concurrently via
+``asyncio.gather``; the failure mode under test (inventory hard-down,
+immediate 500) is fully deterministic.
+"""
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+
+from demo_services import (
+    BULKHEAD_PERMITS,
+    build_system,
+    run_drill,
+)
+
+
+def test_happy_path_catalog_joins_inventory_and_warehouse() -> None:
+    async def main() -> None:
+        system = build_system(use_breaker=True)  # chaos OFF
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=system.apps["catalog"]),
+            base_url="http://catalog.test",
+        ) as client:
+            response = await client.get("/products/NR-1001")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "Warehouse Picker Bot"
+        assert body["availability"] == {"sku": "NR-1001", "available": 5}
+        assert system.stats.inventory_calls == 1
+        assert system.stats.warehouse_calls == 1
+
+    asyncio.run(main())
+
+
+def test_without_breaker_every_request_reaches_the_broken_inventory() -> None:
+    result = asyncio.run(run_drill(requests=30, use_breaker=False))
+    assert result.catalog_errors == 30
+    assert result.inventory_calls == 30   # full load hits the sick dependency
+    assert result.circuit_open_rejections == 0
+
+
+def test_with_breaker_most_requests_fail_fast() -> None:
+    result = asyncio.run(run_drill(requests=30, use_breaker=True))
+    assert result.catalog_errors == 30    # still errors: the dependency IS down
+    # ...but almost none touch inventory: breaker opens after 4 failures
+    # (minimum_calls, 100% failure rate >= 0.5 threshold).
+    assert result.inventory_calls < result.requests
+    assert result.circuit_open_rejections == 30 - result.inventory_calls
+    assert result.circuit_open_rejections >= 30 - BULKHEAD_PERMITS
+
+
+def test_breaker_state_transitions_are_emitted_during_drill() -> None:
+    system = build_system(use_breaker=True)
+    system.chaos.always_fail = True
+
+    async def main() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=system.apps["catalog"]),
+            base_url="http://catalog.test",
+        ) as client:
+            await asyncio.gather(*(client.get("/products/NR-1001") for _ in range(30)))
+
+    asyncio.run(main())
+    transitions = [f for e, f in system.events if e == "state_change"]
+    assert {"previous": "closed", "current": "open"} in [
+        {"previous": t["previous"], "current": t["current"]} for t in transitions
+    ]
+    # Inventory hard-down and breaker open-duration (30s) >> drill duration:
+    # exactly one transition, and no half-open probes mid-drill.
+    assert len(transitions) == 1
+\end{minted}
+
+\subsection{The Transactional Outbox with Relay and Idempotent Consumer}
+\label{subsec:ch15-code-outbox}
+
+Listing~\ref{lst:ch15-outbox} implements the outbox pattern end to end
+against SQLite. \texttt{OrderService.place\_order} commits the domain row
+and the outbox row in one \texttt{with conn} transaction --- atomicity is
+the entire point, and the first test proves rollback leaves no orphan
+outbox row. \texttt{OutboxRelay.relay\_once} publishes each pending event
+and marks it published strictly \emph{after} the publish call returns: the
+crash window between those two statements is where at-least-once delivery
+comes from, and \texttt{CrashAfterPublish} exists to stand inside it.
+\texttt{InventoryConsumer.handle} records the event ID and applies the
+stock decrement in one transaction, so a replayed event is absorbed, not
+reapplied.
+
+\noindent\textbf{Listing 15.7 --- \texttt{outbox.py}:
+atomic domain write + outbox, relay loop, idempotent consumer.}
+\label{lst:ch15-outbox}
+\begin{minted}{python}
+"""Transactional outbox: atomic domain-write + outbox-insert, a relay loop
+with at-least-once delivery, and an idempotent consumer.
+
+SQLite-backed, fully in-process. The "broker" is a Python callable, which
+keeps the pattern's GUARANTEES visible: the relay marks an event published
+only after the publish call returns, so a crash in between replays the
+event -- and the consumer must deduplicate (Chapter 10 idempotency).
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+PRODUCER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS orders (
+    order_id  TEXT PRIMARY KEY,
+    sku       TEXT NOT NULL,
+    quantity  INTEGER NOT NULL CHECK (quantity > 0),
+    status    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS outbox (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id     TEXT NOT NULL UNIQUE,
+    aggregate_id TEXT NOT NULL,
+    event_type   TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    published    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+CONSUMER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS processed_events (
+    event_id TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS stock (
+    sku      TEXT PRIMARY KEY,
+    on_hand  INTEGER NOT NULL
+);
+"""
+
+
+class Publisher(Protocol):
+    """Anything that can accept one event. A real deployment: Kafka, etc."""
+
+    def publish(self, event: dict[str, Any]) -> None: ...
+
+
+class InProcessBroker:
+    """Deterministic stand-in broker: records every published event."""
+
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+
+    def publish(self, event: dict[str, Any]) -> None:
+        self.messages.append(event)
+
+
+class CrashAfterPublish:
+    """Fault-injection publisher: delivers, THEN crashes before the relay
+    can mark the event published -- the classic at-least-once window."""
+
+    def __init__(self, inner: Publisher) -> None:
+        self._inner = inner
+
+    def publish(self, event: dict[str, Any]) -> None:
+        self._inner.publish(event)
+        raise RuntimeError("simulated relay crash after publish")
+
+
+class OrderService:
+    """Producer side: domain write and outbox insert in ONE transaction."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._conn.executescript(PRODUCER_SCHEMA)
+
+    def place_order(
+        self, order_id: str, sku: str, quantity: int, *, event_id: str | None = None
+    ) -> str:
+        event_id = event_id or uuid.uuid4().hex
+        payload = json.dumps({"sku": sku, "quantity": quantity})
+        with self._conn:  # atomic: both rows or neither
+            self._conn.execute(
+                "INSERT INTO orders (order_id, sku, quantity, status)"
+                " VALUES (?, ?, ?, 'PLACED')",
+                (order_id, sku, quantity),
+            )
+            self._conn.execute(
+                "INSERT INTO outbox (event_id, aggregate_id, event_type, payload)"
+                " VALUES (?, ?, 'order.placed', ?)",
+                (event_id, order_id, payload),
+            )
+        return event_id
+
+    def pending_events(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT event_id, aggregate_id, event_type, payload"
+            " FROM outbox WHERE published = 0 ORDER BY seq"
+        ).fetchall()
+        return [
+            {
+                "event_id": row[0],
+                "aggregate_id": row[1],
+                "event_type": row[2],
+                "payload": json.loads(row[3]),
+            }
+            for row in rows
+        ]
+
+
+@dataclass
+class OutboxRelay:
+    """Polls the outbox, publishes, marks published. At-least-once: the
+    mark happens strictly AFTER publish returns."""
+
+    conn: sqlite3.Connection
+    publisher: Publisher
+    batch_size: int = 100
+
+    def relay_once(self) -> int:
+        rows = self.conn.execute(
+            "SELECT event_id, aggregate_id, event_type, payload"
+            " FROM outbox WHERE published = 0 ORDER BY seq LIMIT ?",
+            (self.batch_size,),
+        ).fetchall()
+        delivered = 0
+        for event_id, aggregate_id, event_type, payload in rows:
+            event = {
+                "event_id": event_id,
+                "aggregate_id": aggregate_id,
+                "event_type": event_type,
+                "payload": json.loads(payload),
+            }
+            self.publisher.publish(event)  # crash here -> replay later
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE outbox SET published = 1 WHERE event_id = ?",
+                    (event_id,),
+                )
+            delivered += 1
+        return delivered
+
+
+class InventoryConsumer:
+    """Idempotent consumer: effect applied at most once, tracked in the
+    same transaction as the dedup record."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._conn.executescript(CONSUMER_SCHEMA)
+
+    def seed_stock(self, sku: str, on_hand: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO stock (sku, on_hand) VALUES (?, ?)"
+                " ON CONFLICT(sku) DO UPDATE SET on_hand = excluded.on_hand",
+                (sku, on_hand),
+            )
+
+    def on_hand(self, sku: str) -> int:
+        row = self._conn.execute(
+            "SELECT on_hand FROM stock WHERE sku = ?", (sku,)
+        ).fetchone()
+        return row[0] if row else 0
+
+    def handle(self, event: dict[str, Any]) -> bool:
+        """Apply the event; return False for duplicates (already processed)."""
+        if event["event_type"] != "order.placed":
+            raise ValueError(f"unsupported event type {event['event_type']!r}")
+        with self._conn:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO processed_events (event_id) VALUES (?)",
+                (event["event_id"],),
+            )
+            if cursor.rowcount == 0:
+                return False  # duplicate delivery: deduped
+            self._conn.execute(
+                "UPDATE stock SET on_hand = on_hand - ? WHERE sku = ?",
+                (event["payload"]["quantity"], event["payload"]["sku"]),
+            )
+            return True
+\end{minted}
+
+\noindent\textbf{Listing 15.8 --- \texttt{test\_outbox.py}:
+atomicity, crash-mid-publish replay, and dedup proofs.}
+\label{lst:ch15-outbox-tests}
+\begin{minted}{python}
+"""Tests for the transactional outbox, relay crash, and consumer dedup."""
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from outbox import (
+    CrashAfterPublish,
+    InProcessBroker,
+    InventoryConsumer,
+    OrderService,
+    OutboxRelay,
+)
+
+
+@pytest.fixture()
+def producer_conn() -> sqlite3.Connection:
+    return sqlite3.connect(":memory:")
+
+
+@pytest.fixture()
+def consumer() -> InventoryConsumer:
+    consumer = InventoryConsumer(sqlite3.connect(":memory:"))
+    consumer.seed_stock("NR-1001", 100)
+    return consumer
+
+
+def test_domain_write_and_outbox_insert_are_atomic(producer_conn) -> None:
+    service = OrderService(producer_conn)
+    service.place_order("ORD-1", "NR-1001", 3, event_id="evt-1")
+    # Second insert with the same order_id violates the PK; the outbox row
+    # from the failed transaction must be rolled back too.
+    with pytest.raises(sqlite3.IntegrityError):
+        service.place_order("ORD-1", "NR-1001", 5, event_id="evt-2")
+    pending = service.pending_events()
+    assert [e["event_id"] for e in pending] == ["evt-1"]
+
+
+def test_relay_delivers_pending_events_and_marks_them(producer_conn) -> None:
+    service = OrderService(producer_conn)
+    service.place_order("ORD-1", "NR-1001", 3, event_id="evt-1")
+    service.place_order("ORD-2", "NR-2002", 1, event_id="evt-2")
+    broker = InProcessBroker()
+    relay = OutboxRelay(producer_conn, broker)
+    assert relay.relay_once() == 2
+    assert [m["event_id"] for m in broker.messages] == ["evt-1", "evt-2"]
+    assert relay.relay_once() == 0  # nothing left pending
+
+
+def test_relay_crash_mid_publish_replays_event(producer_conn) -> None:
+    service = OrderService(producer_conn)
+    service.place_order("ORD-1", "NR-1001", 3, event_id="evt-1")
+    broker = InProcessBroker()
+
+    crashing = OutboxRelay(producer_conn, CrashAfterPublish(broker))
+    with pytest.raises(RuntimeError, match="simulated relay crash"):
+        crashing.relay_once()
+    assert len(broker.messages) == 1       # delivered...
+    assert len(service.pending_events()) == 1  # ...but NOT marked published
+
+    recovered = OutboxRelay(producer_conn, broker)
+    assert recovered.relay_once() == 1     # at-least-once: replayed
+    assert len(broker.messages) == 2       # duplicate on the wire
+    assert len(service.pending_events()) == 0
+
+
+def test_idempotent_consumer_dedups_replayed_events(consumer) -> None:
+    event = {
+        "event_id": "evt-1",
+        "aggregate_id": "ORD-1",
+        "event_type": "order.placed",
+        "payload": {"sku": "NR-1001", "quantity": 3},
+    }
+    assert consumer.handle(event) is True
+    assert consumer.on_hand("NR-1001") == 97
+    assert consumer.handle(event) is False  # duplicate: no double decrement
+    assert consumer.handle(event) is False
+    assert consumer.on_hand("NR-1001") == 97
+
+
+def test_end_to_end_order_to_stock_under_crash_and_replay(
+    producer_conn, consumer
+) -> None:
+    service = OrderService(producer_conn)
+    service.place_order("ORD-1", "NR-1001", 3, event_id="evt-1")
+    service.place_order("ORD-2", "NR-1001", 2, event_id="evt-2")
+    broker = InProcessBroker()
+
+    crashing = OutboxRelay(producer_conn, CrashAfterPublish(broker))
+    with pytest.raises(RuntimeError):
+        crashing.relay_once()  # evt-1 delivered, crash before mark
+
+    OutboxRelay(producer_conn, broker).relay_once()  # replays evt-1, adds evt-2
+    assert [m["event_id"] for m in broker.messages] == ["evt-1", "evt-1", "evt-2"]
+
+    applied = [consumer.handle(m) for m in broker.messages]
+    assert applied == [True, False, True]
+    assert consumer.on_hand("NR-1001") == 95  # 3 + 2 deducted exactly once
+\end{minted}
+
+The end-to-end test deserves a slow reading because it \emph{is} the
+pattern's guarantee: two orders are placed; the relay delivers
+\texttt{evt-1} and crashes before marking it; the recovered relay replays
+\texttt{evt-1} and delivers \texttt{evt-2}, so the wire carries
+\texttt{[evt-1, evt-1, evt-2]}; the consumer applies
+\texttt{[True, False, True]}; and stock ends at exactly
+$100 - 3 - 2 = 95$. At-least-once transport plus idempotent consumption
+equals effectively-once processing --- no two-phase commit involved.
+
+\subsection{Saga Orchestrator with Compensating Actions}
+\label{subsec:ch15-code-saga}
+
+Listing~\ref{lst:ch15-saga} implements the orchestrated saga of
+Definition~\ref{def:ch15-saga} for Northwind Robotics order fulfillment:
+reserve inventory, charge payment, schedule shipment, each with its
+compensation (release, refund, cancel). The orchestrator is deliberately
+small --- the value is in the explicitness: steps in order, compensations
+in reverse, every transition emitted to the event hook, and a
+\textsc{compensation\_failed} status that is \emph{surfaced}, never
+swallowed, because a failed compensation means the world is in a state only
+an operator can reconcile. The in-memory domain services take a
+\texttt{fail\_on} set so tests can break any operation by name.
+
+\noindent\textbf{Listing 15.9 --- \texttt{saga.py}:
+orchestrated order-fulfillment saga with compensations and failure
+injection.}
+\label{lst:ch15-saga}
+\begin{minted}{python}
+"""Saga orchestrator for Northwind Robotics order fulfillment.
+
+Flow: reserve inventory -> charge payment -> schedule shipment.
+Each step declares a compensating action; on failure the orchestrator runs
+compensations for completed steps in REVERSE order and reports the saga as
+COMPENSATED (not "rolled back" -- the real world already happened; we
+compensate, we do not time-travel).
+
+Failure injection: each domain service takes ``fail_on`` -- a set of
+operation names that raise on invocation.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class SagaStatus(str, Enum):
+    COMPLETED = "completed"
+    COMPENSATED = "compensated"
+    COMPENSATION_FAILED = "compensation_failed"
+
+
+class CompensationError(RuntimeError):
+    """A compensating action itself failed; requires operator attention."""
+
+
+@dataclass(frozen=True, slots=True)
+class SagaStep:
+    name: str
+    action: Callable[[dict[str, Any]], None]
+    compensate: Callable[[dict[str, Any]], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SagaResult:
+    status: SagaStatus
+    failed_step: str | None
+    compensated: tuple[str, ...]
+    context: dict[str, Any]
+
+
+class SagaOrchestrator:
+    """Executes steps in order; compensates in reverse on failure."""
+
+    def __init__(
+        self,
+        steps: list[SagaStep],
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        if not steps:
+            raise ValueError("a saga needs at least one step")
+        self._steps = steps
+        self._on_event = on_event
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        if self._on_event is not None:
+            self._on_event(event, fields)
+
+    def run(self, context: dict[str, Any] | None = None) -> SagaResult:
+        context = dict(context or {})
+        completed: list[SagaStep] = []
+        for step in self._steps:
+            self._emit("step_started", step=step.name)
+            try:
+                step.action(context)
+            except Exception as exc:
+                self._emit("step_failed", step=step.name, error=type(exc).__name__)
+                return self._compensate(completed, failed=step.name, context=context)
+            completed.append(step)
+            self._emit("step_completed", step=step.name)
+        return SagaResult(
+            status=SagaStatus.COMPLETED,
+            failed_step=None,
+            compensated=(),
+            context=context,
+        )
+
+    def _compensate(
+        self, completed: list[SagaStep], *, failed: str, context: dict[str, Any]
+    ) -> SagaResult:
+        compensated: list[str] = []
+        try:
+            for step in reversed(completed):
+                if step.compensate is None:
+                    continue
+                self._emit("compensation_started", step=step.name)
+                step.compensate(context)
+                compensated.append(step.name)
+                self._emit("compensation_completed", step=step.name)
+        except Exception as exc:
+            self._emit(
+                "compensation_failed", step=step.name, error=type(exc).__name__
+            )
+            return SagaResult(
+                status=SagaStatus.COMPENSATION_FAILED,
+                failed_step=failed,
+                compensated=tuple(compensated),
+                context=context,
+            )
+        return SagaResult(
+            status=SagaStatus.COMPENSATED,
+            failed_step=failed,
+            compensated=tuple(compensated),
+            context=context,
+        )
+
+
+# --------------------------------------------------------------------------
+# Northwind Robotics domain services (in-memory, deterministic)
+# --------------------------------------------------------------------------
+class InventoryService:
+    def __init__(self, stock: dict[str, int], fail_on: set[str] | None = None) -> None:
+        self.stock = dict(stock)
+        self.reserved: dict[str, int] = {}
+        self.fail_on = fail_on or set()
+        self.calls: list[str] = []
+
+    def reserve(self, sku: str, quantity: int) -> None:
+        self.calls.append("reserve")
+        if "reserve" in self.fail_on:
+            raise ConnectionError("inventory service unavailable")
+        if self.stock.get(sku, 0) < quantity:
+            raise ValueError(f"insufficient stock for {sku}")
+        self.stock[sku] -= quantity
+        self.reserved[sku] = self.reserved.get(sku, 0) + quantity
+
+    def release(self, sku: str, quantity: int) -> None:
+        self.calls.append("release")
+        if "release" in self.fail_on:
+            raise ConnectionError("inventory service unavailable")
+        self.reserved[sku] = self.reserved.get(sku, 0) - quantity
+        self.stock[sku] = self.stock.get(sku, 0) + quantity
+
+
+class PaymentService:
+    def __init__(self, fail_on: set[str] | None = None) -> None:
+        self.charges: list[tuple[str, float]] = []
+        self.refunds: list[tuple[str, float]] = []
+        self.fail_on = fail_on or set()
+        self.calls: list[str] = []
+
+    def charge(self, order_id: str, amount: float) -> None:
+        self.calls.append("charge")
+        if "charge" in self.fail_on:
+            raise ConnectionError("payment gateway timeout")
+        self.charges.append((order_id, amount))
+
+    def refund(self, order_id: str, amount: float) -> None:
+        self.calls.append("refund")
+        if "refund" in self.fail_on:
+            raise ConnectionError("payment gateway timeout")
+        self.refunds.append((order_id, amount))
+
+
+class ShipmentService:
+    def __init__(self, fail_on: set[str] | None = None) -> None:
+        self.shipments: list[str] = []
+        self.cancellations: list[str] = []
+        self.fail_on = fail_on or set()
+        self.calls: list[str] = []
+
+    def schedule(self, order_id: str) -> None:
+        self.calls.append("schedule")
+        if "schedule" in self.fail_on:
+            raise ConnectionError("carrier API error")
+        self.shipments.append(order_id)
+
+    def cancel(self, order_id: str) -> None:
+        self.calls.append("cancel")
+        if "cancel" in self.fail_on:
+            raise ConnectionError("carrier API error")
+        self.cancellations.append(order_id)
+
+
+def build_order_fulfillment_saga(
+    inventory: InventoryService,
+    payments: PaymentService,
+    shipments: ShipmentService,
+    on_event: Callable[[str, dict[str, Any]], None] | None = None,
+) -> SagaOrchestrator:
+    """The canonical three-step order saga with compensations."""
+    steps = [
+        SagaStep(
+            name="reserve_inventory",
+            action=lambda ctx: inventory.reserve(ctx["sku"], ctx["quantity"]),
+            compensate=lambda ctx: inventory.release(ctx["sku"], ctx["quantity"]),
+        ),
+        SagaStep(
+            name="charge_payment",
+            action=lambda ctx: payments.charge(ctx["order_id"], ctx["amount"]),
+            compensate=lambda ctx: payments.refund(ctx["order_id"], ctx["amount"]),
+        ),
+        SagaStep(
+            name="schedule_shipment",
+            action=lambda ctx: shipments.schedule(ctx["order_id"]),
+            compensate=lambda ctx: shipments.cancel(ctx["order_id"]),
+        ),
+    ]
+    return SagaOrchestrator(steps, on_event=on_event)
+\end{minted}
+
+\noindent\textbf{Listing 15.10 --- \texttt{test\_saga.py}:
+failure-injection proofs, including reverse-order compensation and
+surfaced compensation failure.}
+\label{lst:ch15-saga-tests}
+\begin{minted}{python}
+"""Failure-injection tests for the saga orchestrator."""
+from __future__ import annotations
+
+from saga import (
+    InventoryService,
+    PaymentService,
+    SagaOrchestrator,
+    SagaStatus,
+    SagaStep,
+    ShipmentService,
+    build_order_fulfillment_saga,
+)
+
+ORDER = {"order_id": "ORD-7", "sku": "NR-1001", "quantity": 3, "amount": 184.50}
+
+
+def build(fail_on: dict[str, set[str]] | None = None):
+    fail_on = fail_on or {}
+    inventory = InventoryService({"NR-1001": 10}, fail_on.get("inventory"))
+    payments = PaymentService(fail_on.get("payments"))
+    shipments = ShipmentService(fail_on.get("shipments"))
+    events: list[tuple[str, dict]] = []
+    saga = build_order_fulfillment_saga(
+        inventory, payments, shipments,
+        on_event=lambda event, fields: events.append((event, fields)),
+    )
+    return saga, inventory, payments, shipments, events
+
+
+def test_happy_path_completes_all_steps_in_order() -> None:
+    saga, inventory, payments, shipments, events = build()
+    result = saga.run(ORDER)
+    assert result.status is SagaStatus.COMPLETED
+    assert result.failed_step is None
+    assert result.compensated == ()
+    assert inventory.stock["NR-1001"] == 7
+    assert inventory.reserved["NR-1001"] == 3
+    assert payments.charges == [("ORD-7", 184.50)]
+    assert shipments.shipments == ["ORD-7"]
+    started = [f["step"] for e, f in events if e == "step_started"]
+    assert started == ["reserve_inventory", "charge_payment", "schedule_shipment"]
+
+
+def test_payment_failure_compensates_inventory_in_reverse() -> None:
+    saga, inventory, payments, shipments, _ = build(
+        {"payments": {"charge"}}
+    )
+    result = saga.run(ORDER)
+    assert result.status is SagaStatus.COMPENSATED
+    assert result.failed_step == "charge_payment"
+    assert result.compensated == ("reserve_inventory",)
+    assert inventory.stock["NR-1001"] == 10   # reservation released
+    assert inventory.reserved["NR-1001"] == 0
+    assert payments.charges == []             # charge never landed
+    assert shipments.shipments == []          # never reached
+
+
+def test_shipment_failure_compensates_payment_then_inventory() -> None:
+    saga, inventory, payments, shipments, _ = build(
+        {"shipments": {"schedule"}}
+    )
+    result = saga.run(ORDER)
+    assert result.status is SagaStatus.COMPENSATED
+    assert result.failed_step == "schedule_shipment"
+    # Reverse order of completion: refund BEFORE release.
+    assert result.compensated == ("charge_payment", "reserve_inventory")
+    assert payments.charges == [("ORD-7", 184.50)]   # happened, then refunded
+    assert payments.refunds == [("ORD-7", 184.50)]
+    assert inventory.stock["NR-1001"] == 10
+    assert shipments.shipments == []
+
+
+def test_first_step_failure_needs_no_compensation() -> None:
+    saga, inventory, payments, shipments, _ = build(
+        {"inventory": {"reserve"}}
+    )
+    result = saga.run(ORDER)
+    assert result.status is SagaStatus.COMPENSATED
+    assert result.failed_step == "reserve_inventory"
+    assert result.compensated == ()
+    assert payments.charges == []
+    assert shipments.shipments == []
+
+
+def test_compensation_failure_is_surfaced_not_swallowed() -> None:
+    saga, inventory, payments, shipments, events = build(
+        {"payments": {"charge", "refund"}}
+    )
+    # charge fails -> saga compensates reserve (refund is never reached
+    # because charge never completed). To exercise a FAILING compensation,
+    # fail schedule + refund.
+    saga, inventory, payments, shipments, events = build(
+        {"shipments": {"schedule"}, "payments": {"refund"}}
+    )
+    result = saga.run(ORDER)
+    assert result.status is SagaStatus.COMPENSATION_FAILED
+    assert result.failed_step == "schedule_shipment"
+    # Refund failed, so inventory release never ran: partial compensation
+    # is explicit in the result for an operator to reconcile.
+    assert result.compensated == ()
+    assert any(e == "compensation_failed" for e, _ in events)
+    assert inventory.stock["NR-1001"] == 7  # still reserved: needs a human
+
+
+def test_orchestrator_rejects_empty_step_list() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        SagaOrchestrator([])
+
+
+def test_saga_steps_without_compensation_are_skipped() -> None:
+    log: list[str] = []
+
+    def fail(_ctx) -> None:
+        raise ConnectionError("down")
+
+    saga = SagaOrchestrator(
+        [
+            SagaStep("fire_and_forget_email", lambda ctx: log.append("email")),
+            SagaStep("charge", fail, compensate=lambda ctx: log.append("refund")),
+        ]
+    )
+    result = saga.run({})
+    assert result.status is SagaStatus.COMPENSATED
+    assert result.compensated == ()  # email step has no compensation; charge never completed
+    assert log == ["email"]
+\end{minted}
+
+The tests cover the state space that matters: the happy path's step
+ordering; payment failure compensated by exactly one release; shipment
+failure compensated refund-\emph{then}-release (reverse order, asserted on
+the tuple, not on vibes); first-step failure requiring no compensation at
+all; and the uncomfortable one --- a compensation that itself fails,
+leaving stock reserved and the saga in \textsc{compensation\_failed} with
+the partial compensation list intact for reconciliation. That last test is
+the difference between a saga implementation and a saga demo.
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch15-pitfalls}
+
+Each anti-pattern below has been the proximal cause of a real outage class.
+Format: what it looks like, why it fails, the fix.
+
+\subsection*{P15.1 --- The Distributed Monolith via Synchronous Chains}
+\emph{Looks like:} eight services, and rendering one page calls all of
+them, in sequence, synchronously. \emph{Why it fails:} availability
+multiplies downward --- a chain of $n$ services each at $99.9\%$
+availability offers the caller at most $0.999^n \approx 99.2\%$ for
+$n = 8$, before latency tails and retry amplification are counted. You have
+deployed a monolith with network faults inside its function calls.
+\emph{Fix:} shorten synchronous chains ruthlessly; move non-critical work
+behind events (Section~\ref{subsec:ch15-taxonomy}); replicate read data
+locally instead of fetching it per request; ask of every hop whether the
+response is needed \emph{before} the caller's deadline or merely
+\emph{eventually}.
+
+\subsection*{P15.2 --- Retries without Budget, Jitter, or Idempotency}
+\emph{Looks like:} \texttt{for attempt in range(5): try: ...} at every
+layer, fixed 100\,ms backoff, applied to every endpoint including
+non-idempotent POSTs. \emph{Why it fails:}
+Theorem~\ref{thm:ch15-retry-amplification} --- you have built a $39\times$
+load multiplier that engages precisely when the system is least able to
+absorb load, synchronized across clients by the shared fixed backoff, and
+applied to operations that must not run twice. \emph{Fix:} the
+Listing~\ref{lst:ch15-retry-budget} discipline: retry only idempotent
+operations or those carrying idempotency keys
+(Chapter~\ref{ch:idempotency}), spend from a process-wide token bucket,
+jitter fully, respect deadlines, honor \texttt{Retry-After}.
+
+\subsection*{P15.3 --- One Breaker Shared across Dependencies}
+\emph{Looks like:} a single global \texttt{CircuitBreaker("downstream")}
+wrapping calls to inventory, payments, and recommendations alike.
+\emph{Why it fails:} the breaker's state is a hypothesis about one
+resource; a sick recommendations service now opens the circuit for payments
+--- converting a partial degradation into a total one. \emph{Fix:} one
+breaker per dependency per caller (Listing~\ref{lst:ch15-breaker} enforces
+this by requiring a name), each with thresholds tuned to that dependency's
+traffic volume and SLO.
+
+\subsection*{P15.4 --- A Timeout Longer Than the Caller's}
+\emph{Looks like:} the edge times out at $2\,\mathrm{s}$; catalog calls
+inventory with a $5\,\mathrm{s}$ timeout ``to be safe.'' \emph{Why it
+fails:} after the edge abandons the request, catalog keeps working for
+three more seconds --- burning bulkhead permits, connections, and inventory
+capacity on work nobody will read. Under load this is stage 2--3 of
+Figure~\ref{fig:ch15-cascade}. \emph{Fix:}
+Definition~\ref{def:ch15-deadline}: budgets shrink strictly toward the
+leaves; propagate deadlines (gRPC does this on the wire~\cite{grpcdocs});
+verify with a drill.
+
+\subsection*{P15.5 --- Ignoring Bulkheads}
+\emph{Looks like:} all endpoints share one connection pool, one thread
+pool, one event loop's worth of unbounded concurrency into every
+dependency. \emph{Why it fails:} the slowest dependency consumes the shared
+pool, and now healthy dependencies fail too --- the failure domain is the
+whole process. \emph{Fix:} per-dependency clients with their own
+\texttt{Limits}, semaphores per dependency
+(Listing~\ref{lst:ch15-demo}), and reserve capacity for health checks and
+metrics so the control surfaces keep working during the incident.
+
+\subsection*{P15.6 --- Two-Phase Commit over HTTP}
+\emph{Looks like:} \texttt{POST /prepare} on three services, then
+\texttt{POST /commit} on all, orchestrated over stateless HTTP.
+\emph{Why it fails:} HTTP gives you no way to hold a prepare lock across
+requests, no coordinator-crash protocol, and no answer when the commit
+response is lost; you have re-implemented 2PC's blocking, availability-
+coupling core with none of its correctness machinery. \emph{Fix:}
+Section~\ref{subsec:ch15-transactions}: sagas with compensations, the
+outbox for event emission, idempotent consumers. Accept eventual
+consistency as the design input it is.
+
+\subsection*{P15.7 --- Assuming the Mesh Fixes Application Semantics}
+\emph{Looks like:} ``we have Istio, so we can delete the retry logic, the
+idempotency keys, and the saga code.'' \emph{Why it fails:} the mesh sees
+packets, not meaning. It will happily retry your non-idempotent charge
+endpoint three times (now at infrastructure level, where your code review
+can't see it), and it cannot express ``compensate reserve-inventory with
+release.'' \emph{Fix:} treat the mesh as the transport-hygiene layer
+(mTLS, telemetry, per-hop timeouts, LB) and keep application-level
+correctness --- idempotency, sagas, deadline budgets --- in the
+application, where the semantics live.
+
+\subsection*{P15.8 --- Breakers and Budgets without Metrics}
+\emph{Looks like:} a breaker that opens in production, and the first
+anyone learns of it is the 503 spike in a customer screenshot.
+\emph{Why it fails:} every pattern in this chapter is a control system; a
+control system you cannot observe is a superstition. \emph{Fix:} wire the
+\texttt{on\_event} hooks of Listings~\ref{lst:ch15-breaker}
+and~\ref{lst:ch15-retry-budget} to your metrics pipeline; alert on
+\texttt{state\_change} to open, on sustained \texttt{budget\_exhausted},
+and on probe-failure loops (open $\to$ half-open $\to$ open flapping).
+
+\begin{warningbox}
+The composite anti-pattern is \emph{pattern theater}: breakers, retries,
+and timeouts present in code review but untested under failure. If you have
+never watched your breaker open in a drill, you do not have a breaker; you
+have a hope. Section~\ref{sec:ch15-lab} is the remedy.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch15-lab}
+
+\subsection*{Lab: Run the Chaos Drill, Watch the Breaker, Tune the Thresholds}
+
+Work in the chapter code directory. Everything runs offline.
+
+\begin{enumerate}
+  \item \textbf{Baseline.} Create and populate the environment, then run
+        the full suite and the drill:
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pytest -q
+python demo_services.py
+\end{minted}
+        Confirm the drill reproduces Table~\ref{tab:ch15-drill}: 30 calls
+        reach the broken inventory without the breaker, 4 with it.
+  \item \textbf{Observe state transitions.} In \texttt{demo\_services.py},
+        the breaker is constructed with an \texttt{on\_event} hook feeding
+        \texttt{DemoSystem.events}. Extend \texttt{\_main} to print every
+        \texttt{state\_change} and \texttt{rejected} event with its
+        payload, and re-run. You should see exactly one
+        closed~$\to$~open transition and no half-open probes, because the
+        drill is shorter than \texttt{open\_duration}.
+  \item \textbf{Watch a probe.} Shorten \texttt{open\_duration} to
+        \texttt{0.0}-ish (use \texttt{0.05}) and insert
+        \texttt{await asyncio.sleep(0.1)} into the drill loop after the
+        first batch; flip \texttt{chaos.always\_fail} off mid-drill. Now a
+        half-open probe succeeds and the breaker closes --- observe the
+        open~$\to$~half\_open~$\to$~closed sequence in the events, and
+        catalog returning 200s again.
+  \item \textbf{Tune thresholds.} Sweep \texttt{minimum\_calls} over
+        $\{2, 4, 8\}$ and \texttt{failure\_rate\_threshold} over
+        $\{0.25, 0.5, 1.0\}$. Record calls-reaching-inventory for each
+        combination. Lower floors open sooner (better protection, more
+        false positives under transient single-failure noise); higher
+        thresholds tolerate flaky-but-alive dependencies.
+  \item \textbf{Break the budget rule.} Set \texttt{CATALOG\_TIMEOUT}
+        larger than the caller's deadline and re-run the drill with
+        latency chaos (\texttt{chaos.latency\_seconds = 0.4}). Count
+        abandoned work. Restore the rule.
+\end{enumerate}
+
+\subsection*{War Story: The 200 ms Blip That Took Down Three Services}
+
+Northwind Robotics, a Tuesday. The warehouse service's storage layer
+hiccupped: $p99$ latency jumped from $40\,\mathrm{ms}$ to
+$200\,\mathrm{ms}$ for ninety seconds --- a blip, by any dashboard's
+standards. Here is what the composition did with it.
+
+Inventory's calls to warehouse, budgeted at $100\,\mathrm{ms}$, now timed
+out; inventory's client retried twice with a fixed $50\,\mathrm{ms}$
+backoff. Catalog called inventory with retries of its own. Within forty
+seconds the warehouse was receiving roughly $27\times$ its normal request
+rate --- Theorem~\ref{thm:ch15-retry-amplification} with $a = 3$, $n = 3$,
+and the feedback loop of Figure~\ref{fig:ch15-cascade} closing: each retry
+wave deepened the warehouse's queue, which raised latency further, which
+converted more slow successes into timeout ``failures,'' which justified
+more retries. The warehouse, which had been \emph{slow}, was now genuinely
+down; inventory's shared connection pool exhausted waiting on it, so
+inventory stopped serving \emph{all} requests, including the ones that
+never touched warehouse; catalog followed. Three services down, customer-
+visible, from a 200\,ms blip. The blip had healed on its own within ninety
+seconds; the outage took forty minutes, because each restart walked
+straight back into $27\times$ load.
+
+The postmortem fixes read as this chapter's table of contents: per-hop
+deadline budgets that shrink toward the leaves; full jitter on every
+backoff; a process-wide retry budget of ten percent of request volume; one
+circuit breaker per dependency with a minimum-call floor; a dedicated
+warehouse client pool so inventory's other endpoints kept their own
+capacity; and a standing chaos drill so the next 200\,ms blip is a line in
+a metrics dashboard instead of an incident review. The blips did not stop.
+The outages did.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch15-exercises}
+
+\begin{enumerate}
+  \item \textbf{Deadline budgets.} A public API promises $p99 < 1.5
+        \,\mathrm{s}$. The chain is edge $\to$ orders $\to$ payments $\to$
+        ledger, and ledger's measured $p99.9$ is $300\,\mathrm{ms}$.
+        Propose per-hop budgets satisfying Definition~\ref{def:ch15-deadline}
+        with headroom at each layer, and state what you would measure to
+        validate them.
+  \item \textbf{Amplification audit.} Your platform's call graph has four
+        hops; each hop currently retries up to twice with no budget.
+        Compute the worst-case downstream load multiplier. Now impose a
+        one-token retry budget per process at the two middle hops: recompute.
+        Which hop's budget matters most, and why?
+  \item \textbf{Breaker parameters.} A dependency serves
+        $2{,}000\,\mathrm{req/s}$ to your fleet at $99.95\%$ success, and
+        its team asks you not to exceed $20\,\mathrm{req/s}$ during its
+        recoveries. Design $(\theta, W, N, d, p, s)$ from
+        Definition~\ref{def:ch15-breaker} and justify each number.
+  \item \textbf{Extend the breaker.} Add a \emph{slow-call} dimension to
+        Listing~\ref{lst:ch15-breaker}: calls slower than a threshold count
+        as failures even when they succeed. Prove with a manual-clock test
+        that five slow successes open the breaker.
+  \item \textbf{Hedge, honestly.} Extend the demo's catalog $\to$ inventory
+        call to hedge after the measured $p95$. Instrument the extra-call
+        rate. At what injected $q = \Pr[T > h]$ does your measured hedge
+        rate match $1 + q$? What must be true of the endpoint for hedging
+        to be safe?
+  \item \textbf{Outbox ordering.} The relay of
+        Listing~\ref{lst:ch15-outbox} publishes in \texttt{seq} order, but
+        a crash mid-batch plus a retry can interleave replays with new
+        events. Specify (and test) a per-aggregate ordering guarantee:
+        what changes in the outbox schema, the relay, and the consumer?
+  \item \textbf{Choreograph the saga.} Re-express
+        Listing~\ref{lst:ch15-saga}'s flow as choreography over the
+        in-process broker: inventory emits \texttt{inventory.reserved},
+        payments consumes it, and so on. Where does the compensation graph
+        now live? Write the test that catches a missing compensation
+        subscription.
+  \item \textbf{Mesh threat model.} Your mesh provides mTLS everywhere.
+        Enumerate three application-level failure or misuse modes that
+        mTLS does nothing for, and name the chapter pattern that addresses
+        each.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch15-interview}
+
+\subsection*{Junior (Q1--Q10)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{Synchronous versus asynchronous communication between
+        services --- what's the difference and when do you pick each?}
+        Synchronous (REST, gRPC): the caller blocks for a response; simple
+        mental model, tight temporal coupling, additive latency. Asynchronous
+        (queues, streams): the caller hands work to a broker; low temporal
+        coupling, natural fan-out and load smoothing, at the price of
+        duplicates, lag, and harder status queries. Pick synchronous for
+        user-facing queries that need an answer now; asynchronous for
+        side effects, fan-out, and anything whose consumer can be down.
+  \item \textbf{What is a timeout, and why is ``no timeout'' never the
+        right default?}
+        A timeout is an upper bound on how long a call may occupy the
+        caller's resources. Without one, a slow dependency holds your
+        threads, connections, and memory indefinitely --- slow is worse
+        than down, because down gives you an error to react to and slow
+        gives you a resource leak.
+  \item \textbf{What are the three states of a circuit breaker?}
+        \textsc{Closed}: calls flow and failures are counted.
+        \textsc{Open}: calls are rejected immediately without touching the
+        dependency. \textsc{Half\_open}: a limited number of probe calls
+        are admitted to test recovery; success closes, failure reopens.
+  \item \textbf{Why does a circuit breaker need a minimum number of calls
+        before it can open?}
+        Statistics. Two failures out of two overnight calls must not trip
+        a circuit that carries thousands of calls per minute at noon. The
+        minimum-call floor $N$ ensures the failure rate is evaluated only
+        once the window contains enough evidence to mean something.
+  \item \textbf{What is a bulkhead, in software?}
+        A partition of resources --- connection pools, thread pools,
+        concurrency permits --- so that one failing dependency cannot
+        consume the capacity everything else needs. Named for ship
+        compartments: a breach floods one compartment, not the hull.
+  \item \textbf{What is the difference between orchestration and
+        choreography?}
+        Orchestration: one coordinator explicitly drives each step and owns
+        workflow state. Choreography: services react to events and emit
+        their own; the workflow is emergent. Orchestration centralizes
+        failure handling and status queries; choreography removes the
+        coordinator as a bottleneck and single point of failure.
+  \item \textbf{What does it mean for a consumer to be idempotent, and why
+        does at-least-once delivery require it?}
+        An idempotent consumer processes the same event many times with the
+        effect of processing it once --- typically by recording processed
+        event IDs in the same transaction as the state change. At-least-once
+        delivery guarantees replays; without dedup, replays double-apply
+        effects (charging twice, decrementing stock twice).
+  \item \textbf{What is service discovery?}
+        The mechanism by which callers learn the current network locations
+        of a logical service's instances --- via DNS, a registry with
+        health checking, or a platform API --- replacing spatially coupled
+        hardcoded addresses that break under autoscaling and rescheduling.
+  \item \textbf{Name three of the fallacies of distributed computing and a
+        consequence of believing each.}
+        ``The network is reliable'' $\to$ you cannot distinguish
+        unprocessed from unacknowledged requests, so retries need
+        idempotency. ``Latency is zero'' $\to$ tail latency, not the mean,
+        must set your timeout budgets. ``Topology doesn't change'' $\to$
+        hardcoded addresses become outages the first time autoscalers run.
+  \item \textbf{What is a compensating action?}
+        The semantic undo of a saga step: release the reservation, refund
+        the charge, cancel the shipment. It is not a database rollback ---
+        the original step really happened and the world saw it; the
+        compensation applies a forward action that restores the business
+        invariant.
+\end{enumerate}
+
+\subsection*{Mid (Q11--Q20)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{Derive the retry amplification of an $n$-hop chain where
+        each hop makes up to $a$ attempts.}
+        Let $L_k$ be calls arriving at hop $k$; $L_0 = 1$ (the client
+        request) and $L_{k+1} = a \cdot L_k$, so $L_k = a^k$ and the total
+        downstream load is $S(n,a) = \sum_{k=1}^{n} a^k =
+        a(a^n-1)/(a-1)$. With $a = 3$, $n = 3$: $3 + 9 + 27 = 39$ requests
+        per client call --- $39\times$ amplification, $27\times$ at the
+        leaf (Theorem~\ref{thm:ch15-retry-amplification}).
+  \item \textbf{How do retry budgets cap amplification?}
+        By making retries spend from a process-wide token bucket where only
+        retries (never first attempts) consume tokens. Attempts per logical
+        request are then bounded by $1 + B$ regardless of configured
+        \texttt{max\_retries}, and sustained retry rate by the refill rate
+        (Proposition~\ref{prop:ch15-budget-cap}).
+        Listing~\ref{lst:ch15-retry-budget-tests} proves it: five permitted
+        retries, two tokens, three requests total.
+  \item \textbf{Why jitter, and why \emph{full} jitter?}
+        Failures correlate clients in time; identical deterministic
+        backoffs re-correlate them into waves that re-collide with the
+        recovering service. Full jitter draws each sleep uniformly from
+        $[0, \min(c, b \cdot 2^{k})]$, decorrelating the herd while keeping
+        the exponential envelope --- at the cost of occasionally short
+        delays, which is what the budget is for.
+  \item \textbf{Explain the deadline budget rule for a call chain.}
+        Every hop's timeout must be smaller than its caller's remaining
+        budget, with headroom: $T_i > \sum_{j > i} T_j$. Violation means
+        the caller gives up while the callee keeps working --- pure waste,
+        and under load, pool exhaustion. gRPC propagates an absolute
+        deadline in metadata so each hop derives its remaining budget
+        instead of re-guessing~\cite{grpcdocs}.
+  \item \textbf{Design breaker thresholds for a dependency with a 99.9\%
+        success SLO serving you 500 req/s.}
+        Work backward from the SLO and volume. Baseline failure rate is
+        $0.1\%$; set $\theta = 0.5$ so the breaker opens only when failure
+        is unambiguously systemic, not at SLO noise. Window $W = 10$ s
+        covers $\approx 5{,}000$ calls; set $N = 20$ (a floor far below
+        normal volume so statistics are meaningful, far above noise). Open
+        duration $d = 5$--$30$ s, tuned to the dependency's observed
+        recovery time. Probes: $p = 1$--$3$ concurrent, $s = 3$ consecutive
+        successes --- recovery is when probes succeed repeatedly, not once.
+        Validate every number with the chaos drill, not with hope.
+  \item \textbf{What is the tail-amplification trade-off of hedged
+        requests?}
+        Hedging fires a second identical call when the first exceeds a
+        delay $h$; with $q = \Pr[T > h]$, expected load per request rises
+        to $1 + q$ while the tail (e.g.\ $p99$) falls sharply. Constraints:
+        hedge only idempotent operations (or carry idempotency keys),
+        disregard the loser, and never hedge into an open circuit ---
+        hedging a sick dependency is amplification, not resilience.
+  \item \textbf{Client-side versus server-side load balancing?}
+        Server-side: a dedicated LB owns health checking and instance
+        selection; clients stay simple; cost is an extra hop and a
+        component to make redundant. Client-side: every client watches a
+        registry and picks instances; fewer hops, richer per-client policy;
+        cost is embedding correct LB logic into every client in every
+        language. Meshes move client-side logic into the sidecar to get
+        both.
+  \item \textbf{Explain the outbox pattern and its delivery guarantee.}
+        Domain write and event-record insert commit in one local
+        transaction (atomicity); a relay polls the outbox, publishes, and
+        marks published only after the broker accepts. A crash between
+        publish and mark replays the event, so the guarantee is
+        \textbf{at-least-once} --- which is precisely why consumers must be
+        idempotent. Together they yield effectively-once processing without
+        distributed transactions (Listing~\ref{lst:ch15-outbox}).
+  \item \textbf{What is backpressure, and name three concrete mechanisms.}
+        The ability of an overloaded component to push load upstream
+        instead of collapsing: explicit rejection (429/503 with
+        \texttt{Retry-After}), bounded queues that fail fast when full, and
+        credit-based flow control (HTTP/2 stream windows, gRPC). Unbounded
+        queues are not backpressure; they are delayed failure.
+  \item \textbf{Why is a slow dependency more dangerous than a dead one?}
+        A dead dependency fails fast: errors are immediate and cheap, the
+        breaker opens quickly, callers degrade. A slow dependency fails
+        \emph{expensively}: every call occupies a worker, a connection, and
+        memory for the full timeout, so the caller's pools exhaust ---
+        stages 1--3 of Figure~\ref{fig:ch15-cascade} --- and the failure
+        propagates to healthy functionality sharing those pools.
+\end{enumerate}
+
+\subsection*{Senior (Q21--Q27)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=21]
+  \item \textbf{Walk through a cascading failure from a latency blip to a
+        fleet outage, and name the intervention at each stage.}
+        Latency blip $\to$ blocked workers (intervene: per-hop timeouts)
+        $\to$ pool exhaustion (bulkheads, bounded concurrency) $\to$ queue
+        buildup (bounded queues, load shedding) $\to$ timeouts plus retries
+        (budgets, jitter, breakers) $\to$ death spiral with flapping
+        instances (gradual re-add, traffic ramps, staged restarts). Each
+        stage's signal and countermeasure:
+        Table~\ref{tab:ch15-failure-modes}.
+  \item \textbf{Saga versus 2PC --- when and why?}
+        2PC gives isolation at the price of blocking participants, coupled
+        availability, and a coordinator whose crash leaves everyone
+        in-doubt; over stateless HTTP it is unimplementable correctly.
+        Sagas give atomicity of \emph{outcome} via local transactions plus
+        compensating actions, accepting visible intermediate states
+        (no isolation). Choose sagas for cross-service business flows in
+        always-available systems --- which is to say, almost always; choose
+        2PC essentially only inside a single tightly administered database
+        tier~\cite{kleppmann2017ddia}.
+  \item \textbf{Choreographed versus orchestrated saga --- trade-offs?}
+        Choreography keeps each participant autonomous and removes the
+        orchestrator as a bottleneck, but the workflow --- and worse, the
+        compensation graph --- exists nowhere in code; debugging
+        ``where is order ORD-7?'' requires reconstructing it from event
+        logs. Orchestration centralizes sequence, state, and compensation,
+        making status queries and failure handling explicit, at the cost of
+        operating one more stateful component. Beyond two or three steps,
+        orchestration is usually the honest choice.
+  \item \textbf{What does a service mesh actually solve --- and what does
+        it not solve?}
+        Solves, uniformly and language-independently: mTLS workload
+        identity, transport encryption, discovery, load balancing, per-hop
+        retries/timeouts/circuit breaking, and golden-signal telemetry ---
+        moved from application libraries into the data plane. Does not
+        solve: idempotency of your endpoints, saga compensation logic,
+        schema evolution, end-to-end deadline budgets across business
+        operations, or knowing which of your failures are retryable. The
+        mesh owns transport hygiene; the application still owns semantics.
+  \item \textbf{How do you present eventual consistency honestly in an API
+        contract?}
+        Return \texttt{202 Accepted} with \texttt{Location} to a status
+        resource; model the workflow's state machine as explicit,
+        documented resource states (\texttt{PLACED}, \texttt{PAID},
+        \texttt{SHIPPED}, \texttt{COMPENSATED}) with machine-readable
+        failure reasons; give clients poll or webhook completion signals;
+        never report a terminal state you have not reached. Consistency
+        boundaries hidden from clients become their incidents.
+  \item \textbf{Your breakers keep flapping open-closed-open after
+        recovery. Diagnose.}
+        Classic causes: $s = 1$ (one lucky probe closes onto a still-fragile
+        dependency, re-fail, reopen), $d$ shorter than the dependency's
+        real recovery time, and no traffic ramp --- the closed breaker
+        admits a thundering herd of pent-up traffic. Fixes: require several
+        consecutive probe successes, lengthen $d$ past measured recovery,
+        and shed or ramp traffic on close. Alert on the flap rate itself.
+  \item \textbf{How do bulkheads interact with async event loops?}
+        An event loop makes threads cheap but does not make \emph{the
+        dependency's} capacity infinite: without semaphores per dependency
+        you can still issue ten thousand concurrent calls into a service
+        that can serve two hundred, buying you its collapse. The async
+        bulkhead is a semaphore (plus per-dependency connection limits);
+        Listing~\ref{lst:ch15-demo} uses both. Concurrency is cheaper, not
+        free.
+\end{enumerate}
+
+\subsection*{Staff (Q28--Q32)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=28]
+  \item \textbf{Design the resilience posture for a new user-facing
+        endpoint with four downstream dependencies, two of which are
+        non-critical.}
+        Critical dependencies: deadline budgets derived from the endpoint
+        SLO, one breaker each with thresholds justified from their SLOs and
+        volumes, budgeted and jittered retries on idempotent calls only,
+        per-dependency bulkheads sized below their healthy capacity.
+        Non-critical: same machinery, plus designed degradation --- the
+        endpoint renders without them (cached or partial responses), their
+        budget share is small, and their breakers' open state is a silent
+        fallback, not a 503. Then: a chaos drill proving the posture before
+        launch, metrics hooks wired from day one, and an explicit answer
+        for every dependency to ``what does the user get when this is
+        down?''
+  \item \textbf{When would you deliberately choose \emph{not} to retry?}
+        When the operation is non-idempotent and carries no idempotency
+        key; when the caller's remaining deadline cannot absorb the backoff
+        (retrying produces work nobody awaits); when the error is
+        deterministic (4xx validation, auth); when the budget is exhausted
+        and the marginal retry's expected value is below its contribution
+        to a developing retry storm; and in the middle of an incident,
+        fleet-wide, where the kindest thing a client can do is fail fast
+        and quietly.
+  \item \textbf{How would you set organization-wide defaults for timeouts,
+        retries, and breakers without creating false confidence?}
+        Ship a thin client library encoding the chapter's machinery ---
+        budgets, jitter, per-dependency breakers, metrics hooks --- with
+        defaults derived from measured platform latency distributions, not
+        folklore. Require per-service overrides to carry a justification
+        and an expiration. Instrument everything and publish the
+        flapping/open-rate dashboards. And run shared chaos drills,
+        because a default nobody has seen fire is decoration
+        (Section~\ref{sec:ch15-lab}). Policy encodes the floor; drills
+        prove the behavior.
+  \item \textbf{A 200 ms latency blip in one leaf service took down three
+        tiers. Reconstruct the mechanism and the minimal fix set.}
+        Theorem~\ref{thm:ch15-retry-amplification} with synchronized
+        backoffs: the blip converted slow successes into timeouts; retries
+        multiplied load $\approx a^{n}$; the leaf's queues deepened,
+        raising latency further (the feedback arrow of
+        Figure~\ref{fig:ch15-cascade}); shared pools carried the failure
+        sideways to healthy endpoints. Minimal fixes, in order of leverage:
+        per-hop deadline budgets; full jitter; process-wide retry budgets;
+        per-dependency breakers and bulkheads; gradual recovery (probes,
+        traffic ramps). Any one helps; the composition is the fix, because
+        the outage was a property of the composition.
+  \item \textbf{Design the migration from in-code resilience libraries to
+        a service mesh for a forty-service platform --- what moves, what
+        stays, and how do you avoid a regression mid-migration?}
+        Moves to the mesh: mTLS and identity, discovery, load balancing,
+        per-hop timeout/retry/breaker enforcement, telemetry. Stays in the
+        application: idempotency, saga orchestration and compensation,
+        deadline budgets across business operations, degradation/fallback
+        semantics, retryability classification. Migration discipline:
+        shadow first (mesh enforcing telemetry only), then enforce with
+        in-code policy as the safety net --- and make the two policies
+        \emph{identical} during overlap, because mesh retries stacked on
+        library retries are amplification you chose on purpose. Remove
+        in-code transport policy only after drills against the mesh
+        configuration reproduce Table~\ref{tab:ch15-drill}'s behavior.
+        Treat it as a protocol migration
+        (Chapter~\ref{ch:versioning}'s discipline), not an install.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch15-bibliography}
+
+\begin{itemize}
+  \item Sam Newman, \emph{Building Microservices}, 2nd ed., O'Reilly, 2021
+        --- the reference for communication styles, orchestration versus
+        choreography, and sagas in organizational
+        context~\cite{newman2021microservices}.
+  \item Michael T. Nygard, \emph{Release It!}, 2nd ed., Pragmatic
+        Bookshelf, 2018 --- the origin text for circuit breakers,
+        bulkheads, timeouts, and the stability
+        patterns/anti-patterns vocabulary this chapter
+        formalizes~\cite{nygard2018releaseit}.
+  \item Martin Kleppmann, \emph{Designing Data-Intensive Applications},
+        O'Reilly, 2017 --- chapters on distributed systems faults,
+        consistency, and exactly-why-2PC-is-hard; the theoretical
+        foundation for Section~\ref{subsec:ch15-transactions}
+        ~\cite{kleppmann2017ddia}.
+  \item Uwe Friedrichsen, \emph{Patterns of Resilience} article series
+        (uwe-friedrichsen.de) --- a deep, pragmatic taxonomy of resilience
+        patterns and their combinations; the best long-form companion to
+        Sections~\ref{subsec:ch15-timeouts}--\ref{subsec:ch15-cascade}.
+  \item Betsy Beyer et al., \emph{Site Reliability Engineering}, O'Reilly,
+        2016 --- the chapters ``Addressing Cascading Failures'' and
+        ``Managing Load'' (overload, load shedding, criticality) at Google
+        scale.
+  \item Gregor Hohpe and Bobby Woolf, \emph{Enterprise Integration
+        Patterns}, Addison-Wesley, 2003 --- the canonical vocabulary for
+        messaging, idempotent receivers, and the patterns underlying
+        Section~\ref{subsec:ch15-transactions}.
+  \item Envoy Proxy documentation (envoyproxy.io) --- circuit breaking,
+        outlier detection, retries, and the xDS APIs the mesh figure
+        (Figure~\ref{fig:ch15-mesh}) abstracts.
+  \item Istio documentation (istio.io) --- control-plane architecture,
+        traffic management, and mTLS identity model.
+  \item The gRPC documentation on deadlines and
+        cancellation~\cite{grpcdocs}; the FastAPI~\cite{fastapidocs} and
+        httpx~\cite{httpxdocs} documentation for the toolkit used
+        throughout the listings; and the twelve-factor
+        methodology~\cite{twelvefactor} for the operational posture this
+        chapter's services assume.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch15-capstones}
+
+\subsection*{Capstone 15.1 --- Breaker Under a Microscope \hfill [junior]}
+\textbf{Objective:} Reimplement Listing~\ref{lst:ch15-breaker} from
+Definition~\ref{def:ch15-breaker} alone, then attack it.
+
+\textbf{Inputs/Datasets:} Listings 15.1--15.2; no datasets.
+
+\textbf{Steps:} (1)~Reimplement the breaker from the definition without
+consulting the listing. (2)~Run Listing~\ref{lst:ch15-breaker-tests}
+unmodified against your implementation. (3)~Seed three deliberate bugs ---
+drop the minimum-call floor, forget window eviction, allow unlimited
+probes --- and record which tests catch each. (4)~Add one new test:
+\texttt{half\_open\_success\_threshold=3} with a probe sequence of
+success--success--failure, asserting the breaker reopens and requires the
+full open duration again.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All Listing~\ref{lst:ch15-breaker-tests} tests pass
+        against your reimplementation.
+  \item[$\square$] Each seeded bug is caught by at least one existing test;
+        you can name the mapping.
+  \item[$\square$] The new probe-threshold test passes and fails against
+        the seeded unlimited-probe bug.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add the slow-call failure dimension (Exercise 4 of
+Section~\ref{sec:ch15-exercises}) with a manual-clock proof.
+
+\subsection*{Capstone 15.2 --- Latency Chaos and the Price of Hedging \hfill [mid]}
+\textbf{Objective:} Extend the drill to latency faults and measure hedged
+requests honestly.
+
+\textbf{Inputs/Datasets:} Listings 15.5--15.6; the \texttt{ChaosConfig}
+latency knob.
+
+\textbf{Steps:} (1)~Drive inventory with \texttt{latency\_seconds} drawn
+from a seeded bimodal distribution ($95\%$ fast, $5\%$ slow). (2)~Measure
+catalog $p99$ with no hedging. (3)~Add hedging at the measured fast-mode
+$p95$ and re-measure $p99$ and the extra-call rate. (4)~Verify the extra
+load matches $1 + q$ within sampling error across seeded runs.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Hedged $p99$ is materially below unhedged $p99$ on the
+        same seed.
+  \item[$\square$] Measured hedge rate equals $1 + q$ within the tolerance
+        you derived.
+  \item[$\square$] Hedging is disabled while the breaker is open; a test
+        proves it.
+  \item[$\square$] Everything is seeded and offline; no wall-clock
+        assertions.
+\end{itemize}
+
+\textbf{Stretch Goals:} Cancel the loser request and measure the downstream
+savings; add a budget so hedges spend retry tokens too.
+
+\subsection*{Capstone 15.3 --- Production Outbox: Retry, DLQ, Ordering \hfill [mid]}
+\textbf{Objective:} Harden Listing~\ref{lst:ch15-outbox} into the relay you
+would actually run.
+
+\textbf{Inputs/Datasets:} Listings 15.7--15.8; a seeded event generator you
+write (Northwind Robotics orders, 10k events).
+
+\textbf{Steps:} (1)~Add relay retry with the
+Listing~\ref{lst:ch15-retry-budget} budget for publish failures.
+(2)~Add a dead-letter column/table after $k$ failed attempts, with a
+requeue operation. (3)~Enforce per-aggregate ordering: no event for
+aggregate $A$ is published while an earlier event for $A$ is unpublished
+after a failure --- implement via per-aggregate sequencing in the outbox.
+(4)~Tests: poison event goes to DLQ after exactly $k$ attempts; aggregates
+without the poison event are unaffected; requeue restores flow exactly
+once.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Publish-failure retries respect the budget cap (proved
+        with a counting publisher).
+  \item[$\square$] DLQ after exactly $k$ attempts; requeue is idempotent.
+  \item[$\square$] Per-aggregate ordering holds under crash/replay
+        injection; cross-aggregate throughput is unaffected.
+  \item[$\square$] The Listing~\ref{lst:ch15-outbox-tests} suite still
+        passes unmodified.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a lag metric (unpublished count, oldest
+unpublished age) to the relay's event hook and alert thresholds to the
+lab's dashboard list.
+
+\subsection*{Capstone 15.4 --- Measure Theorem~\ref{thm:ch15-retry-amplification} \hfill [senior]}
+\textbf{Objective:} Build a four-hop amplification testbed and verify the
+theorem empirically, then deploy the countermeasures and verify them too.
+
+\textbf{Inputs/Datasets:} Listings 15.1, 15.3, 15.5; a fourth FastAPI tier
+you add downstream of warehouse.
+
+\textbf{Steps:} (1)~Wire edge $\to$ catalog $\to$ inventory $\to$
+warehouse, each hop with a counting stub for its downstream and
+configurable retry count. (2)~With the leaf hard-down and three attempts
+per hop, measure calls arriving at each hop; compare to $3, 9, 27$ and the
+total to $39$. (3)~Add per-process one-token retry budgets at the two
+middle hops; re-measure; derive the closed form for the budgeted case and
+check it. (4)~Add full jitter and confirm (statistically, over seeds) that
+retry burst correlation drops.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Measured per-hop counts match $a^k$ exactly in the
+        unbudgeted run.
+  \item[$\square$] Your closed-form prediction for the budgeted run matches
+        measurement.
+  \item[$\square$] A written paragraph explains any residual gap between
+        theory and measurement.
+  \item[$\square$] Fully offline, seeded, no wall-clock assertions.
+\end{itemize}
+
+\textbf{Stretch Goals:} Replace counting stubs with the real ASGI chain and
+show the theorem survives real HTTP machinery.
+
+\subsection*{Capstone 15.5 --- Resilience Architecture for Fleet Telemetry \hfill [staff]}
+\textbf{Objective:} Produce and defend a complete resilience design for
+Northwind Robotics' fleet-telemetry platform: ingestion API $\to$
+normalizer $\to$ enrichment $\to$ storage, plus a user-facing dashboard
+read path.
+
+\textbf{Inputs/Datasets:} This chapter; the Northwind Robotics endpoint set
+from prior chapters; SLO sheet you write (ingestion $99.95\%$,
+dashboard $99.9\%$ at $p99 < 800\,\mathrm{ms}$).
+
+\textbf{Steps:} (1)~Draw the call graph and classify every edge: sync/async,
+coupling dimensions, retryability, criticality. (2)~Assign deadline
+budgets, breaker parameters, bulkhead sizes, retry budgets, and
+degradation behavior per edge, each justified from the SLOs and a stated
+traffic model. (3)~Write the failure-mode analysis table (extend
+Table~\ref{tab:ch15-failure-modes}) for your graph's top five scenarios,
+including one poisoning attack and one slow-dependency case. (4)~Define
+the chaos-drill program: which faults, which cadence, which abort
+criteria. (5)~Record the mesh boundary: which policies move to the mesh,
+which stay in the application, and why.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Every edge carries a justified, SLO-derived parameter
+        set; no ``default because default.''
+  \item[$\square$] Deadline budgets satisfy
+        Definition~\ref{def:ch15-deadline} on every path.
+  \item[$\square$] The failure-mode table has a signal and a countermeasure
+        per scenario; at least one scenario requires degradation, not just
+        failure.
+  \item[$\square$] The drill program includes abort criteria and a
+        rollback story.
+  \item[$\square$] The mesh boundary list contains at least three
+        application-owned concerns with correct justifications.
+\end{itemize}
+
+\textbf{Stretch Goals:} Cost the design: extra requests from retries and
+hedges, engineering hours, and drill operational cost, against the
+incident cost model from Section~\ref{sec:ch15-lab}'s war story.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch15-deps}
+
+All code runs offline after a one-time install. From PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\noindent\textbf{requirements.txt:}
+\begin{minted}{text}
+fastapi>=0.110
+httpx>=0.27
+pydantic>=2.7
+pytest>=8
+tenacity>=8.3
+\end{minted}
+
+\subsection{fastapi ($\geq$ 0.110)}
+\textbf{Description:} The ASGI framework hosting the catalog, inventory,
+and warehouse services of Listing~\ref{lst:ch15-demo}. \textbf{Why
+included:} real routing, dependency injection, and response handling over
+real ASGI request cycles --- the chaos drill exercises genuine framework
+machinery, not a mock of it~\cite{fastapidocs}. \textbf{Alternatives:}
+Starlette directly (the demo would work nearly unchanged); Flask (WSGI ---
+loses the async concurrency the drill depends on); a live multi-process
+deployment under uvicorn (faithful, but no longer offline-pure).
+\textbf{Installation:} \texttt{pip install "fastapi>=0.110"} in the
+activated virtual environment.
+
+\subsection{httpx ($\geq$ 0.27)}
+\textbf{Description:} The sync/async HTTP client used for every
+inter-service call in this chapter~\cite{httpxdocs}. \textbf{Why included:}
+\texttt{ASGITransport} wires clients to in-process FastAPI apps with the
+real request/response and timeout code paths --- no sockets, no network;
+\texttt{Limits} provides the connection-pool bulkhead; the
+\texttt{TransportError} hierarchy is what
+Listing~\ref{lst:ch15-retry-budget} classifies. \textbf{Alternatives:}
+\texttt{requests} (sync only, no ASGI transport); \texttt{aiohttp} (fine,
+but its client/timeout model differs from this book's other chapters);
+gRPC with its own deadline propagation for the RPC variant
+(Chapter~\ref{ch:grpc}). \textbf{Installation:}
+\texttt{pip install "httpx>=0.27"}.
+
+\subsection{pydantic ($\geq$ 2.7)}
+\textbf{Description:} Data validation and settings library; the model layer
+under FastAPI. \textbf{Why included:} it is FastAPI's contract surface ---
+request/response schemas, validation errors --- and the natural home for
+the typed configuration objects (breaker and retry policies) you will
+extract when these listings grow configuration files. \textbf{Alternatives:}
+\texttt{dataclasses} with hand-rolled validation (what the listings use for
+their internal value types, to keep the dependency surface visible);
+\texttt{attrs}; \texttt{msgspec} (fast, narrower ecosystem).
+\textbf{Installation:} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{pytest ($\geq$ 8)}
+\textbf{Description:} The test framework running all 34 chapter tests.
+\textbf{Why included:} fixtures, \texttt{raises}, and \texttt{approx} keep
+the deterministic proofs (manual clocks, counting stubs, event-order
+assertions) short enough to read as specifications. \textbf{Alternatives:}
+\texttt{unittest} (stdlib; workable, more boilerplate); \texttt{nose2}
+(unmaintained momentum). \textbf{Installation:}
+\texttt{pip install "pytest>=8"}.
+
+\subsection{tenacity ($\geq$ 8.3)}
+\textbf{Description:} The production-grade Python retry library:
+declarative stop/wait/retry conditions, jittered exponential backoff,
+async support. \textbf{Why included:} the chapter's
+Listing~\ref{lst:ch15-retry-budget} deliberately teaches the machinery by
+building it; in real services you should reach for tenacity's
+battle-tested implementation and add this chapter's two contributions ---
+the process-wide token-bucket budget and the deadline guard --- on top.
+\textbf{Alternatives:} \texttt{pybreaker} for the circuit-breaker half
+(mature, sync-first; compare its state machine against
+Definition~\ref{def:ch15-breaker} as an exercise); \texttt{resilience4j}
+concepts if your estate is JVM (the patterns are identical; the Java
+implementation is the genre's reference); mesh-level retry policy
+(Envoy/Istio) for the transport tier --- with
+Section~\ref{sec:ch15-pitfalls} P15.7's caveat. \textbf{Installation:}
+\texttt{pip install "tenacity>=8.3"}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch15-summary}
+
+\begin{itemize}
+  \item Distribution moves coupling from the compiler to the network.
+        Classify every interaction by sync/async and
+        orchestration/choreography, and by its temporal, spatial, and
+        logical coupling --- then make each coupling a decision, not a
+        default (Section~\ref{subsec:ch15-taxonomy}).
+  \item The fallacies of distributed computing are a checklist, not a
+        trivia list; each ignored fallacy has a named failure mode, an
+        early signal, and a metric (Section~\ref{subsec:ch15-coupling}).
+  \item Timeouts are the foundation: every call gets one, and budgets
+        shrink strictly toward the leaves
+        (Definition~\ref{def:ch15-deadline}). A timeout longer than the
+        caller's manufactures wasted work.
+  \item Retries amplify multiplicatively: $S(n,a) = a(a^n-1)/(a-1)$
+        downstream requests per client request --- $39\times$ for three
+        attempts across three hops
+        (Theorem~\ref{thm:ch15-retry-amplification}). Token-bucket budgets
+        cap it (Proposition~\ref{prop:ch15-budget-cap}); jitter decorrelates
+        it; deadlines and \texttt{Retry-After} discipline it.
+  \item The circuit breaker is a state machine with parameters
+        $(\theta, W, N, d, p, s)$, one per dependency: minimum-call floors
+        against noise, rolling windows against staleness, bounded probes
+        against stampedes (Definition~\ref{def:ch15-breaker},
+        Listing~\ref{lst:ch15-breaker}).
+  \item Bulkheads bound failure domains; hedged requests buy tail latency
+        at an explicit $1 + q$ load tax; backpressure converts overload
+        into cheap rejection instead of expensive collapse.
+  \item Cascading failure is a six-stage spiral with a feedback loop; every
+        stage has an observable precursor and a countermeasure
+        (Figure~\ref{fig:ch15-cascade},
+        Table~\ref{tab:ch15-failure-modes}). Recovery must be engineered:
+        probes, ramps, and staged restarts, because a fallen service
+        cannot stand back up into the load that felled it.
+  \item Discovery and load balancing decide \emph{who talks to whom};
+        the mesh moves transport hygiene (mTLS, retries, timeouts,
+        telemetry) into the data plane while the control plane configures
+        it --- and neither touches application semantics, which remain
+        yours (Section~\ref{subsec:ch15-mesh}).
+  \item Distributed transactions: sagas with compensating actions instead
+        of 2PC; the transactional outbox for atomic write-plus-publish;
+        idempotent consumers to absorb at-least-once replays; and eventual
+        consistency presented honestly in the API contract.
+  \item Patterns you have not drilled are decoration. The chaos harness
+        exists so you can watch the state machine fire before the incident
+        does (Section~\ref{sec:ch15-lab}).
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch15-quickref}
+
+\subsection*{Pattern selection}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Symptom / risk} & \textbf{Reach for} \\
+    \midrule
+    Calls hang when dependency slows & per-hop timeouts + deadline budgets \\
+    Retry volume exploding during incidents & token-bucket retry budget + full jitter \\
+    One dependency poisoning the process & circuit breaker (one per dependency) + bulkhead \\
+    Tail latency dominates user experience & hedged requests (idempotent calls only) \\
+    Overload converting to collapse & backpressure: bounded queues, 429/503 + \texttt{Retry-After} \\
+    Dual-write inconsistency (DB + events) & transactional outbox + relay \\
+    Replayed events double-apply effects & idempotent consumer (dedup in same tx) \\
+    Multi-step flow fails halfway & saga with compensating actions (orchestrated) \\
+    Polyglot transport policy drift & service mesh data plane (keep semantics in-app) \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Symptom-to-pattern selection.}
+  \label{tab:ch15-pattern-select}
+\end{table}
+
+\subsection*{Breaker parameter cheat-sheet}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Parameter} & \textbf{Start at} & \textbf{Tune by} \\
+    \midrule
+    $\theta$ failure rate & 0.5 & lower for flaky-but-critical, never below SLO noise \\
+    $W$ window & 10--60 s & dependency's failure-burst duration \\
+    $N$ minimum calls & 10--20 & high-volume deps: higher; low-volume: use duration windows \\
+    $d$ open duration & 5--30 s & measured recovery time of the dependency \\
+    $p$ probe concurrency & 1 & raise only with a traffic-ramp story \\
+    $s$ probe successes & 2--3 & raise if you observe flap (open/close oscillation) \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Starting points for Definition~\ref{def:ch15-breaker}'s
+  parameters. Every number is a hypothesis until a chaos drill confirms it.}
+  \label{tab:ch15-breaker-cheatsheet}
+\end{table}
+
+\subsection*{Anti-amplification checklist}
+\begin{itemize}
+  \item[$\square$] Every outbound call has a timeout; budgets shrink toward
+        the leaves on every path.
+  \item[$\square$] Retries only on idempotent operations or with
+        idempotency keys (Chapter~\ref{ch:idempotency}).
+  \item[$\square$] Every retry spends a token from a process-wide budget;
+        first attempts are free.
+  \item[$\square$] Backoff is exponential with full jitter; no fixed
+        sleeps anywhere in the fleet.
+  \item[$\square$] Call-level deadlines bound total retry time; overshoot
+        skips the retry.
+  \item[$\square$] \texttt{Retry-After} from 429/503 responses overrides
+        local schedules.
+  \item[$\square$] One breaker per dependency; bulkheads sized below each
+        dependency's healthy capacity.
+  \item[$\square$] Breaker and budget events flow to metrics; opening and
+        flapping are alertable.
+  \item[$\square$] The chaos drill runs on a schedule, with abort criteria
+        --- and someone watches the state transitions.
+\end{itemize}
+
+\input{chapters/_standard_addendum}

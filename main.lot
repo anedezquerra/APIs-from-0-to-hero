@@ -1,0 +1,193 @@
+\babel@toc {english}{}\relax 
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {1.1}{\ignorespaces Reader pathways. Chapter numbers refer to the dependency map in Table~\ref {tab:ch0-deps}.}}{5}{table.1.1}%
+\contentsline {table}{\numberline {1.2}{\ignorespaces The API failure taxonomy used throughout this book.}}{8}{table.1.2}%
+\contentsline {table}{\numberline {1.3}{\ignorespaces Hard prerequisite edges between chapters.}}{53}{table.1.3}%
+\contentsline {table}{\numberline {1.4}{\ignorespaces Starter latency budget decomposition (share of p99 target).}}{54}{table.1.4}%
+\contentsline {table}{\numberline {1.5}{\ignorespaces Initial risk register for the curriculum itself.}}{54}{table.1.5}%
+\contentsline {table}{\numberline {1.6}{\ignorespaces Symptom-to-cause gallery for the most common lab failures.}}{55}{table.1.6}%
+\contentsline {table}{\numberline {1.7}{\ignorespaces Readiness self-assessment (target: total $\geq 14$, no zeros).}}{55}{table.1.7}%
+\contentsline {table}{\numberline {1.8}{\ignorespaces Chapter 0 quick-reference card.}}{56}{table.1.8}%
+\contentsline {table}{\numberline {1.9}{\ignorespaces Minimum benchmark table to keep per chapter.}}{56}{table.1.9}%
+\contentsline {table}{\numberline {1.10}{\ignorespaces Operational budget template for this chapter's technique.}}{56}{table.1.10}%
+\contentsline {table}{\numberline {1.11}{\ignorespaces Decision card to complete per chapter.}}{57}{table.1.11}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {2.1}{\ignorespaces Method properties per RFC~9110~\S 9. $^{*}$Cacheable by default heuristics. $^{\dagger }$POST responses are cacheable only with explicit freshness information. $^{\ddagger }$PATCH \emph {can} be made idempotent by construction, but the spec does not require it.}}{64}{table.2.1}%
+\contentsline {table}{\numberline {2.2}{\ignorespaces Status-code selection for the scenarios production teams argue about.}}{65}{table.2.2}%
+\contentsline {table}{\numberline {2.3}{\ignorespaces HTTP/2 frame types (RFC~9113~\S 6).}}{67}{table.2.3}%
+\contentsline {table}{\numberline {2.4}{\ignorespaces TLS 1.2 versus TLS 1.3 at a glance \blx@tocontentsinit {0}\cite {rfc8446}.}}{72}{table.2.4}%
+\contentsline {table}{\numberline {2.5}{\ignorespaces Method cheat sheet.}}{102}{table.2.5}%
+\contentsline {table}{\numberline {2.6}{\ignorespaces Status-code cheat sheet.}}{103}{table.2.6}%
+\contentsline {table}{\numberline {2.7}{\ignorespaces HTTP/2 frame-type cheat sheet (header: 24-bit length, 8-bit type, 8-bit flags, 1 reserved bit, 31-bit stream ID).}}{104}{table.2.7}%
+\contentsline {table}{\numberline {2.8}{\ignorespaces Minimum benchmark table to keep per chapter.}}{104}{table.2.8}%
+\contentsline {table}{\numberline {2.9}{\ignorespaces Operational budget template for this chapter's technique.}}{105}{table.2.9}%
+\contentsline {table}{\numberline {2.10}{\ignorespaces Decision card to complete per chapter.}}{105}{table.2.10}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {3.1}{\ignorespaces HTTP client support matrix for Python 3.11+ consumers.}}{111}{table.3.1}%
+\contentsline {table}{\numberline {3.2}{\ignorespaces Consumer error taxonomy. Each layer maps to a distinct exception type and remediation path.}}{119}{table.3.2}%
+\contentsline {table}{\numberline {3.3}{\ignorespaces Timeout dimensions: always set all four; never leave any infinite.}}{162}{table.3.3}%
+\contentsline {table}{\numberline {3.4}{\ignorespaces Retry decisions by failure signal.}}{165}{table.3.4}%
+\contentsline {table}{\numberline {3.5}{\ignorespaces Status-class handling for consumers (RFC 9110 \blx@tocontentsinit {0}\cite {rfc9110}).}}{165}{table.3.5}%
+\contentsline {table}{\numberline {3.6}{\ignorespaces Minimum benchmark table to keep per chapter.}}{166}{table.3.6}%
+\contentsline {table}{\numberline {3.7}{\ignorespaces Operational budget template for this chapter's technique.}}{166}{table.3.7}%
+\contentsline {table}{\numberline {3.8}{\ignorespaces Decision card to complete per chapter.}}{166}{table.3.8}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {4.1}{\ignorespaces Fielding's six constraints as an exchange: constraints in, properties out \blx@tocontentsinit {0}\cite {fielding2000rest}.}}{174}{table.4.1}%
+\contentsline {table}{\numberline {4.2}{\ignorespaces Method properties per RFC 9110 \blx@tocontentsinit {0}\cite {rfc9110}. \textsuperscript {*}\,PATCH is not \emph {guaranteed} idempotent, but a specific patch document applied twice usually is --- design for it when you can.}}{181}{table.4.2}%
+\contentsline {table}{\numberline {4.3}{\ignorespaces Precise status codes for CRUD lifecycles. 404 in response to DELETE is informative, not an error the client must handle differently; 204 versus 200 signals whether the response carries a representation.}}{234}{table.4.3}%
+\contentsline {table}{\numberline {4.4}{\ignorespaces Hypermedia media types for JSON APIs (see Section~\ref {sec:ch3-bibliography}).}}{235}{table.4.4}%
+\contentsline {table}{\numberline {4.5}{\ignorespaces Six-constraint compliance checklist.}}{235}{table.4.5}%
+\contentsline {table}{\numberline {4.6}{\ignorespaces Method semantics at a glance \blx@tocontentsinit {0}\cite {rfc9110}.}}{236}{table.4.6}%
+\contentsline {table}{\numberline {4.7}{\ignorespaces Richardson Maturity Model diagnostic \blx@tocontentsinit {0}\cite {richardson2013restful}.}}{236}{table.4.7}%
+\contentsline {table}{\numberline {4.8}{\ignorespaces Minimum benchmark table to keep per chapter.}}{236}{table.4.8}%
+\contentsline {table}{\numberline {4.9}{\ignorespaces Operational budget template for this chapter's technique.}}{236}{table.4.9}%
+\contentsline {table}{\numberline {4.10}{\ignorespaces Decision card to complete per chapter.}}{236}{table.4.10}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {5.1}{\ignorespaces Core JSON Schema 2020-12 keywords used throughout this chapter.}}{290}{table.5.1}%
+\contentsline {table}{\numberline {5.2}{\ignorespaces Protocol Buffers wire types (proto3).}}{291}{table.5.2}%
+\contentsline {table}{\numberline {5.3}{\ignorespaces Serialization format trade-off matrix. ``Fast'' and ``small'' are relative; measure with your own payloads (Section~\ref {sec:ch4-code}).}}{292}{table.5.3}%
+\contentsline {table}{\numberline {5.4}{\ignorespaces Format selection at a glance (details: Table~\ref {tab:ch4-format-matrix}).}}{294}{table.5.4}%
+\contentsline {table}{\numberline {5.5}{\ignorespaces Negotiation headers cheat-sheet.}}{294}{table.5.5}%
+\contentsline {table}{\numberline {5.6}{\ignorespaces Minimum benchmark table to keep per chapter.}}{294}{table.5.6}%
+\contentsline {table}{\numberline {5.7}{\ignorespaces Operational budget template for this chapter's technique.}}{295}{table.5.7}%
+\contentsline {table}{\numberline {5.8}{\ignorespaces Decision card to complete per chapter.}}{295}{table.5.8}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {6.1}{\ignorespaces Registered JWT claims and the consumer-side validation rule for each.}}{309}{table.6.1}%
+\contentsline {table}{\numberline {6.2}{\ignorespaces Credential storage matrix for client applications.}}{311}{table.6.2}%
+\contentsline {table}{\numberline {6.3}{\ignorespaces Grant-selection table.}}{361}{table.6.3}%
+\contentsline {table}{\numberline {6.4}{\ignorespaces The only safe JWT validation order.}}{361}{table.6.4}%
+\contentsline {table}{\numberline {6.5}{\ignorespaces Credential storage matrix.}}{362}{table.6.5}%
+\contentsline {table}{\numberline {6.6}{\ignorespaces Minimum benchmark table to keep per chapter.}}{363}{table.6.6}%
+\contentsline {table}{\numberline {6.7}{\ignorespaces Operational budget template for this chapter's technique.}}{363}{table.6.7}%
+\contentsline {table}{\numberline {6.8}{\ignorespaces Decision card to complete per chapter.}}{364}{table.6.8}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {7.1}{\ignorespaces Design-first vs.\ code-first: the honest trade-off.}}{369}{table.7.1}%
+\contentsline {table}{\numberline {7.2}{\ignorespaces Probe semantics. Conflating readiness with liveness causes boot loops: a dependency outage makes liveness fail, the orchestrator restarts the pod, which changes nothing.}}{375}{table.7.2}%
+\contentsline {table}{\numberline {7.3}{\ignorespaces Endpoint and execution-model decisions at a glance.}}{429}{table.7.3}%
+\contentsline {table}{\numberline {7.4}{\ignorespaces DI rules that prevent the common incidents.}}{430}{table.7.4}%
+\contentsline {table}{\numberline {7.5}{\ignorespaces Minimum benchmark table to keep per chapter.}}{430}{table.7.5}%
+\contentsline {table}{\numberline {7.6}{\ignorespaces Operational budget template for this chapter's technique.}}{431}{table.7.6}%
+\contentsline {table}{\numberline {7.7}{\ignorespaces Decision card to complete per chapter.}}{432}{table.7.7}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {8.1}{\ignorespaces Standard problem detail members per RFC 9457 \blx@tocontentsinit {0}\cite {rfc9457}.}}{440}{table.8.1}%
+\contentsline {table}{\numberline {8.2}{\ignorespaces Error status selection cheat sheet.}}{490}{table.8.2}%
+\contentsline {table}{\numberline {8.3}{\ignorespaces Problem-details member cheat sheet.}}{491}{table.8.3}%
+\contentsline {table}{\numberline {8.4}{\ignorespaces Minimum benchmark table to keep per chapter.}}{491}{table.8.4}%
+\contentsline {table}{\numberline {8.5}{\ignorespaces Operational budget template for this chapter's technique.}}{491}{table.8.5}%
+\contentsline {table}{\numberline {8.6}{\ignorespaces Decision card to complete per chapter.}}{492}{table.8.6}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {9.1}{\ignorespaces Measured single-page latency by strategy and depth (median of 15; illustrative, machine-dependent; page size 50, $n = 200{,}000$ rows, SQLite with composite index).}}{503}{table.9.1}%
+\contentsline {table}{\numberline {9.2}{\ignorespaces Pagination strategies at a glance ($p$ = page size, $n$ = rows).}}{563}{table.9.2}%
+\contentsline {table}{\numberline {9.3}{\ignorespaces Minimum benchmark table to keep per chapter.}}{563}{table.9.3}%
+\contentsline {table}{\numberline {9.4}{\ignorespaces Operational budget template for this chapter's technique.}}{564}{table.9.4}%
+\contentsline {table}{\numberline {9.5}{\ignorespaces Decision card to complete per chapter.}}{564}{table.9.5}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {10.1}{\ignorespaces Change taxonomy under Definition~\ref {def:breaking}.}}{619}{table.10.1}%
+\contentsline {table}{\numberline {10.2}{\ignorespaces Versioning strategy trade-off matrix.}}{620}{table.10.2}%
+\contentsline {table}{\numberline {10.3}{\ignorespaces Minimum benchmark table to keep per chapter.}}{620}{table.10.3}%
+\contentsline {table}{\numberline {10.4}{\ignorespaces Operational budget template for this chapter's technique.}}{621}{table.10.4}%
+\contentsline {table}{\numberline {10.5}{\ignorespaces Decision card to complete per chapter.}}{621}{table.10.5}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {11.1}{\ignorespaces Prerequisite map for Chapter~10.}}{626}{table.11.1}%
+\contentsline {table}{\numberline {11.2}{\ignorespaces Safety and idempotency per RFC~9110~\blx@tocontentsinit {0}\cite {rfc9110}. PATCH is idempotent only if the patch document encodes an absolute, not relative, transformation.}}{627}{table.11.2}%
+\contentsline {table}{\numberline {11.3}{\ignorespaces Core \texttt {Cache-Control} response directives (RFC~9111).}}{630}{table.11.3}%
+\contentsline {table}{\numberline {11.4}{\ignorespaces Concurrency-control strategy selection.}}{633}{table.11.4}%
+\contentsline {table}{\numberline {11.5}{\ignorespaces Method idempotency and retry policy~\blx@tocontentsinit {0}\cite {rfc9110}.}}{694}{table.11.5}%
+\contentsline {table}{\numberline {11.6}{\ignorespaces Cache-Control cheat-sheet.}}{694}{table.11.6}%
+\contentsline {table}{\numberline {11.7}{\ignorespaces Status-code selection for this chapter's machinery.}}{694}{table.11.7}%
+\contentsline {table}{\numberline {11.8}{\ignorespaces Minimum benchmark table to keep per chapter.}}{695}{table.11.8}%
+\contentsline {table}{\numberline {11.9}{\ignorespaces Operational budget template for this chapter's technique.}}{695}{table.11.9}%
+\contentsline {table}{\numberline {11.10}{\ignorespaces Decision card to complete per chapter.}}{696}{table.11.10}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {12.1}{\ignorespaces Pattern selection matrix. ``Latency'' is data-arrival latency seen by the consumer; ``fan-out cost'' is the marginal cost of the $N$-th consumer.}}{704}{table.12.1}%
+\contentsline {table}{\numberline {12.2}{\ignorespaces Minimum benchmark table to keep per chapter.}}{758}{table.12.2}%
+\contentsline {table}{\numberline {12.3}{\ignorespaces Operational budget template for this chapter's technique.}}{758}{table.12.3}%
+\contentsline {table}{\numberline {12.4}{\ignorespaces Decision card to complete per chapter.}}{759}{table.12.4}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {13.1}{\ignorespaces The four list/nullability combinations as error-containment policy.}}{765}{table.13.1}%
+\contentsline {table}{\numberline {13.2}{\ignorespaces Decision matrix. No column is ``best''; each optimizes a different constraint.}}{773}{table.13.2}%
+\contentsline {table}{\numberline {13.3}{\ignorespaces GraphQL type system cheat sheet.}}{833}{table.13.3}%
+\contentsline {table}{\numberline {13.4}{\ignorespaces Minimum benchmark table to keep per chapter.}}{835}{table.13.4}%
+\contentsline {table}{\numberline {13.5}{\ignorespaces Operational budget template for this chapter's technique.}}{835}{table.13.5}%
+\contentsline {table}{\numberline {13.6}{\ignorespaces Decision card to complete per chapter.}}{837}{table.13.6}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {14.1}{\ignorespaces The 17 canonical gRPC status codes and their conventional HTTP mapping when transcoding to JSON APIs (the mapping used by Google's \texttt {google/rpc/code.proto} conventions).}}{851}{table.14.1}%
+\contentsline {table}{\numberline {14.2}{\ignorespaces Abridged; the full 17-code table with HTTP mappings is Table~\ref {tab:ch13-status}.}}{898}{table.14.2}%
+\contentsline {table}{\numberline {14.3}{\ignorespaces Minimum benchmark table to keep per chapter.}}{899}{table.14.3}%
+\contentsline {table}{\numberline {14.4}{\ignorespaces Operational budget template for this chapter's technique.}}{899}{table.14.4}%
+\contentsline {table}{\numberline {14.5}{\ignorespaces Decision card to complete per chapter.}}{901}{table.14.5}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {15.1}{\ignorespaces Admission algorithm comparison. All rows enforce the same nominal rate; they differ in memory, burst envelope, and boundary behavior. GCRA and token bucket are provably equivalent (Proposition~\ref {prop:ch14-gcra-equiv}); the choice between them is operational, not behavioral.}}{976}{table.15.1}%
+\contentsline {table}{\numberline {15.2}{\ignorespaces Failure-policy decision matrix. Degraded-local dominates when a cheap local limiter is available; the fail-open/fail-closed binary is for endpoints where either abuse or availability is existentially worse.}}{977}{table.15.2}%
+\contentsline {table}{\numberline {15.3}{\ignorespaces Minimum benchmark table to keep per chapter.}}{977}{table.15.3}%
+\contentsline {table}{\numberline {15.4}{\ignorespaces Operational budget template for this chapter's technique.}}{977}{table.15.4}%
+\contentsline {table}{\numberline {15.5}{\ignorespaces Decision card to complete per chapter.}}{977}{table.15.5}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {16.1}{\ignorespaces Synchronous versus asynchronous inter-service communication.}}{983}{table.16.1}%
+\contentsline {table}{\numberline {16.2}{\ignorespaces Failure-mode analysis: each stage of the spiral, its observable precursor, and the pattern that breaks the chain.}}{990}{table.16.2}%
+\contentsline {table}{\numberline {16.3}{\ignorespaces Discovery and load-balancing topologies.}}{991}{table.16.3}%
+\contentsline {table}{\numberline {16.4}{\ignorespaces Measured chaos-drill results, Listing~\ref {lst:ch15-demo} (deterministic: counts, not wall-clock). Resilience patterns do not convert failure into success; they convert expensive failure into cheap failure and buy recovery headroom.}}{1025}{table.16.4}%
+\contentsline {table}{\numberline {16.5}{\ignorespaces Symptom-to-pattern selection.}}{1064}{table.16.5}%
+\contentsline {table}{\numberline {16.6}{\ignorespaces Starting points for Definition~\ref {def:ch15-breaker}'s parameters. Every number is a hypothesis until a chaos drill confirms it.}}{1065}{table.16.6}%
+\contentsline {table}{\numberline {16.7}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1065}{table.16.7}%
+\contentsline {table}{\numberline {16.8}{\ignorespaces Operational budget template for this chapter's technique.}}{1066}{table.16.8}%
+\contentsline {table}{\numberline {16.9}{\ignorespaces Decision card to complete per chapter.}}{1067}{table.16.9}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {17.1}{\ignorespaces OWASP API Security Top 10 (2023)~\blx@tocontentsinit {0}\cite {owaspapisecurity}: mechanism summary. Every row is executable in this chapter's exploit suite.}}{1158}{table.17.1}%
+\contentsline {table}{\numberline {17.2}{\ignorespaces STRIDE per endpoint: worked row set for the robot patch route. Every mitigations cell names an executable control, not a policy aspiration.}}{1159}{table.17.2}%
+\contentsline {table}{\numberline {17.3}{\ignorespaces OWASP API Top 10 mitigation matrix~\blx@tocontentsinit {0}\cite {owaspapisecurity}.}}{1159}{table.17.3}%
+\contentsline {table}{\numberline {17.4}{\ignorespaces The only safe token-validation order.}}{1160}{table.17.4}%
+\contentsline {table}{\numberline {17.5}{\ignorespaces Secure-headers table for JSON APIs.}}{1160}{table.17.5}%
+\contentsline {table}{\numberline {17.6}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1160}{table.17.6}%
+\contentsline {table}{\numberline {17.7}{\ignorespaces Operational budget template for this chapter's technique.}}{1160}{table.17.7}%
+\contentsline {table}{\numberline {17.8}{\ignorespaces Decision card to complete per chapter.}}{1161}{table.17.8}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {18.1}{\ignorespaces Gateway capabilities matrix. Envoy is the substrate many gateways and meshes (Istio, Consul, Contour, Gloo) are built from; Kong is a batteries-included gateway on NGINX; NGINX itself is the minimal, static-configuration baseline.}}{1228}{table.18.1}%
+\contentsline {table}{\numberline {18.2}{\ignorespaces Probe semantics. The load-bearing row is the second: readiness failure changes \emph {routing}, liveness failure changes \emph {process state}. A readiness probe that also gates liveness restarts Pods for other services' outages; a liveness probe that checks dependencies turns a database blip into a fleet-wide restart storm.}}{1229}{table.18.2}%
+\contentsline {table}{\numberline {18.3}{\ignorespaces Rolling-update arithmetic for a 4-replica Deployment. Percentages are allowed for both fields (rounded: surge up, unavailable down), which keeps the policy correct as HPA moves $R$.}}{1230}{table.18.3}%
+\contentsline {table}{\numberline {18.4}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1230}{table.18.4}%
+\contentsline {table}{\numberline {18.5}{\ignorespaces Operational budget template for this chapter's technique.}}{1231}{table.18.5}%
+\contentsline {table}{\numberline {18.6}{\ignorespaces Decision card to complete per chapter.}}{1231}{table.18.6}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {19.1}{\ignorespaces \texttt {traceparent} field reference (W3C Trace Context).}}{1239}{table.19.1}%
+\contentsline {table}{\numberline {19.2}{\ignorespaces Error budgets by SLO target. The budget is a \emph {spending allowance} shared by outages, risky deploys, and experiments --- when it is spent, the roadmap tilts to reliability~\blx@tocontentsinit {0}\cite {beyer2016sre}.}}{1243}{table.19.2}%
+\contentsline {table}{\numberline {19.3}{\ignorespaces Multi-window multi-burn-rate alerting for a 99.9\% SLO (SRE Workbook parameters)~\blx@tocontentsinit {0}\cite {beyer2016sre}. Listing~18.5 implements and tests exactly this table.}}{1244}{table.19.3}%
+\contentsline {table}{\numberline {19.4}{\ignorespaces Severity levels. The response column is part of the definition: a severity without a response contract is a label, not a level.}}{1305}{table.19.4}%
+\contentsline {table}{\numberline {19.5}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1306}{table.19.5}%
+\contentsline {table}{\numberline {19.6}{\ignorespaces Operational budget template for this chapter's technique.}}{1306}{table.19.6}%
+\contentsline {table}{\numberline {19.7}{\ignorespaces Decision card to complete per chapter.}}{1306}{table.19.7}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {20.1}{\ignorespaces Test-layer responsibility matrix.}}{1379}{table.20.1}%
+\contentsline {table}{\numberline {20.2}{\ignorespaces Fault taxonomy and how to assert on it deterministically.}}{1379}{table.20.2}%
+\contentsline {table}{\numberline {20.3}{\ignorespaces Little's Law and saturation cheat sheet.}}{1380}{table.20.3}%
+\contentsline {table}{\numberline {20.4}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1380}{table.20.4}%
+\contentsline {table}{\numberline {20.5}{\ignorespaces Operational budget template for this chapter's technique.}}{1381}{table.20.5}%
+\contentsline {table}{\numberline {20.6}{\ignorespaces Decision card to complete per chapter.}}{1382}{table.20.6}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {21.1}{\ignorespaces Lifecycle states with evidence-based entry/exit criteria.}}{1387}{table.21.1}%
+\contentsline {table}{\numberline {21.2}{\ignorespaces The consumer-observable surfaces a style guide must pin down.}}{1388}{table.21.2}%
+\contentsline {table}{\numberline {21.3}{\ignorespaces Deprecation policy: internal versus external consumers.}}{1395}{table.21.3}%
+\contentsline {table}{\numberline {21.4}{\ignorespaces Lifecycle states: the contract each side is under.}}{1455}{table.21.4}%
+\contentsline {table}{\numberline {21.5}{\ignorespaces Style-guide core rules and their enforcement.}}{1455}{table.21.5}%
+\contentsline {table}{\numberline {21.6}{\ignorespaces DX and governance metrics cheat sheet.}}{1456}{table.21.6}%
+\contentsline {table}{\numberline {21.7}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1456}{table.21.7}%
+\contentsline {table}{\numberline {21.8}{\ignorespaces Operational budget template for this chapter's technique.}}{1456}{table.21.8}%
+\contentsline {table}{\numberline {21.9}{\ignorespaces Decision card to complete per chapter.}}{1457}{table.21.9}%
+\addvspace {10\p@ }
+\contentsline {table}{\numberline {22.1}{\ignorespaces The six criteria of the Master Decision Card.}}{1462}{table.22.1}%
+\contentsline {table}{\numberline {22.2}{\ignorespaces Interaction profile comparison matrix (tendencies, not laws).}}{1463}{table.22.2}%
+\contentsline {table}{\numberline {22.3}{\ignorespaces Grand Capstone API surfaces. Each surface cites its governing spec artifact.}}{1469}{table.22.3}%
+\contentsline {table}{\numberline {22.4}{\ignorespaces Grand Capstone four-milestone delivery plan.}}{1470}{table.22.4}%
+\contentsline {table}{\numberline {22.5}{\ignorespaces The consolidated failure taxonomy: one row per chapter's core enemy.}}{1472}{table.22.5}%
+\contentsline {table}{\numberline {22.6}{\ignorespaces Module I synthesis: speak the protocol fluently before building.}}{1473}{table.22.6}%
+\contentsline {table}{\numberline {22.7}{\ignorespaces Module II synthesis: correctness is a designed property.}}{1473}{table.22.7}%
+\contentsline {table}{\numberline {22.8}{\ignorespaces Module III synthesis: pick profiles per constraint, scale deliberately.}}{1474}{table.22.8}%
+\contentsline {table}{\numberline {22.9}{\ignorespaces Module IV synthesis: production is a discipline, not a destination.}}{1474}{table.22.9}%
+\contentsline {table}{\numberline {22.10}{\ignorespaces Frontier adoption postures. Nothing here exempts you from the operational maturity of Module IV.}}{1476}{table.22.10}%
+\contentsline {table}{\numberline {22.11}{\ignorespaces The mastery checklist, by level.}}{1477}{table.22.11}%
+\contentsline {table}{\numberline {22.12}{\ignorespaces The one-page Master Decision Card. Photocopy freely.}}{1533}{table.22.12}%
+\contentsline {table}{\numberline {22.13}{\ignorespaces Minimum benchmark table to keep per chapter.}}{1534}{table.22.13}%
+\contentsline {table}{\numberline {22.14}{\ignorespaces Operational budget template for this chapter's technique.}}{1534}{table.22.14}%
+\contentsline {table}{\numberline {22.15}{\ignorespaces Decision card to complete per chapter.}}{1536}{table.22.15}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }

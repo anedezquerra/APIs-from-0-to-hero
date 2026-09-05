@@ -1,0 +1,8 @@
+TEST-ONLY SIGNING KEY - NOT A REAL SECRET
+=========================================
+This key is part of the synthetic Northwind Robotics teaching dataset for
+'Mastering APIs: From Zero to Production Guru' (chapter 11). It exists only
+so webhook-signature verification labs are reproducible offline.
+Never use it in any real system.
+
+key: whsec_test_northwind_robotics_0123456789abcdef

@@ -1,0 +1,2421 @@
+\chapter{Errors, Validation \& Problem Details (RFC 9457)}
+\label{ch:problem_details}
+
+\section*{Executive Summary}
+
+Every API has two interfaces: the success contract and the failure contract.
+Teams routinely invest weeks polishing the former and minutes on the latter,
+and then discover---during a 3~a.m.\ incident---that clients cannot tell a
+validation mistake from a melted database, cannot retry safely, and cannot
+page the right owner because every error looks like \texttt{500 Internal
+Server Error} with a stack trace taped to it. This chapter fixes that.
+
+We treat errors as a first-class design surface. You will learn a rigorous
+taxonomy that separates transport, protocol, and application failures, and a
+repeatable decision procedure that classifies each failure as client-fixable
+(4xx), server-owned (5xx), or dependency-caused, and as retriable or
+non-retriable. You will master RFC~9457 \emph{Problem Details for HTTP APIs}
+\cite{rfc9457}, the standard that replaces ad-hoc error payloads with a
+single, extensible, machine-readable shape carried in
+\texttt{application/problem+json}. You will learn status-code precision---why
+\texttt{422} means \emph{syntactically valid but semantically invalid}, why
+\texttt{404} and \texttt{410} tell different stories, why
+\texttt{200}-with-an-error-body is an anti-pattern that corrupts caches,
+retries, and monitoring.
+
+On the engineering side, you will build a production-grade error pipeline in
+FastAPI: strict Pydantic~v2 validation at the boundary
+\cite{pydanticdocs}, a \texttt{ProblemException} hierarchy mapped to RFC~9457
+responses by a single handler, PII-redaction middleware, correlation IDs
+end-to-end, a machine-readable error-code registry, and a contract test suite
+that schema-validates \emph{every} error path with JSON Schema
+\cite{jsonschemadocs}. Everything runs offline, deterministically, in
+process. By the end, ``what did the API say when it failed?'' will have one
+answer everywhere in your system: a well-formed problem document.
+
+\begin{keyconceptbox}
+\textbf{Errors are part of the contract.} Version them, document them, test
+them, and alert on them exactly as you do for success responses. A consumer
+should be able to handle every failure mode of your API without ever reading
+a log line or calling your support desk.
+\end{keyconceptbox}
+
+\section{Learning Objectives \& Prerequisites}
+
+\subsection*{Learning Objectives}
+
+After completing this chapter, you will be able to:
+
+\begin{enumerate}
+  \item Classify any failure into the transport/protocol/application taxonomy
+        and justify a status code, retriability verdict, and ownership
+        assignment for it.
+  \item Author RFC~9457 problem documents, including extension members, and
+        explain the semantics of \texttt{type}, \texttt{title},
+        \texttt{status}, \texttt{detail}, and \texttt{instance}.
+  \item Choose precisely between \texttt{400} and \texttt{422}, \texttt{404}
+        and \texttt{410}, \texttt{401}, \texttt{403} and \texttt{407}, and
+        among \texttt{500}, \texttt{502}, \texttt{503}, and \texttt{504}.
+  \item Engineer validation with Pydantic~v2: strict mode,
+        \texttt{field\_validator} versus \texttt{model\_validator},
+        \texttt{Annotated} custom types, and coercion pitfalls.
+  \item Implement a single error-handling pipeline---domain exceptions
+        $\rightarrow$ problem mapper $\rightarrow$ redaction $\rightarrow$
+        response---with correlation IDs and server-side structured logging.
+  \item Schema-validate every error response in contract tests and generate
+        a machine-readable error-code registry and its public documentation.
+  \item Operate errors in production: error-rate SLIs per code and endpoint,
+        alert thresholds, PII redaction, and error-budget interaction
+        (Chapter~18).
+\end{enumerate}
+
+\subsection*{Prerequisites}
+
+This chapter assumes you have completed Chapters~0--6. In particular, you
+should be comfortable with:
+
+\begin{itemize}
+  \item HTTP semantics: methods, status-code classes, header negotiation
+        (Chapter~1, \cite{rfc9110}).
+  \item Consuming APIs from Python with \texttt{httpx} (Chapter~2).
+  \item REST resource modeling and representation design (Chapter~3).
+  \item Serialization contracts, JSON Schema, and OpenAPI~3.1 documents
+        (Chapter~4, \cite{openapi31}).
+  \item Client-side security hygiene: where secrets may and may not appear
+        (Chapter~5).
+  \item Building FastAPI services: routers, dependency injection, Pydantic
+        models, and \texttt{TestClient} (Chapter~6, \cite{fastapidocs}).
+\end{itemize}
+
+All code targets Python~3.11+, runs fully offline, and uses only the
+dependencies in the Python Dependencies Appendix. Commands are given for
+Windows PowerShell.
+
+\section{Deep Technical Mechanics \& Architectural Concepts}
+
+\subsection{A Taxonomy of Failure}
+
+Before choosing a status code or a payload shape, you must know
+\emph{what kind of thing went wrong}. We use a three-layer taxonomy.
+
+\begin{definition}[Transport Error]
+A failure below HTTP semantics: the bytes never formed a complete, routable
+request or response. Examples: TCP connection refused, TLS handshake failure,
+DNS resolution failure, connection reset mid-body. Transport errors have
+\emph{no HTTP status code at all}---there is nothing to attach one to. From
+the client's perspective they surface as exceptions (e.g.\
+\texttt{httpx.ConnectError}), and they are almost always retriable with
+backoff because no application state was necessarily touched.
+\end{definition}
+
+\begin{definition}[Protocol Error]
+A failure of HTTP itself: the message arrived but is malformed or violates
+protocol expectations. Examples: syntactically invalid JSON in the request
+body, a \texttt{Content-Type} the server does not support (\texttt{415}),
+a missing mandatory header, an unacceptable \texttt{Accept} header
+(\texttt{406}). The server understood nothing reliably enough to run business
+logic, so the response must not imply that it did.
+\end{definition}
+
+\begin{definition}[Application (Domain) Error]
+A failure inside valid protocol traffic: the request was well-formed HTTP
+carrying well-formed JSON, but the domain rejected it. Examples: a SKU that
+does not exist, a state transition the shipment lifecycle forbids,
+insufficient funds. Application errors are where APIs earn or lose trust,
+because they are the errors clients handle programmatically.
+\end{definition}
+
+The taxonomy matters because each layer has different handling machinery.
+Transport errors are handled by client retry policies and circuit breakers
+\cite{nygard2018releaseit}. Protocol errors are handled by the framework's
+request parsing. Application errors are handled by \emph{your} domain code,
+and they deserve the most design effort.
+
+\subsubsection{Ownership: Who Can Fix It?}
+
+The 4xx/5xx split in RFC~9110~\cite{rfc9110} is fundamentally about
+\emph{ownership of the fix}:
+
+\begin{itemize}
+  \item \textbf{Client-fixable (4xx).} The client sent something the server
+        can never accept as-is. Retrying the identical request is useless;
+        something about the request must change. Examples: \texttt{400},
+        \texttt{404}, \texttt{409}, \texttt{422}.
+  \item \textbf{Server-owned (5xx).} The request was fine; the server failed
+        to fulfill it. Retrying the identical request may succeed later.
+        Examples: \texttt{500}, \texttt{503}.
+  \item \textbf{Dependency-caused (also 5xx, but distinguishable).} The
+        server failed \emph{because a downstream dependency failed}.
+        \texttt{502} (bad response from upstream), \texttt{504} (upstream
+        timeout), and \texttt{503} (deliberate unavailability) communicate
+        this. Distinguishing dependency failures from internal bugs is
+        operationally crucial: the page goes to a different team and the
+        retry semantics differ.
+\end{itemize}
+
+\begin{warningbox}
+\textbf{Never blame the client for your outage.} Returning \texttt{400} when
+a database is down teaches clients to stop retrying, corrupts their error
+metrics, and hides your incident behind their dashboards. If the request was
+valid and you could not serve it, the answer is in the 5xx family---always.
+\end{warningbox}
+
+\subsubsection{A Decision Procedure for Retriability}
+
+Clients need one bit of information above all: \emph{may I send this again?}
+Encode the decision explicitly, for both client and server authors:
+
+\begin{enumerate}
+  \item \textbf{Did the request reach application logic?} If not (transport
+        error, \texttt{408}, \texttt{429}, \texttt{502}, \texttt{503},
+        \texttt{504}), the request is retriable \emph{if it is idempotent or
+        idempotency-protected} (Chapter~10).
+  \item \textbf{Is the failure about the request content?} \texttt{400},
+        \texttt{401}, \texttt{403}, \texttt{404}, \texttt{409}, \texttt{415},
+        \texttt{422}: not retriable without modification. \texttt{409} is the
+        nuance: retriable \emph{after} the client refreshes state and
+        re-evaluates preconditions.
+  \item \textbf{Is the failure an unhandled server fault (\texttt{500})?}
+        Treat as \emph{not} retriable for mutations unless the operation is
+        idempotent; retrying a non-idempotent POST after a \texttt{500} risks
+        double-execution because you cannot know whether the server
+        committed before failing.
+  \item \textbf{Did the server say when?} \texttt{429} and \texttt{503} with
+        \texttt{Retry-After} are retriable \emph{at or after} the indicated
+        time, with jitter to avoid thundering herds.
+\end{enumerate}
+
+Publish this classification per error code (we build exactly such a registry
+in Listing~7.6) so no client engineer ever has to guess.
+
+\subsection{RFC 9457: Problem Details for HTTP APIs}
+
+Before RFC~7807 (2016), every API invented its own error payload:
+\texttt{\{"error": "oops"\}}, \texttt{\{"message": \ldots, "code": 1234\}},
+bare strings, HTML pages from middleware you forgot existed. Client code
+became a museum of per-API parsers. RFC~7807 standardized a shape; RFC~9457
+(March 2024) \cite{rfc9457} \emph{obsoletes} RFC~7807, clarifying extension
+member handling, the \texttt{application/problem+xml} deprecation of
+XML-specific guidance, and alignment with modern HTTP (RFC~9110
+\cite{rfc9110}). If a document or library says ``7807,'' read it as 9457
+with a historical accent.
+
+\begin{definition}[Problem Detail Object]
+A JSON (or XML) object carrying \emph{machine-readable details of one HTTP
+error response}, served with the media type
+\texttt{application/problem+json} and an error status code. It is a
+deliberately minimal kernel---five standard members---extended by the API
+with additional members.
+\end{definition}
+
+\subsubsection{The Five Standard Members}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Member} & \textbf{Required} & \textbf{Semantics} \\
+    \midrule
+    \texttt{type} & yes (default \texttt{about:blank}) & A URI reference that
+      identifies the problem \emph{type}. When dereferenced, it should lead
+      to human documentation. It is the stable identifier clients match on. \\
+    \texttt{title} & recommended & Short, human-readable summary of the
+      problem \emph{type}. Stable per type; never per-occurrence. Localizable
+      but should not change between occurrences of the same type. \\
+    \texttt{status} & recommended & The HTTP status code, echoed into the body
+      for convenience of intermediaries and logs. Must match the actual
+      response status. \\
+    \texttt{detail} & optional & Human-readable explanation of \emph{this
+      occurrence}. May differ per occurrence; never write client logic
+      against it. \\
+    \texttt{instance} & optional & A URI reference identifying \emph{this
+      occurrence}; often the request path or a per-error URN. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Standard problem detail members per RFC 9457 \cite{rfc9457}.}
+  \label{tab:problem-members}
+\end{table}
+
+The division of labor is the design's genius: \texttt{type}/\texttt{title}
+describe the \emph{class} of problem (stable, documentable, matchable);
+\texttt{detail}/\texttt{instance} describe the \emph{occurrence} (specific,
+variable, not for matching). Most broken client integrations come from
+confusing these two levels---matching on \texttt{detail} strings is the
+classic offender.
+
+\subsubsection{Extension Members and Documentation-as-Contract}
+
+RFC~9457 explicitly permits \emph{extension members}: additional keys defined
+by your API, such as \texttt{code}, \texttt{trace\_id}, or an
+\texttt{errors} array of per-field failures. Two rules keep extensions
+healthy:
+
+\begin{enumerate}
+  \item Clients \textbf{must ignore unknown members}. This makes extension
+        members additive-evolvable: you can ship new members without a
+        version bump, exactly like new fields in a success representation.
+  \item Every extension member you emit \textbf{must be documented at the
+        \texttt{type} URI}. The \texttt{type} URI is the contract anchor:
+        \emph{documentation-as-contract}. When a client dereferences
+        \texttt{https://docs.example.invalid/problems/validation-failed},
+        they should find the member list, the status code, retriability, and
+        remediation guidance---generated from the same registry your code
+        uses (Section~\ref{sec:impl}, Listing~7.6).
+\end{enumerate}
+
+RFC~9457 also defines an IANA registry of problem \emph{types}, though in
+practice most APIs mint their own type URIs under a domain they control. The
+operational requirement is not registration; it is \emph{stability}: a
+\texttt{type} URI, once shipped, must keep meaning the same problem class
+forever.
+
+\subsubsection{Why Must \texttt{type} Be a URI?}
+
+Three reasons. First, \emph{global uniqueness without coordination}: URIs
+minted under your domain cannot collide with another vendor's
+``\texttt{validation\_error}.'' Second, \emph{dereferenceability}: a URI can
+double as a documentation link, collapsing identifier and manual into one
+artifact. Third, \emph{opacity}: because the spec says clients match on the
+URI string itself (not on fetched content), you may serve
+\texttt{about:blank} for generic errors and reserve rich type URIs for
+documented classes. Note that \texttt{about:blank} with a \texttt{title}
+matching the status's reason phrase is the spec-sanctioned ``I have nothing
+more specific to say'' fallback.
+
+\subsubsection{Security Considerations}
+
+RFC~9457's security section is blunt, and production experience blunter:
+\textbf{problem details are exfiltration channels if you let them be}.
+Rules we enforce in this chapter's code:
+
+\begin{itemize}
+  \item \textbf{No internals.} No stack traces, framework versions, SQL
+        fragments, hostnames, or file paths in \texttt{detail}. Each is
+        reconnaissance data for an attacker probing your error paths.
+  \item \textbf{No PII.} \texttt{detail} must never echo submitted personal
+        data. ``Email jane.doe@example.invalid already registered'' both
+        leaks an account-existence oracle and lands PII in every log
+        aggregator and APM tool that captures response bodies.
+  \item \textbf{No secret material.} Failed-payload logging must redact
+        credentials, tokens, and keys \emph{before} writing (Chapter~5).
+  \item \textbf{Defense in depth.} Even with disciplined handlers, add a
+        redaction middleware as the last gate (Listing~7.3): humans make
+        mistakes at 3~a.m.; middleware does not.
+\end{itemize}
+
+\subsection{Status-Code Precision for Error Cases}
+
+Status codes are the coarsest, most universally understood part of your error
+contract; caches, load balancers, retry middleware, and monitoring all key on
+them before anyone reads a body. Imprecision here is amplified everywhere.
+This section walks the pairs that production systems most often confuse; all
+semantics are per RFC~9110~\S 15 \cite{rfc9110}.
+
+\subsubsection{400 versus 422}
+
+\texttt{400 Bad Request} means the server \emph{cannot or will not process
+the request due to something perceived to be a client error}---with the
+canonical reading that the \emph{framing or syntax} itself is wrong:
+malformed JSON, a missing required header, a query parameter that fails to
+parse as an integer. The request could not be interpreted as a valid
+instance of your contract.
+
+\texttt{422 Unprocessable Content} means the request \emph{was} syntactically
+valid---the JSON parsed, the schema shape held---but \emph{semantic}
+instructions could not be followed: an end date before a start date, a
+quantity of zero, a SKU failing its checksum. The mnemonic:
+\textbf{400 = I cannot read you; 422 = I read you and reject what you said.}
+FastAPI emits \texttt{422} for Pydantic validation failures by default
+\cite{fastapidocs}, which is the convention this chapter keeps. Using
+\texttt{400} for semantic failures is not fatal, but it is lossy: clients
+distinguish ``fix my serializer'' from ``fix my business values'' only if
+you do.
+
+\subsubsection{404 versus 410}
+
+\texttt{404 Not Found} says \emph{nothing} about history: the resource is not
+here, and the server does not say whether it ever was. \texttt{410 Gone} is a
+deliberate tombstone: the resource existed and is permanently retired---a
+deleted account, an expired export, a sunset endpoint version. \texttt{410}
+is cacheable by default and tells crawlers and sync clients to stop asking
+and purge local copies. Use it when you know; use \texttt{404} otherwise.
+Be aware that \texttt{410} (like any distinct response to existence probes)
+can be an information-disclosure oracle for sensitive resources; for those,
+uniform \texttt{404} is the privacy-preserving choice.
+
+\subsubsection{409 Conflict and Its Domains}
+
+\texttt{409} means the request is fine but \emph{conflicts with current
+resource state}. It appears in at least four distinct domains, and your
+problem \texttt{type} should say which:
+
+\begin{itemize}
+  \item \textbf{State-machine conflict:} cancelling an already-shipped
+        shipment (our Listing~7.4 example).
+  \item \textbf{Uniqueness conflict:} creating a resource whose natural key
+        is taken. (Some APIs use \texttt{422} here; \texttt{409} is the
+        better fit because the payload is valid in isolation.)
+  \item \textbf{Concurrent-modification conflict:} an \texttt{ETag} /
+        \texttt{If-Match} precondition failed---though \texttt{412} is the
+        precise code for failed preconditions (Chapter~10).
+  \item \textbf{Reference conflict:} deleting a warehouse that still holds
+        inventory.
+\end{itemize}
+
+In all domains, \texttt{409} is \emph{conditionally retriable}: the client
+should re-read state, re-decide, and only then retry.
+
+\subsubsection{401 versus 403 versus 407}
+
+\texttt{401 Unauthorized} is badly named: it means \emph{unauthenticated}---
+``I do not know who you are (or your credentials failed).'' It
+\emph{must} carry a \texttt{WWW-Authenticate} challenge header; a
+\texttt{401} without it is a spec violation. \texttt{403 Forbidden} means
+\emph{authenticated but not authorized}: ``I know who you are, and no.''
+Re-authenticating will not help. \texttt{407 Proxy Authentication Required}
+is the same challenge as \texttt{401} but issued by an intermediary proxy,
+with \texttt{Proxy-Authenticate}; API authors rarely emit it, but gateway
+operators must not strip it. One more subtlety: for resources whose
+\emph{existence} is sensitive, authorization failure should collapse to
+\texttt{404}, not \texttt{403}, to avoid an existence oracle.
+
+\subsubsection{429 and Retry-After}
+
+\texttt{429 Too Many Requests} says the client itself is the load problem
+(Chapter~14 develops the limiting algorithms). It is only useful when paired
+with \texttt{Retry-After} (delay-seconds or an HTTP date) and, ideally,
+rate-limit headers describing the policy window. A \texttt{429} without
+\texttt{Retry-After} invites clients to invent their own backoff---usually
+badly, usually synchronized into thundering herds. In problem details, carry
+the retry budget as an extension member so programmatic clients do not parse
+headers at all.
+
+\subsubsection{500, 502, 503, 504}
+
+The 5xx family differentiates \emph{where} the failure lives:
+
+\begin{itemize}
+  \item \texttt{500 Internal Server Error}: your code faulted. Generic,
+        uncatchable-by-design, always a bug or an unmodeled failure.
+  \item \texttt{502 Bad Gateway}: a gateway/upstream returned something
+        invalid. The dependency answered---wrongly.
+  \item \texttt{503 Service Unavailable}: deliberate unavailability---
+        overload shedding, maintenance, a blown circuit breaker
+        \cite{nygard2018releaseit}. Almost always retriable; pair with
+        \texttt{Retry-After} when the duration is known.
+  \item \texttt{504 Gateway Timeout}: the dependency never answered in time.
+\end{itemize}
+
+The operational value is paging precision: \texttt{500} pages your team;
+\texttt{502}/\texttt{504} page the integration owner; \texttt{503} should
+mostly page nobody---it is the system protecting itself. If your error
+mapper collapses all four into \texttt{500}, every dependency outage becomes
+your incident.
+
+\subsubsection{The 200-with-Error-Payload Anti-Pattern}
+
+Some APIs return \texttt{200 OK} with \texttt{\{"success": false,
+"error": \ldots\}} in the body. Every layer of the HTTP stack is then
+actively misled: caches may store the failure as a success; retry middleware
+sees success and does nothing; CDN and load-balancer metrics report 100\%
+availability during a total outage; monitoring must parse bodies to see the
+fire. The only defensible carve-outs are protocols that deliberately tunnel
+errors above transport semantics (GraphQL over HTTP is the notable one,
+Chapter~12)---and even there, the community is moving toward distinguishing
+transport success from application errors explicitly. For REST-style HTTP
+APIs: the status code must reflect the outcome. Always.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  q/.style={draw, rounded corners, align=center, fill=blue!5, text width=3.4cm, inner sep=4pt},
+  a/.style={draw, rectangle, align=center, fill=green!10, text width=2.5cm, inner sep=3pt},
+  lbl/.style={note, midway},
+  every edge/.style={draw, ->}
+]
+\node[q] (start) {Failure reached application logic?};
+\node[q, below left=1.1cm and 0.4cm of start] (client) {Client-fixable?\\(request must change)};
+\node[q, below right=1.1cm and 0.4cm of start] (server) {Dependency-caused?};
+\node[q, below left=1.0cm and -0.2cm of client] (syntax) {Syntactically valid?};
+\node[q, below right=1.0cm and -0.2cm of client] (domain) {State conflict or missing resource?};
+
+\node[a, below left=0.9cm and -0.6cm of syntax] (c400) {400 malformed\\415 type};
+\node[a, below right=0.9cm and -0.6cm of syntax] (c422) {422 semantic};
+\node[a, below left=0.9cm and -0.6cm of domain] (c404) {404 / 410};
+\node[a, below right=0.9cm and -0.6cm of domain] (c409) {409 conflict\\412 precondition};
+
+\node[a, below left=0.9cm and -0.2cm of server] (s5x) {502 bad reply\\504 timeout};
+\node[a, below right=0.9cm and -0.2cm of server] (s500) {500 own fault\\503 shed + Retry-After};
+
+\path (start) edge node[lbl, above left=-2pt and -14pt] {yes} (client)
+      (start) edge node[lbl, above right=-2pt and -14pt] {yes, 5xx} (server)
+      (client) edge node[lbl, left] {content error} (syntax)
+      (client) edge node[lbl, right] {resource/state error} (domain)
+      (syntax) edge node[lbl, left] {no} (c400)
+      (syntax) edge node[lbl, right] {yes} (c422)
+      (domain) edge node[lbl, left] {missing/gone} (c404)
+      (domain) edge node[lbl, right] {conflict} (c409)
+      (server) edge node[lbl, left] {upstream} (s5x)
+      (server) edge node[lbl, right] {internal} (s500);
+\node[note, below=0.25cm of c404] {Auth overlays all: 401 challenge, 403 forbidden, 429 + Retry-After for throttling.};
+\end{tikzpicture}
+\caption{Status-code decision tree for API error responses. Auth failures
+(401/403) and throttling (429) are orthogonal overlays: they can interrupt
+any branch before application logic runs.}
+\label{fig:status-tree}
+\end{figure}
+
+\subsection{Validation Engineering with Pydantic v2}
+
+Validation is where error contracts meet user experience: a validation error
+is the error a human being most often has to read, understand, and act on.
+Pydantic~v2 \cite{pydanticdocs} gives us the machinery; discipline turns it
+into a contract.
+
+\subsubsection{Validation at Boundaries versus Domain Invariants}
+
+\emph{Boundary validation} answers: is this payload a legal instance of the
+input schema? Types, ranges, patterns, string lengths. It is mechanical,
+declarative, and belongs in the model layer at the edge of the system.
+\emph{Domain invariants} answer: is this payload legal \emph{given the
+current state of the world}? ``Express shipments under 30~kg'' is an
+invariant expressible in the model; ``this SKU is stocked at the destination
+warehouse'' is an invariant that requires a database and therefore belongs
+in the service layer, where its failure becomes a domain exception
+(\texttt{409}/\texttt{422}), not a schema error. Keeping the two apart keeps
+models reusable and keeps service errors semantically typed instead of
+masquerading as typos.
+
+\subsubsection{\texttt{field\_validator} versus \texttt{model\_validator}}
+
+A \texttt{field\_validator} sees exactly one field (plus, if requested,
+already-validated sibling values via \texttt{ValidationInfo}) and answers
+single-field questions: is this SKU pattern valid, is this quantity within
+review limits. A \texttt{model\_validator} with \texttt{mode="after"} sees
+the whole, already-coerced model and answers cross-field questions: priority
+versus total weight. Use field validators for local rules---they compose and
+localize error pointers naturally---and reserve model validators for genuine
+invariants. A model validator's error has no natural field location, which is
+why our mapping emits the JSON Pointer \texttt{/} (the whole document) for
+it.
+
+\subsubsection{Coercion Strictness}
+
+Pydantic's default \emph{lax} mode coerces: the string \texttt{"12"} becomes
+the integer \texttt{12}; \texttt{"true"} becomes \texttt{True}. At a public
+API boundary this is a hazard class: silent coercion converts client bugs
+into corrupted records---the client \emph{thought} it sent a string, you
+stored an integer, and their audit diff never matches. \emph{Strict mode}
+(\texttt{model\_config = ConfigDict(strict=True)}) accepts only values of
+the declared type, surfacing the type mismatch as a \texttt{422} the client
+can fix. The nuance, demonstrated in Listing~7.2: JSON has no decimal
+literal, so blanket strictness makes a \texttt{Decimal} field unusable. The
+correct move is \emph{per-field} strictness opt-out
+(\texttt{Field(strict=False, ...)}) hardened with a validator (finite,
+quantized). Strictness is a dial per field, not a religion.
+
+\subsubsection{Error Message UX}
+
+A validation message is read by a tired integrator at 2~a.m. Good messages
+name the rule and the expectation (``priority must be one of [express,
+freight, standard]''), never echo the raw offending value (it may be a
+credential they pasted by mistake), and never expose internal field or table
+names that differ from the public contract. When you translate Pydantic's
+error array into problem-details extensions, locate each failure with a JSON
+Pointer (RFC~6901): \texttt{/lines/0/quantity} is unambiguous to both humans
+and machines, and it survives localization of the human message.
+
+\subsection{Error Envelope Architecture}
+
+The cardinal rule: \textbf{one pipeline, one shape}. Every error that leaves
+the service---validation failure, domain rejection, unhandled exception,
+framework-generated error---passes through the same stages and emerges as
+\texttt{application/problem+json}. Figure~\ref{fig:error-pipeline} shows the
+pipeline our code implements.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  stage/.style={draw, rounded corners, align=center, fill=blue!5, text width=2.9cm, inner sep=5pt},
+  store/.style={draw, rectangle, align=center, fill=green!10, text width=3.1cm, inner sep=4pt},
+  side/.style={note, align=center, text width=3.2cm},
+  every edge/.style={draw, ->, thick}
+]
+\node[stage] (raise) {Domain code raises \texttt{ProblemException}};
+\node[stage, right=0.7cm of raise] (map) {Exception handler maps to \texttt{ProblemDetail}};
+\node[stage, right=0.7cm of map] (redact) {Redaction middleware scrubs PII / traces};
+\node[stage, right=0.7cm of redact] (resp) {\texttt{application/problem+json} + status};
+
+\node[store, below=0.9cm of map] (log) {Structured log: full context + stack trace keyed by \texttt{trace\_id}};
+
+\path (raise) edge (map)
+      (map) edge (redact)
+      (redact) edge (resp)
+      (map) edge (log);
+\node[side, above=0.35cm of map] {correlation middleware stamps \texttt{trace\_id} first};
+\node[side, below=0.35cm of redact] {client never sees internals; operators see everything};
+\end{tikzpicture}
+\caption{Single error-handling pipeline: exception $\rightarrow$ problem
+mapper $\rightarrow$ redaction $\rightarrow$ response, with full-fidelity
+server-side logging forked off at the mapper under the correlation ID.}
+\label{fig:error-pipeline}
+\end{figure}
+
+\subsubsection{Machine-Readable Codes}
+
+The RFC~9457 \texttt{type} URI is the primary machine identifier; we add a
+\texttt{code} extension member (\texttt{NRW-SHIPMENT-NOT-FOUND}) because
+operations teams alert, dashboard, and page on short codes far more easily
+than on URIs, and because codes survive documentation-host moves. Codes must
+be: unique, immutable once shipped, prefixed per system, and backed by a
+registry that validates itself at import time (Listing~7.6). Never let a
+developer invent a code inline in a handler---that is how
+\texttt{ERR\_2} happens.
+
+\subsubsection{Localization}
+
+\texttt{title} and \texttt{detail} are human-facing and may be localized via
+\texttt{Accept-Language}; \texttt{type} and \texttt{code} are machine-facing
+and must \emph{never} be localized. The practical pattern: treat
+\texttt{title} as a lookup key into a message catalogue per locale, keep
+\texttt{code} ASCII, and keep interpolation values (limits, field names) as
+extension members so localized strings are pure templates. Clients that
+match on errors must match on \texttt{type}/\texttt{code} only---a localized
+\texttt{title} is a rendering, not an identifier.
+
+\subsection{Operational Concerns}
+
+\subsubsection{Correlation IDs End-to-End}
+
+Every request carries a trace identifier: accepted from an inbound
+\texttt{X-Trace-Id} header if well-formed (bounded length, character
+allowlist---never trust and reflect arbitrary header bytes), minted otherwise,
+echoed in the response header, embedded in the problem body as
+\texttt{trace\_id}, and attached to every log line the request produces.
+This collapses the support loop from ``describe what you saw'' to ``give me
+the trace\_id.'' Propagate the same ID to downstream calls so a single
+customer report reconstructs the whole request tree (Chapter~18 generalizes
+this to full distributed tracing).
+
+\subsubsection{Error Observability and Alerting}
+
+The error contract is your observability taxonomy: emit metrics as
+\texttt{errors\_total\{endpoint, status, code\}} and you can answer, per
+deploy, per endpoint, per error code: is this new, is it ours, is it a
+dependency, is it client abuse. Suggested alert thresholds as a starting
+point: 5xx rate $> 1\%$ of requests over 5 minutes pages; a single
+\texttt{code} spiking $> 10\times$ its 7-day baseline pages; 4xx rate $>
+25\%$ sustained opens a ticket (usually a broken client deploy, not your
+bug). Error budget interaction is direct: 5xx responses burn the budget of
+Chapter~18. Formally, over a window $W$:
+
+\begin{equation}
+\text{burn}(W) = \frac{\left|\{\,r \in W : \text{status}(r) \ge 500\,\}\right|}{\left|W\right|}
+\qquad\text{budget}(W) = 1 - \text{SLO}
+\end{equation}
+
+and when $\text{burn}(W)$ approaches $\text{budget}(W)$, Chapter~18's policy
+freezes feature deploys in favor of reliability work. A precise error
+taxonomy is what makes that arithmetic actionable instead of theatrical.
+
+\section{Production-Ready Code Implementation}
+\label{sec:impl}
+
+The reference implementation is a small FastAPI service for the fictional
+\emph{Northwind Robotics} universe (all data synthetic). Six files form one
+coherent system:
+
+\begin{itemize}
+  \item \texttt{problem\_details.py} --- the reusable RFC~9457 library:
+        models, exception hierarchy, handlers, JSON Pointer mapping.
+  \item \texttt{shipment\_models.py} --- strict Pydantic~v2 validation
+        showcase with a coercion-pitfall demo.
+  \item \texttt{redaction.py} --- correlation-ID and PII-redaction
+        middleware.
+  \item \texttt{app.py} --- the service wiring, with deliberately
+        interesting failure endpoints.
+  \item \texttt{test\_contract.py} --- contract tests schema-validating every
+        error path.
+  \item \texttt{error\_codes.py} --- the machine-readable error-code
+        registry and its documentation generator.
+\end{itemize}
+
+Setup (PowerShell, offline after install):
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt   # see the Dependencies Appendix
+pytest -q                         # 10 contract tests, all in-process
+python shipment_models.py         # coercion pitfall demo
+python error_codes.py             # regenerate the error catalogue
+\end{minted}
+
+\subsection{A Reusable Problem-Details Library}
+
+Listing~7.1 is the heart of the chapter. \texttt{ProblemDetail} models the
+RFC~9457 kernel plus our extension members (\texttt{code},
+\texttt{trace\_id}, \texttt{errors[]}). \texttt{ProblemException} is the
+single bridge between domain code and HTTP: domain code raises semantically
+named subclasses; one handler renders them. The
+\texttt{RequestValidationError} handler converts Pydantic's error array into
+RFC~6901 JSON Pointers, and the catch-all \texttt{Exception} handler proves
+the invariant that \emph{nothing} leaves the service unshaped---the client
+gets a redacted \texttt{500} with a \texttt{trace\_id}; the log gets the
+truth.
+
+\begin{minted}{python}
+"""problem_details.py -- Reusable RFC 9457 problem-details library.
+
+Listing 7.1. Offline-first, stdlib + pydantic + fastapi only.
+"""
+from __future__ import annotations
+
+import re
+import uuid
+from typing import Any, Optional
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+PROBLEM_MEDIA_TYPE = "application/problem+json"
+
+# Synthetic, obviously fictional documentation namespace (RFC 9457 type URIs).
+TYPE_BASE = "https://docs.example.invalid/problems"
+
+
+class ErrorLocation(BaseModel):
+    """One field-level validation failure, located by JSON Pointer (RFC 6901)."""
+
+    pointer: str = Field(description="JSON Pointer to the offending value")
+    code: str = Field(description="Machine-readable error code")
+    message: str = Field(description="Human-readable, redacted message")
+
+
+class ProblemDetail(BaseModel):
+    """RFC 9457 problem detail object with Northwind Robotics extensions."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    type: str = Field(default="about:blank")
+    title: str
+    status: int
+    detail: Optional[str] = None
+    instance: Optional[str] = None
+    # Extension members.
+    code: Optional[str] = None
+    trace_id: Optional[str] = None
+    errors: list[ErrorLocation] = Field(default_factory=list)
+
+
+class ProblemException(Exception):
+    """Base class: a domain exception that maps 1:1 to a ProblemDetail."""
+
+    status: int = 500
+    title: str = "Internal Server Error"
+    type_slug: str = "internal"
+    code: str = "NRW-INTERNAL"
+
+    def __init__(
+        self,
+        detail: Optional[str] = None,
+        *,
+        instance: Optional[str] = None,
+        errors: Optional[list[ErrorLocation]] = None,
+    ) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.instance = instance
+        self.errors = errors or []
+
+    def to_problem(self, trace_id: str) -> ProblemDetail:
+        return ProblemDetail(
+            type=f"{TYPE_BASE}/{self.type_slug}",
+            title=self.title,
+            status=self.status,
+            detail=self.detail,
+            instance=self.instance,
+            code=self.code,
+            trace_id=trace_id,
+            errors=self.errors,
+        )
+
+
+class ShipmentNotFound(ProblemException):
+    status = 404
+    title = "Shipment Not Found"
+    type_slug = "shipment-not-found"
+    code = "NRW-SHIPMENT-NOT-FOUND"
+
+
+class ShipmentStateConflict(ProblemException):
+    status = 409
+    title = "Shipment State Conflict"
+    type_slug = "shipment-state-conflict"
+    code = "NRW-SHIPMENT-STATE-CONFLICT"
+
+
+class WarehouseUnavailable(ProblemException):
+    status = 503
+    title = "Dependency Unavailable"
+    type_slug = "warehouse-unavailable"
+    code = "NRW-WAREHOUSE-UNAVAILABLE"
+
+
+class RateLimitExceeded(ProblemException):
+    status = 429
+    title = "Rate Limit Exceeded"
+    type_slug = "rate-limit-exceeded"
+    code = "NRW-RATE-LIMIT-EXCEEDED"
+
+    def __init__(self, retry_after: int, **kwargs: Any) -> None:
+        super().__init__(
+            detail=f"Retry after {retry_after} seconds.", **kwargs
+        )
+        self.retry_after = retry_after
+
+
+def json_pointer(loc: list[Any]) -> str:
+    """Convert a Pydantic error `loc` tuple to an RFC 6901 JSON Pointer."""
+    parts = []
+    for seg in loc:
+        if seg == "body":  # FastAPI wraps body params under "body"
+            continue
+        parts.append(str(seg).replace("~", "~0").replace("/", "~1"))
+    return "/" + "/".join(parts)
+
+
+def problem_response(
+    problem: ProblemDetail,
+    headers: Optional[dict[str, str]] = None,
+) -> JSONResponse:
+    payload = problem.model_dump(exclude_none=True)
+    return JSONResponse(
+        status_code=problem.status,
+        content=payload,
+        media_type=PROBLEM_MEDIA_TYPE,
+        headers=headers,
+    )
+
+
+def register_problem_handlers(app: FastAPI) -> None:
+    """Single pipeline: domain exception -> problem mapper -> redaction -> response."""
+
+    @app.exception_handler(ProblemException)
+    async def handle_problem(
+        request: Request, exc: ProblemException
+    ) -> JSONResponse:
+        trace_id = getattr(request.state, "trace_id", str(uuid.uuid4()))
+        problem = exc.to_problem(trace_id)
+        headers = None
+        if isinstance(exc, RateLimitExceeded):
+            headers = {"Retry-After": str(exc.retry_after)}
+        return problem_response(problem, headers=headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        trace_id = getattr(request.state, "trace_id", str(uuid.uuid4()))
+        # 422: the payload was syntactically valid JSON but semantically invalid.
+        locs = [
+            ErrorLocation(
+                pointer=json_pointer(list(err.get("loc", ()))),
+                code=str(err.get("type", "invalid")),
+                # Pydantic messages can echo raw input; drop ctx, keep it safe.
+                message=str(err.get("msg", "Invalid value")),
+            )
+            for err in exc.errors()
+        ]
+        problem = ProblemDetail(
+            type=f"{TYPE_BASE}/validation-failed",
+            title="Validation Failed",
+            status=422,
+            detail="Request payload failed semantic validation.",
+            instance=str(request.url.path),
+            code="NRW-VALIDATION-FAILED",
+            trace_id=trace_id,
+            errors=locs,
+        )
+        return problem_response(problem)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        trace_id = getattr(request.state, "trace_id", str(uuid.uuid4()))
+        # Full context goes to the server log; the client gets a redacted body.
+        print(f"trace_id={trace_id} unhandled={exc!r}")
+        problem = ProblemDetail(
+            type=f"{TYPE_BASE}/internal",
+            title="Internal Server Error",
+            status=500,
+            detail="An unexpected error occurred. "
+            "Reference the trace_id when contacting support.",
+            instance=str(request.url.path),
+            code="NRW-INTERNAL",
+            trace_id=trace_id,
+        )
+        return problem_response(problem)
+
+
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "<tax-id>"),
+    (re.compile(r"(?i)(api[_-]?key|token|password)=[^&\s]+"), r"\1=<redacted>"),
+]
+
+
+def redact_text(text: str) -> str:
+    """Scrub PII-like patterns and secrets from arbitrary text."""
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+\end{minted}
+
+\begin{examplebox}
+\textbf{A client handles this without string matching.} Given any error from
+the shipments API, a Python client switches on the stable extension member:
+\begin{minted}{python}
+import httpx
+
+resp = httpx.post("https://api.example.invalid/shipments", json=payload)
+if resp.is_error:
+    problem = resp.json() if resp.headers["content-type"].startswith(
+        "application/problem+json") else {}
+    match problem.get("code"):
+        case "NRW-VALIDATION-FAILED":
+            fix_fields(problem["errors"])          # JSON Pointers per field
+        case "NRW-RATE-LIMIT-EXCEEDED":
+            sleep(float(resp.headers["Retry-After"]))
+        case _:
+            escalate(problem.get("trace_id"))      # never match on "detail"
+\end{minted}
+Note what the client never does: parse \texttt{detail}, match English prose,
+or guess retriability from the status alone.
+\end{examplebox}
+
+\subsection{Strict Validation Showcase}
+
+Listing~7.2 models the Northwind Robotics \texttt{Shipment} resource. Study
+the \texttt{Annotated} pattern: \texttt{Sku} and \texttt{CountryCode} are
+named, reusable types whose constraints travel with the type itself---the
+self-documenting alternative to scattering \texttt{Field(...)} magic at every
+use site. Note also the deliberate \texttt{strict=False} opt-out on
+\texttt{unit\_weight\_kg}: JSON has no decimal literal, so a strict
+\texttt{Decimal} would reject \emph{every} legitimate JSON number; the
+companion validator restores the safety (finiteness, quantization) that
+strictness was buying.
+
+\begin{minted}{python}
+"""shipment_models.py -- Strict Pydantic v2 validation showcase.
+
+Listing 7.2. Northwind Robotics "Shipment" resource. Demonstrates strict mode,
+field_validator vs model_validator, and Annotated custom types.
+"""
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Annotated, Optional
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+# --- Custom types via Annotated: reusable, composable, self-documenting. ----
+Sku = Annotated[
+    str,
+    StringConstraints(pattern=r"^NRW-[A-Z]{2}-\d{4}$", min_length=11, max_length=11),
+]
+CountryCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{2}$")]
+
+
+class Address(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    street: str = Field(min_length=1, max_length=120)
+    city: str = Field(min_length=1, max_length=60)
+    country: CountryCode
+
+
+class PackageLine(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    sku: Sku
+    quantity: int = Field(ge=1, le=10_000)
+    # Decimal avoids binary float money errors. JSON has no decimal literal,
+    # so this field opts OUT of strict mode (strict=False) and is hardened
+    # by a validator instead -- blanket strictness breaks legitimate input.
+    unit_weight_kg: Decimal = Field(strict=False, gt=Decimal("0"), le=Decimal("500"))
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_not_suspiciously_round(cls, value: int) -> int:
+        # Business heuristic: quantities over 5000 require explicit review.
+        if value > 5000:
+            raise ValueError("quantity above 5000 requires manual review")
+        return value
+
+    @field_validator("unit_weight_kg")
+    @classmethod
+    def weight_is_finite(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("unit_weight_kg must be a finite number")
+        return value.quantize(Decimal("0.001"))
+
+
+class Shipment(BaseModel):
+    """Strict at the boundary: no silent coercion, no unknown fields."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    shipment_id: Optional[str] = Field(default=None, pattern=r"^shp_\d{8}$")
+    destination: Address
+    lines: list[PackageLine] = Field(min_length=1)
+    priority: str = Field(default="standard")
+
+    @field_validator("priority")
+    @classmethod
+    def priority_is_known(cls, value: str) -> str:
+        allowed = {"standard", "express", "freight"}
+        if value not in allowed:
+            raise ValueError(f"priority must be one of {sorted(allowed)}")
+        return value
+
+    @model_validator(mode="after")
+    def express_shipments_stay_light(self) -> "Shipment":
+        # Cross-field invariant: express parcels cannot exceed 30 kg total.
+        if self.priority == "express":
+            total = sum(
+                line.unit_weight_kg * line.quantity for line in self.lines
+            )
+            if total > Decimal("30"):
+                raise ValueError(
+                    f"express shipments must weigh <= 30 kg, got {total} kg"
+                )
+        return self
+
+
+def demo_coercion_pitfall() -> dict[str, str]:
+    """Show why lax mode is dangerous at the API boundary."""
+    outcome: dict[str, str] = {}
+
+    class LaxPackage(BaseModel):  # default: lax coercion
+        quantity: int
+
+    coerced = LaxPackage(quantity="12")  # type: ignore[arg-type]
+    outcome["lax_accepts_string"] = f"{coerced.quantity!r} (silently coerced)"
+
+    try:
+        PackageLine(sku="NRW-AR-1001", quantity="12", unit_weight_kg=Decimal("1.0"))  # type: ignore[arg-type]
+    except Exception as exc:
+        first = str(exc).splitlines()[0]
+        outcome["strict_rejects_string"] = first
+    return outcome
+
+
+if __name__ == "__main__":
+    for key, value in demo_coercion_pitfall().items():
+        print(f"{key}: {value}")
+\end{minted}
+
+Running \texttt{python shipment\_models.py} prints:
+
+\begin{minted}{text}
+lax_accepts_string: 12 (silently coerced)
+strict_rejects_string: 1 validation error for PackageLine
+\end{minted}
+
+The lax model accepted a string where an integer was declared, without a
+murmur; the strict model refused. In lax mode the corruption would have
+entered the system wearing a disguise; in strict mode it became a
+\texttt{422} with pointer \texttt{/lines/0/quantity} that the client can fix.
+
+\subsection{Redaction Middleware and Correlation IDs}
+
+Listing~7.3 is the last line of defense. Two middlewares bracket the
+application: \texttt{CorrelationIdMiddleware} stamps or mints the trace ID
+(inner, so handlers can read \texttt{request.state.trace\_id}), and
+\texttt{ProblemRedactionMiddleware} (outer) re-reads every
+\texttt{application/problem+json} body and scrubs it. Middleware ordering in
+Starlette is last-added-equals-outermost, so the redactor wraps the
+correlator wraps the app. The redactor is deliberately pessimistic: if a
+body smells like a stack trace, it replaces the detail entirely; the full
+payload goes only to the server log, keyed by the trace ID, where operators
+with access control can see it.
+
+\begin{minted}{python}
+"""redaction.py -- Correlation IDs and response redaction middleware.
+
+Listing 7.3. Guarantees: problem+json bodies never leak PII patterns or
+stack traces; full context is logged server-side under the trace_id.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from typing import Awaitable, Callable
+
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
+
+logger = logging.getLogger("northwind.errors")
+
+TRACE_HEADER = "X-Trace-Id"
+PROBLEM_MEDIA_TYPE = "application/problem+json"
+
+# Deterministic, conservative scrub rules. Extend via registry, not edits.
+PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<email>"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "<tax-id>"),
+    (re.compile(r"\b(?:\d[ -]?){13,16}\b"), "<card-number>"),
+    (re.compile(r"(?i)(api[_-]?key|token|password|secret)[\"']?\s*[:=]\s*[\"']?[^&\s\"']+"), r"\1=<redacted>"),
+]
+
+STACK_TRACE_MARKER = re.compile(r"(Traceback \(most recent call last\)|File \"[^\"]+\", line \d+)")
+
+
+def scrub(text: str) -> str:
+    """Remove PII-like patterns and stack-trace fragments from text."""
+    for pattern, replacement in PII_PATTERNS:
+        text = pattern.sub(replacement, text)
+    if STACK_TRACE_MARKER.search(text):
+        return "An internal error occurred. Contact support with the trace_id."
+    return text
+
+
+class CorrelationIdMiddleware(BaseHTTPMiddleware):
+    """Accept or mint a trace ID and expose it on request.state + response."""
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        incoming = request.headers.get(TRACE_HEADER, "")
+        # Accept only safe trace IDs: bounded length, no control chars.
+        trace_id = incoming if re.fullmatch(r"[\w\-]{1,64}", incoming) else str(uuid.uuid4())
+        request.state.trace_id = trace_id
+        response = await call_next(request)
+        response.headers[TRACE_HEADER] = trace_id
+        return response
+
+
+class ProblemRedactionMiddleware(BaseHTTPMiddleware):
+    """Last line of defense: scrub every problem+json body before it leaves."""
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        if not content_type.startswith(PROBLEM_MEDIA_TYPE):
+            return response
+
+        body = b""
+        async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+            body += chunk if isinstance(chunk, bytes) else chunk.encode()
+
+        original = body.decode("utf-8", errors="replace")
+        cleaned = scrub(original)
+        if cleaned != original:
+            trace_id = getattr(request.state, "trace_id", "unknown")
+            # Server-side keeps the full payload for forensics; client gets scrubbed.
+            logger.warning(
+                "problem response redacted",
+                extra={"trace_id": trace_id, "raw_body": original},
+            )
+        headers = dict(response.headers)
+        headers["content-length"] = str(len(cleaned.encode()))
+        return Response(
+            content=cleaned,
+            status_code=response.status_code,
+            headers=headers,
+            media_type=PROBLEM_MEDIA_TYPE,
+        )
+\end{minted}
+
+\begin{warningbox}
+\textbf{Regex redaction is a floor, not a ceiling.} Pattern lists catch the
+shapes you remembered; they do not catch names, free-text addresses, or the
+PII your schema did not anticipate. Treat regex scrubbing as the emergency
+brake behind the primary defense---\emph{never putting PII into error
+payloads in the first place}---and fuzz your scrubber with an adversarial
+corpus (Capstone Project~3) before you trust it.
+\end{warningbox}
+
+\subsection{The Service, Wired}
+
+Listing~7.4 assembles the pieces into a FastAPI application with an
+in-memory store (offline, deterministic). It deliberately includes endpoints
+for every failure mode we need to contract-test: missing resources, state
+conflicts, a dependency failure, a throttle, and a ``leaky'' endpoint
+simulating a developer who echoed PII into an error detail.
+
+\begin{minted}{python}
+"""app.py -- Northwind Robotics shipments service, wired for RFC 9457 errors.
+
+Listing 7.4. In-memory store only: offline, deterministic, no network.
+"""
+from __future__ import annotations
+
+from decimal import Decimal
+
+from fastapi import FastAPI, Request
+
+from problem_details import (
+    ProblemException,
+    RateLimitExceeded,
+    ShipmentNotFound,
+    ShipmentStateConflict,
+    WarehouseUnavailable,
+    register_problem_handlers,
+)
+from redaction import CorrelationIdMiddleware, ProblemRedactionMiddleware
+from shipment_models import Shipment
+
+# In-memory store keyed by shipment_id. Synthetic data only.
+STORE: dict[str, Shipment] = {
+    "shp_00000001": Shipment(
+        shipment_id="shp_00000001",
+        destination={
+            "street": "1 Gearbox Lane",
+            "city": "Springfield",
+            "country": "US",
+        },
+        lines=[{"sku": "NRW-AR-1001", "quantity": 2, "unit_weight_kg": Decimal("4.5")}],
+        priority="standard",
+    )
+}
+SEQUENCE = {"next": 2}
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Shipments", version="1.0.0")
+    # Middleware order matters: correlation first, redaction outermost-last.
+    app.add_middleware(ProblemRedactionMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
+    register_problem_handlers(app)
+
+    @app.post("/shipments", status_code=201)
+    def create_shipment(shipment: Shipment, request: Request) -> Shipment:
+        new_id = f"shp_{SEQUENCE['next']:08d}"
+        SEQUENCE["next"] += 1
+        stored = shipment.model_copy(update={"shipment_id": new_id})
+        STORE[new_id] = stored
+        return stored
+
+    @app.get("/shipments/{shipment_id}")
+    def get_shipment(shipment_id: str) -> Shipment:
+        if shipment_id not in STORE:
+            raise ShipmentNotFound(
+                detail=f"No shipment with id {shipment_id!r} exists.",
+                instance=f"/shipments/{shipment_id}",
+            )
+        return STORE[shipment_id]
+
+    @app.post("/shipments/{shipment_id}/cancel")
+    def cancel_shipment(shipment_id: str) -> Shipment:
+        shipment = STORE.get(shipment_id)
+        if shipment is None:
+            raise ShipmentNotFound(detail="Cannot cancel a missing shipment.")
+        if shipment.priority == "freight":
+            # Domain rule: freight contracts lock at booking time.
+            raise ShipmentStateConflict(
+                detail="Freight shipments cannot be cancelled after booking.",
+                instance=f"/shipments/{shipment_id}",
+            )
+        return shipment
+
+    @app.get("/warehouse/ping")
+    def warehouse_ping() -> dict[str, str]:
+        # Simulated dependency failure: retriable, server-owned.
+        raise WarehouseUnavailable(detail="Warehouse API timed out after 3 attempts.")
+
+    @app.get("/shipments-throttled")
+    def throttled() -> dict[str, str]:
+        raise RateLimitExceeded(retry_after=30)
+
+    @app.get("/debug/leaky")
+    def leaky_failure() -> dict[str, str]:
+        # A careless developer echoes request context into the error detail.
+        raise ProblemException(
+            detail="Failed to notify jane.doe@example.invalid; "
+            "tax id 123-45-6789 on file."
+        )
+
+    return app
+
+
+app = create_app()
+\end{minted}
+
+\subsection{Contract Tests: Every Error Path Is Schema-Valid}
+
+Listing~7.5 is what turns the error contract from aspiration into CI gate.
+Two ideas carry the weight. First, a \texttt{PROBLEM\_SCHEMA} (JSON Schema
+draft 2020-12, \cite{jsonschemadocs}) with
+\texttt{additionalProperties: false} that defines exactly what a problem
+document from this service may contain---including the extension members.
+Second, one assertion helper, \texttt{assert\_problem}, applied to
+\emph{every} error test: correct status, correct media type, schema-valid
+body, body status matching the header, and trace-ID round-trip. Adding a new
+error path without a contract test becomes impossible to do quietly.
+
+The tests run fully in-process via \texttt{TestClient}
+\cite{fastapidocs}---no sockets, no network, deterministic on a fresh
+machine. Note \texttt{raise\_server\_exceptions=False}: we want to verify
+the \texttt{500} \emph{response}, not have the test harness re-raise.
+
+\begin{minted}{python}
+"""test_contract.py -- Contract tests: every error path is valid problem+json.
+
+Listing 7.5. In-process ASGI tests via httpx TestClient. Fully offline.
+"""
+from __future__ import annotations
+
+import jsonschema
+import pytest
+from fastapi.testclient import TestClient
+
+from app import app
+
+PROBLEM_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "title", "status"],
+    "properties": {
+        "type": {"type": "string", "format": "uri-reference"},
+        "title": {"type": "string", "minLength": 1},
+        "status": {"type": "integer", "minimum": 400, "maximum": 599},
+        "detail": {"type": "string"},
+        "instance": {"type": "string"},
+        "code": {"type": "string", "pattern": "^NRW-[A-Z-]+$"},
+        "trace_id": {"type": "string", "minLength": 1},
+        "errors": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["pointer", "code", "message"],
+                "properties": {
+                    "pointer": {"type": "string", "pattern": "^/"},
+                    "code": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+PII_FRAGMENTS = ("@", "123-45-6789", "Traceback", 'File "')
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def assert_problem(response, expected_status: int) -> dict:
+    assert response.status_code == expected_status
+    assert response.headers["content-type"].startswith("application/problem+json")
+    body = response.json()
+    jsonschema.validate(body, PROBLEM_SCHEMA)
+    assert body["status"] == expected_status
+    assert "X-Trace-Id" in response.headers
+    assert body["trace_id"] == response.headers["X-Trace-Id"]
+    return body
+
+
+def test_404_is_problem_json(client: TestClient) -> None:
+    body = assert_problem(client.get("/shipments/shp_99999999"), 404)
+    assert body["code"] == "NRW-SHIPMENT-NOT-FOUND"
+    assert body["type"].endswith("/shipment-not-found")
+
+
+def test_422_maps_pydantic_errors_to_json_pointers(client: TestClient) -> None:
+    payload = {
+        "destination": {"street": "", "city": "Springfield", "country": "USA"},
+        "lines": [{"sku": "bad-sku", "quantity": 0, "unit_weight_kg": "not-a-number"}],
+        "priority": "hyperdrive",
+    }
+    body = assert_problem(client.post("/shipments", json=payload), 422)
+    assert body["code"] == "NRW-VALIDATION-FAILED"
+    pointers = {err["pointer"] for err in body["errors"]}
+    # Each failure is located by an RFC 6901 JSON Pointer.
+    assert "/destination/street" in pointers
+    assert "/destination/country" in pointers
+    assert "/lines/0/sku" in pointers
+    assert "/lines/0/quantity" in pointers
+    assert "/lines/0/unit_weight_kg" in pointers  # unparseable decimal
+    assert "/priority" in pointers
+
+
+def test_422_cross_field_invariant(client: TestClient) -> None:
+    payload = {
+        "destination": {"street": "1 Gearbox Lane", "city": "Springfield", "country": "US"},
+        "lines": [{"sku": "NRW-AR-1001", "quantity": 10, "unit_weight_kg": 4.5}],
+        "priority": "express",
+    }
+    body = assert_problem(client.post("/shipments", json=payload), 422)
+    assert body["errors"][0]["pointer"] == "/"
+    assert "express" in body["errors"][0]["message"]
+
+
+def test_409_domain_conflict(client: TestClient) -> None:
+    create = client.post(
+        "/shipments",
+        json={
+            "destination": {"street": "9 Servo Rd", "city": "Springfield", "country": "US"},
+            "lines": [{"sku": "NRW-FR-9000", "quantity": 1, "unit_weight_kg": 120}],
+            "priority": "freight",
+        },
+    )
+    assert create.status_code == 201
+    shipment_id = create.json()["shipment_id"]
+    body = assert_problem(client.post(f"/shipments/{shipment_id}/cancel"), 409)
+    assert body["code"] == "NRW-SHIPMENT-STATE-CONFLICT"
+
+
+def test_500_is_redacted_and_never_leaks_pii(client: TestClient) -> None:
+    response = client.get("/debug/leaky")
+    body = assert_problem(response, 500)
+    for fragment in PII_FRAGMENTS:
+        assert fragment not in response.text
+    # The generic shape is preserved; the caller gets an actionable trace_id.
+    assert body["code"] == "NRW-INTERNAL"
+
+
+def test_429_carries_retry_after(client: TestClient) -> None:
+    response = client.get("/shipments-throttled")
+    assert_problem(response, 429)
+    assert response.headers["Retry-After"] == "30"
+
+
+def test_503_dependency_failure_is_retriable(client: TestClient) -> None:
+    body = assert_problem(client.get("/warehouse/ping"), 503)
+    assert body["code"] == "NRW-WAREHOUSE-UNAVAILABLE"
+
+
+def test_client_supplied_trace_id_is_echoed(client: TestClient) -> None:
+    response = client.get(
+        "/shipments/shp_99999999", headers={"X-Trace-Id": "req-abc-123"}
+    )
+    assert response.headers["X-Trace-Id"] == "req-abc-123"
+    assert response.json()["trace_id"] == "req-abc-123"
+
+
+def test_malformed_trace_id_is_replaced(client: TestClient) -> None:
+    response = client.get(
+        "/shipments/shp_99999999", headers={"X-Trace-Id": "a" * 500}
+    )
+    trace_id = response.headers["X-Trace-Id"]
+    assert trace_id != "a" * 500
+    assert len(trace_id) <= 64
+
+
+def test_happy_path_unaffected(client: TestClient) -> None:
+    response = client.get("/shipments/shp_00000001")
+    assert response.status_code == 200
+    assert response.json()["shipment_id"] == "shp_00000001"
+\end{minted}
+
+Running the suite (all ten tests pass, in-process, in about a second):
+
+\begin{minted}{text}
+pytest -q
+..........                                                               [100%]
+10 passed in 1.05s
+\end{minted}
+
+\subsection{A Machine-Readable Error-Code Registry}
+
+Listing~7.6 closes the loop between code, documentation, and operations. The
+registry is a frozen dataclass table---one row per error code---that
+\emph{validates itself at import time} (a duplicate code or missing
+remediation crashes the deploy, not the customer) and renders the public
+Markdown catalogue that the \texttt{type} URIs promise. Clients, docs, and
+alert rules all derive from this single artifact; that is what
+``machine-readable'' buys.
+
+\begin{minted}{python}
+"""error_codes.py -- Machine-readable error-code registry with doc generation.
+
+Listing 7.6. One source of truth: clients, docs, and alerts all derive from
+this registry. Run directly to print the generated Markdown catalogue.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class Retriable(str, Enum):
+    YES = "yes"
+    NO = "no"
+    CONDITIONAL = "conditional"
+
+
+@dataclass(frozen=True)
+class ErrorCode:
+    code: str            # stable, machine-readable, never reused
+    http_status: int
+    type_slug: str       # suffix of the RFC 9457 type URI
+    title: str           # short, stable, localizable key
+    retriable: Retriable
+    owner: str           # team accountable for this failure mode
+    remediation: str     # one-line client-actionable guidance
+
+
+REGISTRY: tuple[ErrorCode, ...] = (
+    ErrorCode(
+        code="NRW-VALIDATION-FAILED",
+        http_status=422,
+        type_slug="validation-failed",
+        title="Validation Failed",
+        retriable=Retriable.NO,
+        owner="api-platform",
+        remediation="Fix the fields named in errors[].pointer and resend.",
+    ),
+    ErrorCode(
+        code="NRW-SHIPMENT-NOT-FOUND",
+        http_status=404,
+        type_slug="shipment-not-found",
+        title="Shipment Not Found",
+        retriable=Retriable.NO,
+        owner="fulfillment",
+        remediation="Verify the shipment_id; do not retry blindly.",
+    ),
+    ErrorCode(
+        code="NRW-SHIPMENT-STATE-CONFLICT",
+        http_status=409,
+        type_slug="shipment-state-conflict",
+        title="Shipment State Conflict",
+        retriable=Retriable.CONDITIONAL,
+        owner="fulfillment",
+        remediation="Refresh the resource, re-evaluate preconditions, retry once.",
+    ),
+    ErrorCode(
+        code="NRW-RATE-LIMIT-EXCEEDED",
+        http_status=429,
+        type_slug="rate-limit-exceeded",
+        title="Rate Limit Exceeded",
+        retriable=Retriable.YES,
+        owner="api-platform",
+        remediation="Back off for Retry-After seconds, then retry with jitter.",
+    ),
+    ErrorCode(
+        code="NRW-WAREHOUSE-UNAVAILABLE",
+        http_status=503,
+        type_slug="warehouse-unavailable",
+        title="Dependency Unavailable",
+        retriable=Retriable.YES,
+        owner="warehouse-integrations",
+        remediation="Retry with exponential backoff; alert if it persists > 5 min.",
+    ),
+    ErrorCode(
+        code="NRW-INTERNAL",
+        http_status=500,
+        type_slug="internal",
+        title="Internal Server Error",
+        retriable=Retriable.NO,
+        owner="api-platform",
+        remediation="Report the trace_id to support; do not retry mutations.",
+    ),
+)
+
+
+def validate_registry(registry: tuple[ErrorCode, ...] = REGISTRY) -> None:
+    """Fail fast at import time if the registry is internally inconsistent."""
+    codes = [entry.code for entry in registry]
+    assert len(codes) == len(set(codes)), "duplicate error codes"
+    for entry in registry:
+        assert entry.code.startswith("NRW-"), f"bad prefix: {entry.code}"
+        assert 400 <= entry.http_status <= 599, f"bad status: {entry.code}"
+        assert entry.remediation, f"missing remediation: {entry.code}"
+        if entry.http_status < 500:
+            # Client-facing codes must explain what the CLIENT can do.
+            assert "support" not in entry.remediation.lower() or entry.http_status == 500
+
+
+def render_markdown(registry: tuple[ErrorCode, ...] = REGISTRY) -> str:
+    """Generate the public error catalogue page from the registry."""
+    lines = [
+        "# Northwind Robotics API -- Error Code Catalogue",
+        "",
+        "| Code | HTTP | Title | Retriable | Owner | Remediation |",
+        "|---|---|---|---|---|---|",
+    ]
+    for entry in registry:
+        lines.append(
+            f"| `{entry.code}` | {entry.http_status} | {entry.title} "
+            f"| {entry.retriable.value} | {entry.owner} | {entry.remediation} |"
+        )
+    return "\n".join(lines)
+
+
+validate_registry()
+
+if __name__ == "__main__":
+    print(render_markdown())
+\end{minted}
+
+\section{Common Pitfalls \& Anti-Patterns}
+
+Each entry below is a failure mode observed in real production estates, with
+its cost and its cure.
+
+\subsection*{200 OK with an Error Body}
+
+\emph{Symptom:} \texttt{\{"success": false\}} rides a \texttt{200}.
+\emph{Cost:} caches store failures, retry middleware sleeps through outages,
+and availability dashboards show green during the fire. \emph{Cure:} the
+status code reflects the outcome; the body explains it. No exceptions for
+REST-style HTTP.
+
+\subsection*{Leaking Stack Traces and PII}
+
+\emph{Symptom:} a \texttt{500} body contains \texttt{Traceback (most recent
+call last)}, a SQL fragment, or the caller's email address. \emph{Cost:}
+reconnaissance data for attackers, regulatory exposure, PII smeared across
+every log pipeline that captures bodies. \emph{Cure:} generic client-facing
+\texttt{detail}, full context in server logs under the trace ID, redaction
+middleware as the last gate (Listing~7.3).
+
+\subsection*{Inconsistent Error Shapes per Endpoint}
+
+\emph{Symptom:} \texttt{/orders} returns \texttt{\{"error": \ldots\}},
+\texttt{/shipments} returns \texttt{\{"message": \ldots\}}, the gateway adds
+an HTML page for good measure. \emph{Cost:} every consumer writes $N$ error
+parsers and still misses the gateway's. \emph{Cure:} one pipeline, one media
+type, schema-validated in CI for \emph{every} endpoint---including
+framework-generated \texttt{404}s and \texttt{405}s.
+
+\subsection*{Stringly-Typed Client Error Matching}
+
+\emph{Symptom:} consumer code does
+\texttt{if "insufficient" in response["message"]}. \emph{Cost:} your copy
+edit is their breaking change; localization is a breaking change; fixing a
+typo is a breaking change. \emph{Cure:} match on \texttt{type} and
+\texttt{code} only; treat \texttt{title}/\texttt{detail} as display text.
+Providers: never change \texttt{type}/\texttt{code} semantics in place.
+
+\subsection*{500 for Validation Failures}
+
+\emph{Symptom:} a bad payload raises \texttt{KeyError} deep in a handler and
+surfaces as \texttt{500}. \emph{Cost:} clients give up (5xx reads as ``not
+my fault, retry later''), your error budget burns for their typo, and your
+on-call investigates non-incidents. \emph{Cure:} validate at the boundary
+with a real schema; unreachable-by-validation code paths may still
+\texttt{500}, and that is fine---that is what \texttt{500} is for.
+
+\subsection*{Swallowing Exceptions into Generic 400}
+
+\emph{Symptom:} \texttt{except Exception: return 400}. \emph{Cost:} the
+mirror image of the previous sin: real outages masquerade as client errors,
+clients stop retrying during your incident, and paging logic that keys on
+5xx never fires. \emph{Cure:} catch specific exceptions, map each to its
+true class, and let the genuinely unexpected fall through to the
+\texttt{500} handler.
+
+\subsection*{Logging Secrets from Failed Payloads}
+
+\emph{Symptom:} a debug log line dumps the raw request body on validation
+failure---including \texttt{password} and \texttt{api\_key} fields.
+\emph{Cost:} credential material in log aggregators with broad read access
+and long retention. \emph{Cure:} log the \emph{redacted} error summary, the
+JSON Pointers of failing fields, and the trace ID---never the raw payload;
+where payload capture is unavoidable, redact before writing (Chapter~5).
+
+\section{Hands-On Production Lab \& Real-World Case Study}
+
+\subsection{Lab: Retrofitting a Messy Service to Uniform RFC 9457}
+
+You inherit \texttt{legacy\_quotes.py}, a FastAPI service for Northwind
+Robotics' spare-parts quoting. It is a museum of error sins: one endpoint
+returns \texttt{200} with \texttt{\{"ok": false\}}; another returns a bare
+string; a third lets a \texttt{sqlite3.IntegrityError} escape as an HTML
+\texttt{500}; validation errors use FastAPI's default (non-problem) shape;
+and a ``helpful'' handler echoes the submitted customer email into its error
+detail.
+
+\textbf{Objective.} Without changing any success-path behavior, make every
+error the service can emit conform to the RFC~9457 pipeline of
+Section~\ref{sec:impl}.
+
+\textbf{Steps.}
+
+\begin{enumerate}
+  \item \textbf{Inventory.} Exercise every endpoint's failure modes with
+        \texttt{TestClient} and record the current (inconsistent) shapes in
+        a table. This is your regression baseline.
+  \item \textbf{Install the pipeline.} Drop in \texttt{problem\_details.py}
+        and \texttt{redaction.py} unmodified; register handlers and
+        middleware in the app factory.
+  \item \textbf{Convert domain failures.} Replace ad-hoc returns with
+        \texttt{ProblemException} subclasses; choose precise statuses
+        (\texttt{409} for the duplicate-part-number case, \texttt{422} for
+        semantic quote errors).
+  \item \textbf{Fix the 200-with-error endpoint last}---it requires
+        consumer coordination; document the change in the OpenAPI
+        \texttt{responses} section \cite{openapi31}.
+  \item \textbf{Write the contract tests first, per endpoint,} using the
+        \texttt{PROBLEM\_SCHEMA} helper; run them red, then green.
+  \item \textbf{Prove redaction.} Add the intentionally leaky handler back
+        behind a test-only flag and assert no PII fragment survives.
+\end{enumerate}
+
+\textbf{Deliverable.} A diff touching no success-path logic, a contract test
+per error path, and a one-page ``error contract'' section for the API's
+README generated from your registry.
+
+\subsection{War Story: The PII Leak That Hid in \texttt{detail}}
+
+A fulfillment API (composite of several real incidents) validated customer
+notification preferences against a downstream directory. When the directory
+rejected an address, the developer---debugging an integration under deadline
+pressure---returned the directory's error verbatim in the problem
+\texttt{detail}: \emph{``mailbox jane.doe@example.invalid not provisioned for
+account 123-45-6789.''} The response was a correctly-typed, correctly-shaped
+\texttt{422}. Every control that looked at \emph{structure} passed.
+
+The blast radius was invisible for weeks because the leak rode inside a
+``valid'' error contract. Three systems made it worse: the CDN logged
+response bodies for \texttt{422}s during a debugging flag that was never
+turned off; the APM tool captured error bodies as ``context''; and a
+third-party integrator helpfully surfaced \texttt{detail} in their
+end-user-facing UI---so end users occasionally saw \emph{other} customers'
+contact data when batch jobs interleaved failures.
+
+Discovery came from an audit query, not an alert: a routine scan of APM
+payloads for the regex \texttt{\textbackslash S+@\textbackslash S+} lit up
+thousands of error bodies. Remediation proceeded in four moves, in this
+order, and the order is the lesson: (1)~\emph{stop the bleeding at the
+edge}---deploy redaction middleware the same day, before the code fix, because
+the fix had other callers; (2)~\emph{fix the producer}---the directory
+client now maps upstream errors to typed exceptions with generic details;
+(3)~\emph{purge and rotate}---body capture disabled at the CDN, APM payload
+retention shortened, affected logs expunged per policy; (4)~\emph{make it a
+test, not a memory}---a contract test now asserts a PII-fragment denylist
+against every error path, which is precisely
+\texttt{test\_500\_is\_redacted\_and\_never\_leaks\_pii} in Listing~7.5.
+
+The post-incident review concluded that the RFC~9457 adoption had been
+\emph{structurally} complete and \emph{semantically} hollow: shape without
+content policy. Every control the team added afterward---registry-reviewed
+details, denylist contract tests, edge redaction---is about content. Shape is
+necessary; it is nowhere near sufficient.
+
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+
+\begin{enumerate}
+  \item A request with malformed JSON arrives at \texttt{POST /shipments}.
+        Which layer of the taxonomy fires, what status results, and why does
+        the answer \emph{not} involve Pydantic?
+  \item Your teammate proposes returning \texttt{404} for unauthorized
+        access to a resource. Construct the threat model where this is
+        correct, and the one where it leaks information anyway.
+  \item The registry in Listing~7.6 marks \texttt{409} as
+        \emph{conditionally} retriable. Write the precise client algorithm
+        (pseudo-code) for a safe \texttt{409} retry.
+  \item Why does Listing~7.2 declare \texttt{unit\_weight\_kg} with
+        \texttt{strict=False}? What breaks if you remove the opt-out, and
+        what breaks if you also remove the companion validator?
+  \item Design the JSON Pointer for a failure inside
+        \texttt{lines[2].dimensions.width}. What RFC~6901 escaping must you
+        apply if a key itself contains \texttt{/}?
+  \item A client reports ``your API returns 500s.'' The dashboard shows
+        5xx-dominated traffic that is actually \texttt{503} from your
+        circuit breaker. What did the missing distinction cost you, and what
+        metric label prevents recurrence?
+  \item Argue both sides: should \texttt{title} be localized? What invariant
+        must hold for localization to be safe?
+  \item Your redaction middleware must not buffer 50~MB streaming problem
+        bodies. Adapt Listing~7.3's design; what trade-off do you accept?
+  \item Extend the contract suite so that a \emph{new} undocumented
+        extension member fails CI. Which schema keyword already does this,
+        and what workflow does that imply for adding members deliberately?
+  \item Map the chapter's alert thresholds onto the error-budget policy of
+        Chapter~18. Which single error code should \emph{never} page, and
+        why?
+\end{enumerate}
+
+\section{Interview Q\&A Vault}
+
+Thirty-four questions, junior through staff, with model answers calibrated to
+what a strong candidate says out loud.
+
+\subsection*{Junior}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em]
+  \item \emph{What is the difference between \texttt{400} and \texttt{422}?}
+        \textbf{A.} \texttt{400} means the request is malformed at the
+        protocol/syntax level---unparseable JSON, bad framing. \texttt{422}
+        means the request was syntactically valid but semantically
+        unacceptable: the JSON parsed, the schema shape held, but the values
+        violate domain rules. Mnemonic: \emph{400 = can't read you; 422 =
+        read you, reject what you said.}
+  \item \emph{What media type does RFC~9457 define, and why a distinct media
+        type at all?} \textbf{A.} \texttt{application/problem+json}. The
+        distinct type lets clients, gateways, and tooling identify error
+        bodies without content sniffing, and lets the same endpoint serve a
+        success schema and an error schema under one URL.
+  \item \emph{Name the five standard members of a problem detail object.}
+        \textbf{A.} \texttt{type} (URI identifying the problem class),
+        \texttt{title} (stable short summary of the class), \texttt{status}
+        (the HTTP status, echoed), \texttt{detail} (human explanation of
+        this occurrence), \texttt{instance} (URI identifying this
+        occurrence).
+  \item \emph{Why is returning \texttt{200} with an error in the body
+        harmful?} \textbf{A.} Every HTTP intermediary trusts the status
+        code: caches may store the failure, retry logic sees success,
+        monitoring reports availability during an outage. The status must
+        reflect the outcome; the body elaborates.
+  \item \emph{What is the difference between \texttt{401} and \texttt{403}?}
+        \textbf{A.} \texttt{401} = unauthenticated (``prove who you are'')
+        and must carry \texttt{WWW-Authenticate}; \texttt{403} =
+        authenticated but not authorized (``I know you; no''). Re-login
+        fixes the first, never the second.
+  \item \emph{Should a client match on the \texttt{detail} string to decide
+        handling?} \textbf{A.} Never. \texttt{detail} is human-facing,
+        per-occurrence, and free to change (or be localized). Clients match
+        on \texttt{type} and machine-readable extension members like
+        \texttt{code}.
+  \item \emph{What does \texttt{Retry-After} do and which statuses pair with
+        it?} \textbf{A.} It tells the client how long to wait before
+        retrying (delay-seconds or an HTTP date), and pairs with
+        \texttt{429} and \texttt{503}. Without it, clients invent
+        backoff---often synchronized, often harmful.
+  \item \emph{In Pydantic v2, what is the difference between
+        \texttt{field\_validator} and \texttt{model\_validator}?}
+        \textbf{A.} A field validator sees one field and enforces local
+        rules (pattern, range); a model validator (especially
+        \texttt{mode="after"}) sees the whole validated model and enforces
+        cross-field invariants like ``total weight under 30 kg for
+        express.''
+\end{enumerate}
+
+\subsection*{Mid-Level}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, start=9]
+  \item \emph{What belongs in \texttt{detail} versus \texttt{title}?}
+        \textbf{A.} \texttt{title} is per-\emph{type}: stable, short,
+        localizable, safe to display as a heading; it must not vary between
+        occurrences. \texttt{detail} is per-\emph{occurrence}: what happened
+        this time, with the specifics a human needs---but never internals,
+        secrets, or PII, and never anything a client would parse.
+  \item \emph{How do you make errors machine-actionable?} \textbf{A.}
+        Stable \texttt{type} URIs plus extension members: a short
+        \texttt{code} for alerting and dashboards, a \texttt{retriable}
+        classification (or per-code registry entry), structured field errors
+        with JSON Pointers for \texttt{422}s, \texttt{trace\_id} for
+        support, and remediation hints where the client can act.
+  \item \emph{Why must \texttt{type} be a URI?} \textbf{A.} Global
+        uniqueness without a central registry (mint under your domain),
+        dereferenceability (the identifier doubles as the documentation
+        link), and opacity (clients match the string, not fetched content).
+        \texttt{about:blank} is the sanctioned generic fallback.
+  \item \emph{When do you return \texttt{410} instead of \texttt{404}?}
+        \textbf{A.} When you \emph{know} the resource existed and is
+        permanently gone---deleted exports, sunset versions. \texttt{410} is
+        cacheable and tells sync clients to purge. Use \texttt{404} when you
+        do not know or do not want to reveal history; for sensitive
+        resources, uniform \texttt{404} avoids an existence oracle.
+  \item \emph{Give three distinct \texttt{409} conflict domains.}
+        \textbf{A.} State-machine conflict (cancel a shipped shipment),
+        uniqueness conflict (natural key taken), reference conflict (delete
+        a warehouse holding inventory); a fourth is precondition/concurrency
+        failure, though \texttt{412} is more precise for
+        \texttt{If-Match}-style checks.
+  \item \emph{Distinguish \texttt{500}, \texttt{502}, \texttt{503}, and
+        \texttt{504} operationally.} \textbf{A.} \texttt{500}: my code
+        faulted---page my team. \texttt{502}: upstream answered
+        invalidly---page the integration owner. \texttt{503}: deliberate
+        unavailability (shedding, maintenance, open breaker)---usually
+        self-healing, pair with \texttt{Retry-After}. \texttt{504}: upstream
+        never answered in time. The distinction drives paging, retry policy,
+        and which dashboard lights up.
+  \item \emph{Why is strict mode at the API boundary recommended, and what
+        is the catch?} \textbf{A.} Strict mode rejects silent coercion
+        (\texttt{"12"} $\rightarrow$ \texttt{12}), so client type bugs
+        surface as fixable \texttt{422}s instead of corrupted data. The
+        catch: JSON cannot express some Python types (\texttt{Decimal},
+        \texttt{datetime} as literals), so those fields need per-field
+        \texttt{strict=False} plus hardening validators.
+  \item \emph{What is a JSON Pointer doing in an error response?}
+        \textbf{A.} It locates the exact failing value in the submitted
+        document (\texttt{/lines/0/quantity}, RFC~6901), so client tooling
+        can highlight the offending field programmatically---unambiguous for
+        machines, immune to message localization.
+  \item \emph{Your service's default framework \texttt{404} returns HTML.
+        Is that a problem?} \textbf{A.} Yes: it violates the uniform error
+        contract---clients parsing problem+json get a surprise. Framework
+        and gateway-generated errors (404, 405, 413) must pass through the
+        same pipeline; contract tests should include at least one
+        framework-generated error.
+\end{enumerate}
+
+\subsection*{Senior}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, start=18]
+  \item \emph{Design an error taxonomy for a payments API.} \textbf{A.}
+        Three axes: layer (transport/protocol/application), ownership
+        (client-fixable 4xx, server-owned 5xx, dependency-caused
+        502/503/504 from the processor), and retriability---which for
+        payments must compose with idempotency keys, because retrying a
+        capture after a \texttt{504} without a key risks double-charging.
+        Concrete classes: \texttt{422} semantic card data errors with
+        per-field pointers; \texttt{402}-style declined payment as a
+        distinct, documented type (not a generic 400); \texttt{409} for
+        duplicate idempotency keys with different payloads; \texttt{503} +
+        \texttt{Retry-After} for processor outages. Every class gets a
+        registry row with owner, retriability, and remediation.
+  \item \emph{How do you evolve an error contract without breaking
+        clients?} \textbf{A.} Additively: new extension members are safe
+        (clients must ignore unknowns); new \texttt{type} URIs for new
+        classes are safe (clients must have a default branch). Never change
+        the meaning of an existing \texttt{type}/\texttt{code}, never remove
+        a documented member, and treat \texttt{title} copy edits as safe
+        only because clients were told never to match on it.
+  \item \emph{How do you keep PII out of error responses at scale?}
+        \textbf{A.} Defense in depth: (1) type the pipeline so
+        \texttt{detail} strings are built from curated templates, not
+        exception messages; (2) never interpolate raw input values into
+        messages; (3) redaction middleware as the last gate with a denylist
+        of patterns and stack-trace markers; (4) contract tests asserting a
+        PII-fragment denylist on every error path; (5) log-side redaction
+        before writing failed payloads. Each layer assumes the previous one
+        fails.
+  \item \emph{How do you handle validation that requires a database---say,
+        ``SKU must be stocked at destination''?} \textbf{A.} That is a
+        domain invariant, not boundary validation: the payload is
+        well-formed either way. Check it in the service layer and raise a
+        typed domain exception (\texttt{409} or \texttt{422} with a specific
+        \texttt{type} like \texttt{.../sku-not-stocked}). Do not smuggle
+        database calls into Pydantic validators---models become untestable,
+        and request latency becomes validation latency with no caching
+        story.
+  \item \emph{What should the correlation/trace ID story be across a
+        multi-service request?} \textbf{A.} Mint or accept at the edge
+        (validated: bounded length, character allowlist), propagate on every
+        downstream call, embed in every problem body and log line, echo in
+        response headers. Support flow: customer reports trace ID $\to$
+        one query reconstructs the request tree. Never reflect unvalidated
+        inbound IDs---header smuggling and log injection ride on that.
+  \item \emph{A client asks you to add the offending \emph{value} to each
+        \texttt{422} error for debugging convenience. Do you?} \textbf{A.}
+        No as a default: the offending value is frequently a credential or
+        PII pasted into the wrong field, and error bodies flow to logs,
+        APMs, and client UIs. Offer the JSON Pointer and the rule; if a
+        value echo is truly needed, gate it behind an authenticated
+        debug-mode header that is disabled in production and redaction-aware.
+  \item \emph{How do you test that your error contract holds, beyond unit
+        tests?} \textbf{A.} Schema-validate every error path in contract
+        tests with \texttt{additionalProperties: false} so undocumented
+        members fail CI; property/fuzz test the redactor with an
+        adversarial corpus; chaos-inject dependency failures and assert the
+        mapped status family; and add a gateway-level test so intermediary
+        errors match the contract too.
+  \item \emph{When is \texttt{503} preferable to just letting requests time
+        out?} \textbf{A.} Always, when you know you are shedding: a fast,
+        explicit \texttt{503} + \texttt{Retry-After} preserves client
+        goodwill, frees connections immediately, feeds accurate metrics, and
+        lets well-behaved clients back off on schedule. A timeout costs the
+        client the full deadline and teaches nothing.
+  \item \emph{How does the error contract interact with caching?}
+        \textbf{A.} Error statuses have distinct cacheability:
+        \texttt{404}/\texttt{410} are cacheable by default (heuristic), and
+        that is often desirable; \texttt{429}/\texttt{503} must not be
+        cached beyond their validity---set \texttt{Cache-Control: no-store}
+        on error responses that are occurrence-specific. A cached
+        \texttt{500} replayed for an hour is an outage amplifier.
+\end{enumerate}
+
+\subsection*{Staff}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, start=27]
+  \item \emph{You are standardizing errors across forty services and six
+        languages. What do you ship first?} \textbf{A.} The registry and the
+        schema, not a library: a language-neutral problem schema, a governed
+        error-code registry with owners and retriability, and a contract
+        test kit each service can run in CI. Libraries per language follow,
+        generated from or validated against those artifacts. Standardizing
+        code before standardizing \emph{data} produces forty idiomatic
+        dialects of inconsistency.
+  \item \emph{How do you decide what is a new \texttt{type} versus a new
+        \texttt{detail} of an existing type?} \textbf{A.} Ask whether a
+        client should \emph{branch} on it. If handling differs---different
+        remediation, different retriability---it is a new type. If only the
+        human explanation differs, it is the same type with a different
+        \texttt{detail}. Type proliferation is real: every type is a
+        documented, versioned, supported promise.
+  \item \emph{Design the alert policy on top of this chapter's taxonomy.}
+        \textbf{A.} Metrics as \texttt{errors\_total\{endpoint, status,
+        code\}}. Page on 5xx rate $>1\%$ over 5 min and on any single
+        \texttt{code} spiking $>10\times$ baseline; ticket on sustained 4xx
+        $>25\%$ (usually a broken consumer). Suppress \texttt{503}-shedding
+        pages when the breaker is working as designed. Wire 5xx burn into
+        the Chapter-18 error budget so deploys freeze on budget exhaustion.
+  \item \emph{A regulator asks you to prove error responses never contain
+        PII. What is your evidence chain?} \textbf{A.} Typed pipeline
+        (details are template-built), middleware redaction (defense in
+        depth), CI contract tests with PII denylists on every error path,
+        a fuzzed redaction corpus with regression history, log-side
+        redaction with access-controlled raw capture, and periodic audit
+        scans of captured payloads. Process evidence (the pipeline) plus
+        empirical evidence (the scans); neither alone is convincing.
+  \item \emph{Should error responses be part of your OpenAPI document?
+        What exactly do you publish?} \textbf{A.} Yes \cite{openapi31}: for
+        each operation, the \texttt{4xx}/\texttt{5xx} responses with media
+        type \texttt{application/problem+json}, the problem schema including
+        your extension members, and \texttt{default} responses for the
+        catch-alls. Per-operation, enumerate the \texttt{type} values that
+        operation can emit---that enumeration is the actionable part of the
+        contract.
+  \item \emph{How do you keep gateway-generated errors (auth, throttling,
+        body-size limits) inside the contract?} \textbf{A.} The gateway is
+        part of the API as clients see it, so its errors must be mapped to
+        problem+json at the edge: configure the gateway's error templates,
+        mint gateway-scoped codes in the same registry
+        (\texttt{NRW-GATEWAY-...}), and run contract tests through the
+        gateway, not only against the app in-process.
+  \item \emph{Your company acquires another firm whose API returns
+        XML-only errors. Draft the migration.} \textbf{A.} Contract-first:
+        publish the target problem+json schema and registry, stand up a
+        translation shim at the edge that emits both (content negotiation on
+        \texttt{Accept}), instrument which clients still negotiate XML,
+        migrate them with sunset headers and a deadline, and keep
+        \texttt{application/problem+xml} only until telemetry shows zero
+        dependers. RFC~9457 retains the XML media type, so the shim is
+        standards-legal throughout.
+  \item \emph{What is the deepest mistake teams make with error design?}
+        \textbf{A.} Treating errors as output formatting rather than as
+        \emph{behavioral contract}: clients build retry loops, reconciliation
+        jobs, and compliance evidence on your failures. The shape is the
+        easy half; the hard half is semantics---ownership, retriability,
+        stability guarantees, and the discipline to keep content policy
+        (no PII, no internals) as tested code rather than wiki aspiration.
+        Teams that get this right page less, integrate faster, and survive
+        audits; teams that do not are debugging other people's string
+        matching forever.
+\end{enumerate}
+
+\section{External Bibliography \& Further Reading}
+
+\begin{itemize}
+  \item \textbf{RFC 9457 --- Problem Details for HTTP APIs} \cite{rfc9457}.
+        The primary source. Read \S3 (members), \S4 (extension members), and
+        the security considerations; note its obsolescence of RFC~7807 and
+        what changed (extension handling clarifications, modern HTTP
+        alignment).
+  \item \textbf{RFC 7807 (historical).} The 2016 original. Still cited in
+        older libraries and articles; read it only to recognize legacy
+        references, and follow 9457 for anything new.
+  \item \textbf{RFC 9110 --- HTTP Semantics, \S15 (Status Codes)}
+        \cite{rfc9110}. The authoritative definition of every status code
+        discussed here, including cacheability defaults and the
+        \texttt{WWW-Authenticate}/\texttt{Retry-After} header requirements.
+  \item \textbf{RFC 6901 --- JSON Pointer.} The path syntax used for
+        per-field error locations, including the \texttt{\textasciitilde 0}/
+        \texttt{\textasciitilde 1} escaping rules.
+  \item \textbf{Pydantic v2 documentation} \cite{pydanticdocs}. Validators,
+        strict mode, \texttt{Annotated} constraints, and the error taxonomy
+        (\texttt{loc}/\texttt{type}/\texttt{msg}) our mapper consumes.
+  \item \textbf{FastAPI documentation} \cite{fastapidocs}. Exception
+        handlers, middleware, \texttt{RequestValidationError}, and
+        \texttt{TestClient} for in-process contract tests.
+  \item \textbf{OpenAPI 3.1 specification} \cite{openapi31}. Documenting
+        \texttt{application/problem+json} responses per operation and the
+        \texttt{default} response.
+  \item \textbf{JSON Schema documentation} \cite{jsonschemadocs}. Draft
+        2020-12 validation semantics used by the contract tests.
+  \item \textbf{Stripe API error documentation.} An exemplary industrial
+        error contract: stable \texttt{type}, per-language handling guides,
+        and \texttt{402}-class payment-specific codes worth studying as a
+        design reference.
+  \item \textbf{Google AIP-193 (Errors).} A mature enterprise standard for
+        error payloads and codes; compare its decisions (canonical codes,
+        \texttt{ErrorInfo} details) with RFC~9457's.
+  \item \textbf{Microsoft REST API Guidelines --- error response section.}
+        A second industrial reference point, useful for the
+        \texttt{error.code}/\texttt{error.details} nesting pattern.
+  \item \textbf{Nygard, \emph{Release It!}} \cite{nygard2018releaseit}.
+        Failure modes, circuit breakers, and why \texttt{503}-as-shedding is
+        a feature of healthy systems.
+\end{itemize}
+
+\section{Capstone Projects}
+
+Five projects, progressive in difficulty. All are offline-first,
+deterministic, and use synthetic Northwind Robotics data only.
+
+\subsection{Project 1 [junior] --- Problem-Details Retrofit}
+
+\textbf{Objective.} Take the intentionally messy \texttt{legacy\_quotes.py}
+from this chapter's lab (or any small FastAPI service you wrote for
+Chapter~6) and retrofit uniform RFC~9457 errors without touching
+success-path behavior.
+
+\textbf{Inputs/Datasets.} The lab service; this chapter's
+\texttt{problem\_details.py}; a synthetic parts catalogue (10 fictional
+SKUs).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Inventory current error shapes with \texttt{TestClient}.
+  \item Register the problem handlers; convert ad-hoc errors to
+        \texttt{ProblemException} subclasses.
+  \item Write one contract test per error path using the shared
+        \texttt{PROBLEM\_SCHEMA}.
+  \item Update the OpenAPI \texttt{responses} documentation for two
+        endpoints.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Every error response (including framework \texttt{404})
+        is schema-valid \texttt{application/problem+json}.
+  \item[$\square$] No success-path test changed; all still pass.
+  \item[$\square$] \texttt{422}s carry JSON-Pointer-located
+        \texttt{errors[]}.
+  \item[$\square$] \texttt{pytest -q} green from a fresh \texttt{.venv}.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add \texttt{Accept-Language}-driven localization of
+\texttt{title} for two locales; add a client helper that branches on
+\texttt{code}.
+
+\subsection{Project 2 [mid] --- Error-Code Registry \& Documentation Generator}
+
+\textbf{Objective.} Build a standalone registry package for a (fictional)
+multi-service Northwind Robotics platform and generate both human docs and a
+machine-readable artefact from it.
+
+\textbf{Inputs/Datasets.} Listing~7.6 as a seed; a list of 15--20 invented
+error codes across three services (shipments, warehouse, billing).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Model the registry with self-validation at import (duplicates,
+        status ranges, remediation presence, retriability vocabulary).
+  \item Generate a Markdown catalogue per service and a single
+        \texttt{errors.json} for client SDKs.
+  \item Write a CI-style check: any exception class whose \texttt{code} is
+        absent from the registry fails the build (introspect the exception
+        hierarchy).
+  \item Emit a changelog diff between two registry versions.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Import-time validation catches an injected duplicate and
+        an injected missing remediation (tests prove both).
+  \item[$\square$] Generated Markdown renders a complete catalogue; JSON
+        validates against a schema you publish.
+  \item[$\square$] Orphan-code check fails a deliberately broken service.
+  \item[$\square$] Registry diff output is deterministic (stable ordering).
+\end{itemize}
+
+\textbf{Stretch Goals.} Per-code deep links resolvable as \texttt{type}
+URIs; deprecation workflow (mark, never delete, never reuse).
+
+\subsection{Project 3 [mid] --- Redaction Library with Fuzz Corpus}
+
+\textbf{Objective.} Harden Listing~7.3's scrubber into a standalone,
+tested library and attack it yourself before an attacker does.
+
+\textbf{Inputs/Datasets.} A hand-built adversarial corpus: 50+ synthetic
+strings mixing fake emails (\texttt{*@example.invalid}), fake tax IDs, fake
+card numbers, fake stack traces, near-misses (valid text that merely
+\emph{looks} like PII), and Unicode edge cases.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Extract \texttt{scrub} into a package with a pluggable rule list.
+  \item Build the corpus as data files; every corpus entry asserts
+        redact/not-redact expectations.
+  \item Add a deterministic property-style sweep: seeded generation of
+        pattern-like mutations around each rule.
+  \item Measure and bound false-positive rate on a benign-text corpus.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] 100\% of malicious corpus entries redacted.
+  \item[$\square$] Documented, bounded false-positive rate on benign
+        corpus; regressions fail CI.
+  \item[$\square$] All generation seeded; suite is deterministic and
+        offline.
+  \item[$\square$] Rule list extensible without editing library code.
+\end{itemize}
+
+\textbf{Stretch Goals.} Streaming redaction for chunked bodies; structured
+(JSON-aware) scrubbing that redacts by field name as well as by pattern.
+
+\subsection{Project 4 [senior] --- Error-Observability Dashboard Specification}
+
+\textbf{Objective.} Specify---and prototype offline---the error
+observability layer for the shipments API: metrics, alert rules, and a
+dashboard definition, all derived from the error-code registry.
+
+\textbf{Inputs/Datasets.} A synthetic, seeded log generator producing a week
+of request outcomes with known injected incidents (a dependency outage, a
+bad client deploy, a throttling event).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Define the metric taxonomy (\texttt{errors\_total\{endpoint, status,
+        code\}}) and exemplar queries (error rate per code, per endpoint).
+  \item Encode the chapter's alert thresholds as executable rules over the
+        synthetic dataset.
+  \item Prototype an offline aggregator that replays the log stream and
+        prints alert firing timelines.
+  \item Write the dashboard spec: panels, drill-down from code to trace
+        IDs, error-budget burn panel referencing Chapter~18.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Replay deterministically detects all three injected
+        incidents with zero false pages on the baseline day.
+  \item[$\square$] Alert rules are data (declarative config), not code.
+  \item[$\square$] Dashboard spec traces every panel to a registry code.
+  \item[$\square$] Burn-rate panel matches hand-computed values on a
+        100-request worked example.
+\end{itemize}
+
+\textbf{Stretch Goals.} Burn-rate windows (fast/slow) per Chapter~18;
+anomaly baseline per code using the synthetic history.
+
+\subsection{Project 5 [staff] --- Chaos Error-Injection Test Harness}
+
+\textbf{Objective.} Build an in-process harness that injects failures
+(timeouts, malformed upstream payloads, connection resets, slow leaks) at
+the seams of a two-service synthetic system, and proves the \emph{entire
+chain}---status mapping, problem shape, redaction, correlation, metrics
+labels---survives chaos.
+
+\textbf{Inputs/Datasets.} A two-service toy (gateway service calling a
+warehouse stub); a seeded fault schedule; this chapter's full pipeline
+installed in both services.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement fault injectors as dependency overrides: deterministic
+        schedule from a seed, one fault per run or scripted mixes.
+  \item Assert, per fault: correct status family (502/504/503, never 500),
+        schema-valid problem body, trace ID continuity across both
+        services, PII denylist holds.
+  \item Produce a fault $\times$ contract matrix showing which faults each
+        test catches; eliminate blind spots.
+  \item Write the runbook entry template each fault class maps to.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Every injected fault yields a schema-valid problem
+        response with the correct status family---no raw 500s, no HTML.
+  \item[$\square$] Trace IDs join both services' logs for every scenario.
+  \item[$\square$] Full suite deterministic under a fixed seed; runs
+        offline in under a minute.
+  \item[$\square$] Matrix reviewed: every fault class has at least one
+        failing-before/passing-after test story.
+\end{itemize}
+
+\textbf{Stretch Goals.} Composed faults (timeout \emph{plus} redaction
+bypass attempt); a ``contract score'' metric across the matrix trending
+over registry versions.
+
+\section{Python Dependencies Appendix}
+
+Everything in this chapter installs from the following
+\texttt{requirements.txt}:
+
+\begin{minted}{text}
+fastapi>=0.110
+pydantic>=2.7
+jsonschema>=4.21
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+Install on Windows with PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{fastapi ($\geq$ 0.110)}
+
+\textbf{Description.} The ASGI web framework used for the service, its
+exception-handler hooks, and \texttt{TestClient}. \textbf{Why included.}
+Chapter-6 continuity; its \texttt{RequestValidationError} carries the
+Pydantic error array our \texttt{422} mapper consumes, and its handler
+registration is the seam where the single pipeline attaches.
+\textbf{Alternatives.} Starlette alone (lower-level, same machinery); Flask
+or Django REST framework (sync ecosystems with their own exception
+patterns---the RFC~9457 design transfers, the code does not).
+\textbf{Installation.} \texttt{pip install "fastapi>=0.110"}.
+
+\subsection{pydantic ($\geq$ 2.7)}
+
+\textbf{Description.} Data-validation library powering both the boundary
+models (\texttt{Shipment}) and the \texttt{ProblemDetail} response model.
+\textbf{Why included.} Strict-mode enforcement, \texttt{field\_validator} /
+\texttt{model\_validator}, \texttt{Annotated} constraints, and a structured
+error array with \texttt{loc} tuples that map cleanly to JSON Pointers.
+\textbf{Alternatives.} \texttt{dataclasses} plus hand-rolled checks (verbose,
+error-prone); \texttt{attrs}+\texttt{cattrs} (capable, less integrated with
+FastAPI); Marshmallow (mature but schema-parallel to your models).
+\textbf{Installation.} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{jsonschema ($\geq$ 4.21)}
+
+\textbf{Description.} JSON Schema validation for Python, used to
+contract-test every error response against \texttt{PROBLEM\_SCHEMA}
+\cite{jsonschemadocs}. \textbf{Why included.} Turns ``our errors have a
+consistent shape'' from a hope into a CI gate;
+\texttt{additionalProperties: false} makes undocumented extension members a
+build failure. \textbf{Alternatives.} Hand-written assertions per field
+(brittle); validating via OpenAPI tooling (heavier; OpenAPI~3.1 embeds JSON
+Schema 2020-12 anyway \cite{openapi31}). \textbf{Installation.}
+\texttt{pip install "jsonschema>=4.21"}.
+
+\subsection{httpx ($\geq$ 0.27)}
+
+\textbf{Description.} The HTTP client underneath FastAPI's
+\texttt{TestClient} and the client used in this book's consumption chapters.
+\textbf{Why included.} Enables fully in-process ASGI tests---no sockets, no
+network, deterministic---while exercising the real request/response stack.
+\textbf{Alternatives.} \texttt{requests} (no ASGI transport; Chapter~2
+discusses the trade-offs); \texttt{aiohttp} (different async model).
+\textbf{Installation.} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest ($\geq$ 8)}
+
+\textbf{Description.} Test runner and fixture machinery for the contract
+suite. \textbf{Why included.} Fixture-scoped \texttt{TestClient}, expressive
+assertion output, and the ecosystem standard; the suite is ten plain test
+functions with one shared assertion helper. \textbf{Alternatives.}
+\texttt{unittest} (stdlib, more ceremony); \texttt{nose2} (effectively
+unmaintained). \textbf{Installation.} \texttt{pip install "pytest>=8"}.
+
+\section{Chapter Summary \& Key Takeaways}
+
+\begin{itemize}
+  \item \textbf{Errors are contract.} Design, version, document, and test
+        the failure surface with the same rigor as the success surface.
+  \item \textbf{Classify before you code.} Transport versus protocol versus
+        application; client-fixable (4xx) versus server-owned (5xx) versus
+        dependency-caused; retriable versus not---with a written decision
+        procedure, not vibes.
+  \item \textbf{RFC~9457 is the shape.} \texttt{application/problem+json}
+        with \texttt{type}/\texttt{title}/\texttt{status}/
+        \texttt{detail}/\texttt{instance} plus documented extension members;
+        \texttt{type} is the stable, URI-identified, documentation-anchored
+        class; RFC~7807 is history.
+  \item \textbf{Status precision pays.} \texttt{400} (syntax) versus
+        \texttt{422} (semantics); \texttt{404} versus \texttt{410};
+        \texttt{401} versus \texttt{403} versus \texttt{407};
+        \texttt{429}+\texttt{Retry-After}; \texttt{500} versus
+        \texttt{502}/\texttt{503}/\texttt{504}; and never
+        \texttt{200}-with-error.
+  \item \textbf{One pipeline.} Domain exceptions $\rightarrow$ problem
+        mapper $\rightarrow$ redaction $\rightarrow$ response, with
+        correlation IDs and full-fidelity server-side logging. No endpoint
+        improvises.
+  \item \textbf{Strict at the boundary, invariant-aware in the domain.}
+        Pydantic strict mode with deliberate per-field exceptions; model
+        validators for cross-field rules; service layer for stateful
+        invariants.
+  \item \textbf{Content policy is code.} No internals, no PII, no secrets in
+        error bodies or logs---enforced by typed templates, denylist
+        contract tests, and redaction middleware, not by convention.
+  \item \textbf{Operate the taxonomy.} Metrics per endpoint, status, and
+        code; page on 5xx burn; feed it into the Chapter-18 error budget.
+\end{itemize}
+
+\section{Quick-Reference Card}
+
+\subsection*{Status-Code Selection}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Code} & \textbf{Retriable} & \textbf{Use when} \\
+    \midrule
+    400 & no & malformed syntax/framing; unreadable request \\
+    401 & after auth & missing/failed credentials; send \texttt{WWW-Authenticate} \\
+    403 & no & authenticated, not authorized (or use 404 to hide existence) \\
+    404 & no & not found, or existence must not be revealed \\
+    407 & after auth & proxy demands its own authentication \\
+    409 & conditional & conflict with current resource state; refresh then retry \\
+    410 & no & known-permanently-gone; clients should purge \\
+    412 & conditional & precondition (\texttt{If-Match} etc.) failed \\
+    415 & no & unsupported \texttt{Content-Type} \\
+    422 & no & syntactically valid, semantically invalid; include field pointers \\
+    429 & yes + \texttt{Retry-After} & client exceeds rate policy \\
+    500 & only if idempotent & your code faulted; page your team \\
+    502 & yes & upstream returned an invalid response \\
+    503 & yes + \texttt{Retry-After} & deliberate shedding/maintenance/open breaker \\
+    504 & yes & upstream timed out \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Error status selection cheat sheet.}
+\end{table}
+
+\subsection*{Problem-Details Members}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Member} & \textbf{Rule of thumb} \\
+    \midrule
+    \texttt{type} & URI, stable forever, documents the class; clients match on it \\
+    \texttt{title} & short, stable per type, localizable, display-only \\
+    \texttt{status} & must equal the response status \\
+    \texttt{detail} & per-occurrence, human-only, no PII/internals, never parsed \\
+    \texttt{instance} & identifies this occurrence (path or URN) \\
+    \texttt{code} (ext.) & short machine code from the registry; for alerts and SDKs \\
+    \texttt{trace\_id} (ext.) & correlation ID; the support conversation starter \\
+    \texttt{errors[]} (ext.) & per-field failures with RFC 6901 JSON Pointers \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Problem-details member cheat sheet.}
+\end{table}
+
+\subsection*{Redaction Checklist}
+
+\begin{itemize}
+  \item[$\square$] \texttt{detail} built from curated templates, not raw exception text.
+  \item[$\square$] No stack traces, SQL, hostnames, or file paths in any client body.
+  \item[$\square$] No PII (emails, tax IDs, card numbers) echoed from payloads.
+  \item[$\square$] No secrets (tokens, keys, passwords) in bodies \emph{or} logs.
+  \item[$\square$] Redaction middleware is the last gate on every problem+json response.
+  \item[$\square$] Full context logged server-side under \texttt{trace\_id}, access-controlled.
+  \item[$\square$] Contract tests assert a PII-fragment denylist on every error path.
+  \item[$\square$] Redactor fuzzed against an adversarial corpus; suite deterministic.
+\end{itemize}
+
+\input{chapters/_standard_addendum}

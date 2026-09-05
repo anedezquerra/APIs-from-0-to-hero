@@ -1,0 +1,388 @@
+%% ============================================================================
+%% Mastering APIs: From Zero to Production Guru
+%% Main LaTeX Document Setup
+%% ============================================================================
+%% Author: API Engineering Education Team
+%% Date: 2026
+%% A 16-week intensive textbook covering API consumption, design, creation,
+%% security, deployment, and lifecycle management -- from foundational
+%% protocols to enterprise-grade production architectures.
+%% ============================================================================
+
+\documentclass[12pt, a4paper, twoside, openright]{book}
+
+%% ============================================================================
+%% PACKAGE SETUP & CONFIGURATION
+%% ============================================================================
+
+% Encoding and Language
+\usepackage[english]{babel}
+\usepackage[T1]{fontenc}
+
+% Page Layout & Margins
+\usepackage[
+  margin=1.5in,
+  marginparsep=0.3in,
+  marginparwidth=1in,
+  headheight=15pt
+]{geometry}
+
+% Typography & Fonts
+\usepackage{microtype}          % Improved text justification
+\usepackage{lmodern}            % Latin Modern font
+\usepackage{amsmath}            % Math environments
+\usepackage{amssymb}            % Math symbols
+\usepackage{amsthm}             % Theorem environments
+
+% Graphics & Diagrams
+\usepackage{graphicx}           % Include images
+\usepackage{tikz}               % TikZ diagrams
+\usepackage{pgfplots}           % Advanced plotting
+\usetikzlibrary{shapes, arrows, positioning, calc, decorations.pathreplacing, fit}
+\pgfplotsset{compat=1.17}
+% NOTE: do NOT name styles 'step' or 'cap' -- those collide with existing
+% pgfkeys value-required keys whose flag survives /.style redefinition.
+\tikzset{
+  note/.style={font=\footnotesize, text=packtgray},
+  flowstep/.style={draw, rounded corners, align=left, inner sep=4pt, font=\small},
+  modcap/.style={font=\bfseries\small, text=packtgray}
+}
+
+\usepackage[dvipsnames]{xcolor}
+\definecolor{lightgray}{gray}{0.92}
+\definecolor{darkblue}{rgb}{0, 0, 0.5}
+\definecolor{packtorange}{RGB}{242,101,34}
+\definecolor{packtgray}{RGB}{55,55,55}
+
+\usepackage{xstring}
+\usepackage{listings}
+\lstdefinestyle{chunkcode}{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{red!70}
+}
+% listings only knows a fixed language set; map python to Python and
+% everything else (text, bash, yaml, json, http, powershell, ...) to plain text.
+\lstnewenvironment{minted}[2][]{%
+  \lstset{style=chunkcode,#1}%
+  \IfStrEq{#2}{python}{\lstset{language=Python}}{\lstset{language=}}%
+}{}
+\lstset{
+  style=chunkcode
+}
+
+% Headers, Footers & Page Style
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\nouppercase{\leftmark}}
+\fancyhead[RO]{\nouppercase{\rightmark}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Hyperlinks & Cross-References
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=darkblue,
+  urlcolor=darkblue,
+  citecolor=darkblue,
+  pdfstartview=FitH,
+  bookmarksnumbered=true,
+  bookmarksopen=true
+}
+\usepackage{nameref}
+
+% Tables & Arrays
+\usepackage{array}
+\usepackage{booktabs}           % Professional table formatting
+\usepackage{multirow}
+\usepackage{tabularx}
+
+% Lists & Enumeration
+\usepackage{enumitem}
+\setlist{itemsep=0.5em, parsep=0.5em}
+
+% Boxes & Frames
+\usepackage{tcolorbox}
+\tcbuselibrary{breakable, skins}
+
+% Bibliography
+\usepackage[
+  backend=biber,
+  style=alphabetic,
+  sorting=nyt
+]{biblatex}
+\addbibresource{references.bib}
+
+% Appendix
+\usepackage{appendix}
+
+% Theorem & Definition Environments
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+\newtheorem*{note}{Note}
+
+% Custom Environments for Chapter Structure
+\newtcolorbox{keyconceptbox}{
+  colback=blue!5,
+  colframe=blue!50,
+  title=Key Concept,
+  fonttitle=\bfseries,
+  breakable
+}
+
+\newtcolorbox{warningbox}{
+  colback=yellow!5,
+  colframe=yellow!70,
+  title=Warning,
+  fonttitle=\bfseries,
+  breakable
+}
+
+\newtcolorbox{examplebox}{
+  colback=green!5,
+  colframe=green!50,
+  title=Example,
+  fonttitle=\bfseries,
+  breakable
+}
+
+% Code Listing Caption
+\newcommand{\codelisting}[2]{
+  \lstinputlisting[language=Python,caption={#2},label={code:#2}]{#1}
+}
+
+% ============================================================================
+%% DOCUMENT BEGIN
+%% ============================================================================
+
+\begin{document}
+
+% Title Page
+\frontmatter
+\begin{titlepage}
+  \thispagestyle{empty}
+  \begin{tikzpicture}[remember picture,overlay]
+    \path[fill=white] (current page.south west) rectangle (current page.north east);
+    \path[fill=packtorange] (current page.north west) rectangle ([xshift=3.15cm]current page.south west);
+    \path[fill=packtorange!10] ([xshift=3.15cm]current page.south west) rectangle (current page.north east);
+    \path[fill=white] ([xshift=3.75cm,yshift=-2.0cm]current page.north west) rectangle ([xshift=-1.3cm,yshift=2.1cm]current page.south east);
+    \draw[packtgray!35,line width=0.9pt]
+      ([xshift=3.75cm,yshift=-2.0cm]current page.north west) rectangle ([xshift=-1.3cm,yshift=2.1cm]current page.south east);
+
+    % Left orange panel accents
+    \draw[white,line width=1.6pt] ([xshift=0.7cm,yshift=-1.5cm]current page.north west) -- ([xshift=2.35cm,yshift=-1.5cm]current page.north west);
+    \draw[white,line width=1.6pt] ([xshift=0.7cm,yshift=-12.3cm]current page.north west) -- ([xshift=2.35cm,yshift=-12.3cm]current page.north west);
+
+    \node[anchor=north west,align=left,text=white] at ([xshift=0.7cm,yshift=-2.0cm]current page.north west) {%
+      {\fontsize{18}{22}\selectfont\bfseries PACKT-INSPIRED}\\[0.1cm]
+      {\fontsize{16}{20}\selectfont\bfseries PRACTICAL API ENGINEERING}\\[0.15cm]
+      {\small Production-focused technical workbook}
+    };
+
+    \node[anchor=north west,align=left,text=packtgray] at ([xshift=4.4cm,yshift=-2.3cm]current page.north west) {%
+      {\fontsize{30}{36}\selectfont\bfseries Mastering APIs}\\[0.25cm]
+      {\fontsize{20}{24}\selectfont From Zero to Production Guru}
+    };
+
+    \node[anchor=north west,align=left,text=packtgray!85] at ([xshift=4.42cm,yshift=-4.5cm]current page.north west) {%
+      {\large A 16-Week Intensive Production-Grade Textbook}\\[0.25cm]
+      {\normalsize API Engineering Education Team}\\[0.12cm]
+      {\normalsize 2026}
+    };
+
+    \node[anchor=north west,align=left,text=packtgray!78] at ([xshift=4.42cm,yshift=-11.7cm]current page.north west) {%
+      {\large \textit{Consumption, design, creation, security, deployment, and lifecycle management}}
+    };
+
+    \node[anchor=north west,align=left,text=packtgray!65] at ([xshift=4.42cm,yshift=-12.25cm]current page.north west) {%
+      {\small HTTP wire protocols \textbullet\ REST / GraphQL / gRPC \textbullet\ resilience \textbullet\ enterprise security}
+    };
+
+    % Right-side editorial diagram: request/response nodes
+    \begin{scope}[shift={([xshift=13.0cm,yshift=-5.6cm]current page.north west)}]
+      \draw[packtorange!85,line width=1.2pt] (0,0) -- (2.2,0);
+      \draw[packtorange!85,line width=1.2pt] (0,-1.0) -- (2.2,-1.0);
+      \draw[packtorange!85,line width=1.2pt] (0,-2.0) -- (2.2,-2.0);
+      \draw[packtorange!85,line width=1.2pt] (0,-3.0) -- (2.2,-3.0);
+      \draw[packtorange!85,line width=1.2pt] (0,-4.0) -- (2.2,-4.0);
+      \draw[packtorange!85,line width=1.2pt] (0,-5.0) -- (2.2,-5.0);
+      \foreach \x/\y/\r in {0.2/0.0/0.10,0.9/0.0/0.10,1.6/0.0/0.10,0.5/-1.0/0.10,1.3/-1.0/0.10,1.8/-2.0/0.10,0.7/-3.0/0.10,1.4/-4.0/0.10,0.9/-5.0/0.10}{
+        \fill[packtorange] (\x,\y) circle (\r cm);
+      }
+      \draw[packtgray!35,line width=0.8pt] (0.2,0.0) -- (0.9,0.0) -- (1.6,0.0);
+      \draw[packtgray!35,line width=0.8pt] (0.5,-1.0) -- (1.3,-1.0) -- (1.8,-2.0) -- (0.7,-3.0) -- (1.4,-4.0) -- (0.9,-5.0);
+      \node[align=left,text=packtgray!70] at (1.1,-6.0) {\small\textit{API design as an engineering discipline}};
+    \end{scope}
+
+    \node[anchor=south west,align=left,text=white] at ([xshift=0.7cm,yshift=1.0cm]current page.south west) {%
+      {\large \bfseries Module 1}\\[-0.05cm]
+      {\small Foundations: protocols \& consumption}
+    };
+
+    \node[anchor=south east,align=right,text=packtgray!70] at ([xshift=-1.3cm,yshift=0.95cm]current page.south east) {%
+      {\small Every request should be observable, resilient, and production-ready.}
+    };
+  \end{tikzpicture}
+  \vspace*{\fill}
+\end{titlepage}
+
+% Copyright Page
+\newpage
+\thispagestyle{empty}
+\vspace*{\fill}
+{\small
+  \noindent
+  \textbf{Mastering APIs: From Zero to Production Guru}
+
+  \vspace{0.5cm}
+  \noindent
+  \copyright{} 2026 API Engineering Education Team. All rights reserved.
+
+  \vspace{0.5cm}
+  \noindent
+  This textbook is released under an academic license. It is intended for educational and research purposes.
+
+  \vspace{0.5cm}
+  \noindent
+  All LaTeX source code and Python implementations are provided as-is for learning and reference.
+}
+
+% Table of Contents
+\newpage
+\tableofcontents
+
+% List of Figures & Tables
+\newpage
+\listoffigures
+\newpage
+\listoftables
+
+% ============================================================================
+%% MAIN CONTENT
+%% ============================================================================
+
+\mainmatter
+
+% Chapter 0: Introduction
+\input{chapters/chapter_00_introduction}
+
+% Module 1: Foundations -- Protocols & Consumption
+\input{chapters/chapter_01_http_wire_protocol}
+\input{chapters/chapter_02_consuming_apis_python}
+\input{chapters/chapter_03_rest_architectural_style}
+\input{chapters/chapter_04_serialization_contracts}
+\input{chapters/chapter_05_client_side_security}
+
+% Module 2: Intermediate Patterns -- Designing & Building APIs
+\input{chapters/chapter_06_building_apis_fastapi}
+\input{chapters/chapter_07_errors_validation_problem_details}
+\input{chapters/chapter_08_pagination_filtering_sorting}
+\input{chapters/chapter_09_versioning_evolution}
+\input{chapters/chapter_10_idempotency_caching_concurrency}
+
+% Module 3: Advanced Architecture -- Beyond Classic REST
+\input{chapters/chapter_11_async_event_driven_apis}
+\input{chapters/chapter_12_graphql}
+\input{chapters/chapter_13_grpc_high_performance_rpc}
+\input{chapters/chapter_14_rate_limiting_throttling}
+\input{chapters/chapter_15_microservices_resilience}
+
+% Module 4: Enterprise Production & Security
+\input{chapters/chapter_16_api_security_engineering}
+\input{chapters/chapter_17_deployment_infrastructure}
+\input{chapters/chapter_18_observability_sre}
+\input{chapters/chapter_19_testing_quality_engineering}
+\input{chapters/chapter_20_lifecycle_governance_dx}
+
+% Chapter 21: Synthesis & Future Directions
+\input{chapters/chapter_21_synthesis_future}
+
+% ============================================================================
+%% BACK MATTER
+%% ============================================================================
+
+\appendix
+
+\chapter{Additional Resources}
+
+\section{Glossary of Terms}
+
+\begin{itemize}
+  \item \textbf{API (Application Programming Interface):} A versioned contract between a provider and consumers defining operations, representations, and failure semantics over a transport protocol.
+  \item \textbf{ALPN (Application-Layer Protocol Negotiation):} TLS extension by which client and server agree on the application protocol (e.g., \texttt{h2} vs \texttt{http/1.1}) during the handshake.
+  \item \textbf{APQ (Automatic Persisted Queries):} GraphQL protocol in which clients send a query hash first and the full query only on a cache miss.
+  \item \textbf{AsyncAPI:} A specification format for describing event-driven and asynchronous APIs (channels, messages, bindings).
+  \item \textbf{Backpressure:} A flow-control mechanism by which a slow consumer signals a producer to reduce its rate.
+  \item \textbf{BOLA (Broken Object Level Authorization):} OWASP API1:2023 — accessing another user's object by manipulating an object identifier; also called IDOR.
+  \item \textbf{Bulkhead:} Isolation of resources (pools, threads, queues) per dependency so one failure cannot exhaust shared capacity.
+  \item \textbf{Burn Rate:} The speed at which a service consumes its error budget relative to the budget's allocation window.
+  \item \textbf{Circuit Breaker:} A resilience pattern (closed/open/half-open state machine) that halts calls to a failing dependency to prevent cascading failure.
+  \item \textbf{Content Negotiation:} Selection of a response representation via \texttt{Accept}-family headers and server-side quality-value scoring.
+  \item \textbf{Correlation ID:} An identifier propagated across service boundaries to tie one logical request's logs, metrics, and traces together.
+  \item \textbf{Cursor Pagination:} Pagination keyed on an opaque token encoding position, immune to the drift and deep-scan costs of offset pagination.
+  \item \textbf{DataLoader:} A per-request batching/caching utility that collapses N+1 resolver queries into single batched lookups.
+  \item \textbf{Deadline Propagation:} Passing the remaining time budget of a request across downstream calls so no hop outlives the caller's patience.
+  \item \textbf{ETag:} A strong or weak validator used with \texttt{If-None-Match}/\texttt{If-Match} for caching (304) and optimistic concurrency (412).
+  \item \textbf{Error Budget:} The tolerated unreliability derived from an SLO (e.g., 43.2 minutes/month at 99.9\% availability).
+  \item \textbf{GCRA (Generic Cell Rate Algorithm):} The virtual-scheduling rate-limiting algorithm equivalent to a token bucket; used by cell-based limiters.
+  \item \textbf{GraphQL Federation:} Composing multiple GraphQL subgraph schemas into one supergraph behind a gateway.
+  \item \textbf{HATEOAS:} Hypermedia as the Engine of Application State — REST's constraint that representations carry the links/affordances for next actions.
+  \item \textbf{Hedged Request:} Issuing a duplicate request after a latency threshold and using whichever response arrives first, to shave tail latency.
+  \item \textbf{HOL Blocking (Head-of-Line):} When one stalled message/byte-stream delays all subsequent ones sharing the same ordered channel.
+  \item \textbf{HPACK/QPACK:} Header compression schemes for HTTP/2 (static+dynamic table with Huffman coding) and HTTP/3 respectively.
+  \item \textbf{Idempotency:} The property that repeating an operation produces the same observable effect as performing it once ($f(f(x)) = f(x)$).
+  \item \textbf{Idempotency Key:} A client-generated unique key sent with a mutating request so the server can detect and safely replay duplicates.
+  \item \textbf{JWT (JSON Web Token):} A compact signed token format (header.payload.signature, base64url) carrying claims; signed, not encrypted.
+  \item \textbf{Keyset (Seek) Pagination:} Pagination via a \texttt{WHERE (sort\_key, id) > (:last)} predicate aligned to a composite index.
+  \item \textbf{Leaky Bucket:} Rate-limiting algorithm modeling requests as fluid leaking at a constant rate (as meter) or draining from a queue (as queue).
+  \item \textbf{mTLS (Mutual TLS):} TLS where both client and server present certificates, providing workload identity.
+  \item \textbf{N+1 Problem:} Executing one query for a list plus one per element; solved by batching (DataLoader) or join-eager loading.
+  \item \textbf{OIDC (OpenID Connect):} Identity layer on OAuth 2.0 adding ID tokens, discovery, and standard claims.
+  \item \textbf{OpenAPI:} A language-agnostic specification format for describing HTTP APIs (v3.1 aligns with JSON Schema 2020-12).
+  \item \textbf{Outbox Pattern:} Writing domain state and an event row in one local transaction, then relaying events asynchronously for guaranteed at-least-once publication.
+  \item \textbf{PKCE (Proof Key for Code Exchange):} OAuth extension binding an authorization code to the client that initiated the flow via a code verifier/challenge pair.
+  \item \textbf{Problem Details (RFC 9457):} The standard \texttt{application/problem+json} error body: \texttt{type}, \texttt{title}, \texttt{status}, \texttt{detail}, \texttt{instance}, extensions.
+  \item \textbf{Protobuf (Protocol Buffers):} Google's binary serialization IDL; messages encode as tag-length-value with varint/zigzag integers.
+  \item \textbf{Rate Limiting:} Controlling request throughput per consumer using algorithms such as token bucket, leaky bucket, sliding window, or GCRA.
+  \item \textbf{RED / USE:} Metrics methodologies — Rate, Errors, Duration for services; Utilization, Saturation, Errors for resources.
+  \item \textbf{Retry Budget:} A cap on the fraction of requests that may be retries, preventing retry amplification storms.
+  \item \textbf{Saga:} A sequence of local transactions with compensating actions, used instead of distributed transactions across services.
+  \item \textbf{SLI/SLO/SLA:} Service Level Indicator (measured behavior), Objective (internal target), Agreement (external contractual commitment, looser than the SLO).
+  \item \textbf{SSRF (Server-Side Request Forgery):} Tricking a server into fetching attacker-chosen URLs; defended with allow-lists, redirect re-validation, and metadata-endpoint blocking.
+  \item \textbf{SSE (Server-Sent Events):} The \texttt{text/event-stream} push protocol: unidirectional, HTTP-native, with automatic reconnection via \texttt{Last-Event-ID}.
+  \item \textbf{Token Bucket:} Rate limiter holding up to $B$ tokens refilled at rate $r$; burst tolerance equals $B$.
+  \item \textbf{traceparent:} The W3C Trace Context header (\texttt{version-traceid-spanid-flags}) propagating distributed trace identity.
+  \item \textbf{TTFC (Time To First Call):} Developer-experience activation metric: elapsed time from signup to a first successful API call.
+  \item \textbf{Webhook:} A provider-initiated HTTP callback delivering events to a consumer-registered URL, typically HMAC-signed with retry semantics.
+\end{itemize}
+
+\section{Recommended Learning Path}
+
+\begin{enumerate}
+  \item Start with \textbf{Chapter 0} (Introduction) and \textbf{Chapters 1--2} (HTTP wire protocol, consuming APIs).
+  \item Progress sequentially through Module 1, then Module 2, for foundational mastery.
+  \item Jump to Module 3 and Module 4 chapters only after completing Modules 1 and 2.
+  \item Use capstone projects to practice immediately after each chapter.
+\end{enumerate}
+
+% Appendix: Solutions, model answers, and grading rubrics for all chapters
+\input{chapters/appendix_solutions}
+
+% Bibliography
+\printbibliography
+
+\end{document}

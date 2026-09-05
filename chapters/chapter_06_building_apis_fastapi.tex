@@ -1,0 +1,2760 @@
+%% ============================================================================
+%% Chapter 6: Building Production REST APIs with FastAPI
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Building Production REST APIs with FastAPI}
+\label{ch:fastapi}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Chapters 1--5 taught you to speak HTTP fluently and to consume other people's
+APIs defensively. This chapter turns the table: you are now the
+\emph{provider}. Building an API that strangers can rely on is a different
+discipline from writing one that works on your laptop --- the contract must be
+explicit, the runtime must survive hostile input and partial failure, the
+operational surface (health, logs, metrics, shutdown) must exist \emph{before}
+the first deploy, and every one of those properties must be testable without
+a network. \textbf{FastAPI}~\cite{fastapidocs} is the framework this book uses
+for that job: a thin, ruthlessly pragmatic layer over Starlette (routing,
+middleware, the ASGI runtime) and Pydantic~v2 (validation and serialization)
+that turns Python type annotations into a machine-readable OpenAPI~3.1
+contract~\cite{openapi31}.
+
+We begin where production systems actually begin --- with the contract --- and
+confront the design-first versus code-first dilemma head-on, settling on a
+disciplined answer: the OpenAPI document is the backbone either way; the
+question is only who writes it. We then descend into the runtime: the ASGI
+callable protocol (\texttt{scope}/\texttt{receive}/\texttt{send}), what uvicorn
+and hypercorn actually do, where Starlette ends and FastAPI begins, and what
+the event loop means for your choice between \texttt{def} and
+\texttt{async~def} endpoints. The centerpiece is a complete, production-grade
+\emph{Northwind Robotics Orders API}: typed Pydantic~v2 models with domain
+invariants, CRUD routes, a repository boundary with in-memory and SQLite
+implementations behind dependency injection, pure-ASGI middleware carrying
+correlation IDs into structured JSON logs, liveness/readiness probes, custom
+exception handlers that never leak stack traces, an NDJSON streaming endpoint,
+and a customized OpenAPI document --- all verified by an in-process
+\texttt{TestClient} suite that runs offline in under a second.
+
+By the end of this chapter you will be able to explain --- at the level of
+interview-grade precision --- exactly what happens between a TCP byte stream
+arriving at uvicorn and a validated, serialized, logged response leaving it,
+and you will be able to build that pipeline yourself.
+
+\begin{keyconceptbox}
+FastAPI is not a web framework so much as a \textbf{compiler from type
+annotations to contracts}. Declare the shape of your data with Pydantic
+models, declare how to obtain your collaborators with \texttt{Depends}, and
+declare your endpoint signatures; FastAPI derives validation, serialization,
+dependency resolution, and the OpenAPI schema from those declarations. Your
+job shifts from writing plumbing to writing \emph{declarations you can
+defend}.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch6-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Argue the design-first versus code-first trade-off quantitatively, and
+        construct an OpenAPI~3.1 document --- \texttt{servers},
+        \texttt{paths}, operations, \texttt{components.schemas}, and
+        \texttt{securitySchemes} --- that serves as a source of truth for
+        implementation, documentation, and client
+        generation~\cite{openapi31}.
+  \item Explain the ASGI callable protocol (\texttt{scope},
+        \texttt{receive}, \texttt{send}), the division of labor between
+        uvicorn/hypercorn, Starlette, and FastAPI, and the event-loop
+        implications of every line of handler code you write.
+  \item Trace the complete FastAPI request lifecycle --- routing resolution,
+        middleware stack, dependency resolution, Pydantic validation, handler
+        invocation, response serialization --- and predict the ordering
+        guarantees of each stage.
+  \item Design dependency-injection graphs with \texttt{Depends}: sub-
+        dependencies, per-request caching, \texttt{yield}-based cleanup, and
+        \texttt{dependency\_overrides} for tests.
+  \item Choose correctly between \texttt{def} and \texttt{async~def}
+        endpoints using threadpool semantics, and between
+        \texttt{BackgroundTasks} and a real task queue using durability and
+        latency criteria.
+  \item Apply the Pydantic~v2 validation pipeline ---
+        \texttt{field\_validator}, \texttt{model\_validator}, serialization
+        aliases, and the Rust-backed core --- to enforce domain invariants,
+        and use \texttt{response\_model} as a security boundary that prevents
+        internal fields from leaking~\cite{pydanticdocs}.
+  \item Operate the service: 12-factor configuration with
+        \texttt{pydantic-settings}~\cite{twelvefactor}, structured JSON
+        logging with correlation IDs, liveness versus readiness probes, and
+        graceful shutdown via the lifespan protocol.
+  \item Build, run, and test the complete Orders API offline with
+        \texttt{TestClient}/httpx~\cite{httpxdocs}, including 422 validation
+        errors, domain errors, health endpoints, and OpenAPI schema
+        assertions.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed:
+
+\begin{itemize}
+  \item \textbf{Chapter 0} --- environment setup: Python 3.11+, a virtual
+        environment, and the ability to run \texttt{pip} and \texttt{pytest}
+        from PowerShell.
+  \item \textbf{Chapter 1} --- the HTTP wire protocol: methods, status codes,
+        header fields, and message bodies. Every route in this chapter is an
+        exercise of that vocabulary.
+  \item \textbf{Chapter 2} --- consuming APIs from Python: \texttt{httpx}
+        basics, which the test suite reuses in its ASGI-transport form.
+  \item \textbf{Chapter 3} --- the REST architectural style: resources,
+        representations, and the uniform interface that the Orders API
+        implements.
+  \item \textbf{Chapter 4} --- serialization and data contracts: JSON, NDJSON,
+        and the notion of a machine-checkable contract, which OpenAPI
+        operationalizes here.
+\end{itemize}
+
+No network access is required anywhere in this chapter: every test runs
+against the in-process ASGI application, and every dataset is synthetic,
+embedded, and deterministic, set in the fictional \emph{Northwind Robotics}
+parts and logistics universe.
+
+\begin{warningbox}
+\textbf{Version discipline.} The code in this chapter targets
+FastAPI~$\geq0.110$, Starlette's modern lifespan API, and Pydantic~v2
+($\geq2.7$). Pydantic v1 idioms --- \texttt{@validator}, \texttt{.dict()},
+\texttt{class Config} --- appear constantly in old blog posts and in large
+language model output; they are \emph{wrong} here and several raise hard
+errors under v2. Pin the versions from Section~\ref{sec:ch6-deps} before
+writing a line of code.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch6-mechanics}
+
+\subsection{Design-First vs.\ Code-First: Who Writes the Contract?}
+\label{sec:ch6-design-first}
+
+Every HTTP API has a contract --- a description of its resources, operations,
+representations, and failure modes --- whether or not anyone writes it down.
+The only choice is whether that contract is an \emph{artifact you author} or
+an \emph{archaeological finding} your consumers reconstruct from observed
+behavior. The two disciplined answers to ``who writes it first?'' define the
+two workflows:
+
+\begin{definition}[Design-first (contract-first)]
+The OpenAPI document is authored \emph{before} implementation, reviewed as an
+artifact in its own right, and treated as the source of truth. Server stubs,
+client SDKs, contract tests, and mock servers are generated from it; the
+implementation is continuously checked for conformance to it.
+\end{definition}
+
+\begin{definition}[Code-first (implementation-first)]
+The contract is \emph{derived} from annotated code. FastAPI is the canonical
+code-first toolchain: type annotations on path operations and Pydantic models
+are compiled into an OpenAPI~3.1 document at runtime
+(\texttt{GET /openapi.json})~\cite{fastapidocs}.
+\end{definition}
+
+Neither is morally superior; they optimize for different failure modes.
+Design-first pays a front-loaded cost --- you must design representations
+before you can test an idea --- but buys parallel workstreams (consumers build
+against mocks from day one), independent contract review, and immunity to
+``accidental contract'' drift where a refactor silently changes the wire
+shape. Code-first pays almost nothing up front and keeps the contract
+bit-identical to the implementation by construction, but risks shipping an
+accidental contract: whatever the code happens to emit today becomes, de
+facto, a promise. The pragmatic synthesis used throughout this book:
+\emph{code-first mechanics, design-first governance}. Author the API in
+FastAPI, but treat the generated \texttt{openapi.json} as a reviewed,
+versioned, CI-asserted artifact --- the test suite in
+Section~\ref{sec:ch6-code-tests} asserts its contents exactly.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    & \textbf{Design-first} & \textbf{Code-first (FastAPI)} \\
+    \midrule
+    Source of truth & Hand-written OpenAPI YAML & Type annotations + Pydantic models \\
+    Contract fidelity & Drift possible (code may diverge) & Exact by construction \\
+    Consumer start time & Immediately (generated mocks) & After first deployable build \\
+    Review surface & Diff of the spec file & Diff of code \emph{and} pinned spec \\
+    Best when & Public API, many external consumers & Internal APIs, small teams, fast iteration \\
+    Main hazard & Spec/implementation skew & Accidental contract, unreviewed drift \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Design-first vs.\ code-first: the honest trade-off.}
+  \label{tab:ch6-design-first}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      box/.style={rectangle, rounded corners=2pt, draw=darkblue, fill=blue!5, minimum width=4.6cm, minimum height=0.8cm, align=center},
+      art/.style={rectangle, rounded corners=2pt, draw=packtgray, fill=lightgray, minimum width=4.6cm, minimum height=0.7cm, align=center},
+      flow/.style={->, >=stealth, shorten >=1pt},
+      lbl/.style={font=\scriptsize\itshape, fill=white, inner sep=1pt}]
+    % Design-first lane (top)
+    \node[box] (spec) {author \texttt{openapi.yaml}};
+    \node[box, right=1.1cm of spec] (gen) {generate stubs, mocks, SDKs};
+    \node[box, right=1.1cm of gen] (implA) {implement against contract};
+    \node[art, below=0.7cm of implA] (gateA) {CI: conformance gate};
+    \draw[flow] (spec) -- (gen);
+    \draw[flow] (gen) -- (implA);
+    \draw[flow] (implA) -- (gateA);
+    \node[note, left=0.25cm of spec] {\textbf{design-first}};
+
+    % Code-first lane (bottom)
+    \node[box, below=2.6cm of spec] (code) {annotated FastAPI code};
+    \node[box, right=1.1cm of code] (derive) {derive \texttt{openapi.json}};
+    \node[box, right=1.1cm of derive] (review) {pin, review, publish contract};
+    \node[art, below=0.7cm of review] (gateB) {CI: schema assertions};
+    \draw[flow] (code) -- (derive);
+    \draw[flow] (derive) -- (review);
+    \draw[flow] (review) -- (gateB);
+    \node[note, left=0.25cm of code] {\textbf{code-first}};
+  \end{tikzpicture}
+  \caption{The two contract workflows converge on the same discipline: a
+  reviewed OpenAPI artifact and a CI gate. They differ only in which side of
+  the arrow is edited by hand.}
+  \label{fig:ch6-workflows}
+\end{figure}
+
+\subsection{OpenAPI 3.1 as the Backbone}
+\label{sec:ch6-openapi}
+
+OpenAPI~3.1~\cite{openapi31} describes an HTTP API as a JSON or YAML document
+with a small set of top-level keys. Know them cold:
+
+\begin{itemize}
+  \item \textbf{\texttt{openapi}} --- the version string (\texttt{"3.1.0"}).
+        3.1's headline change: schemas are now \emph{full JSON Schema
+        2020-12} (Chapter 4), replacing the 3.0 subset with its awkward
+        \texttt{nullable} keyword.
+  \item \textbf{\texttt{info}} --- \texttt{title}, \texttt{version}, contact
+        and license metadata. The version here is \emph{your API's} version,
+        not the spec's.
+  \item \textbf{\texttt{servers}} --- an array of base URLs
+        (\texttt{url} plus \texttt{description}, optionally with templated
+        variables). This is how generated clients and the interactive docs
+        know where the API lives in each environment.
+  \item \textbf{\texttt{paths}} --- the heart: a map from path templates
+        (\texttt{/orders/\{order\_id\}}) to \emph{path items}, each holding
+        one \emph{operation} object per HTTP method. An operation carries
+        \texttt{operationId}, \texttt{tags}, \texttt{parameters},
+        \texttt{requestBody}, and --- most importantly --- \texttt{responses}:
+        a map from status code to a representation schema. A complete
+        operation documents its error shapes too; FastAPI emits the 422
+        validation response automatically.
+  \item \textbf{\texttt{components}} --- the reusable parts bin:
+        \texttt{schemas} (Pydantic models land here, referenced by
+        \texttt{\$ref}), \texttt{parameters}, \texttt{responses},
+        \texttt{requestBodies}, \texttt{headers}, and
+        \texttt{securitySchemes}.
+  \item \textbf{\texttt{securitySchemes} / \texttt{security}} --- declarative
+        descriptions of authentication mechanisms (\texttt{apiKey},
+        \texttt{http} bearer/basic, \texttt{oauth2}, \texttt{openIdConnect})
+        and where they apply. Chapter 16 implements enforcement; here we
+        publish the scheme in the contract.
+  \item \textbf{\texttt{tags}} --- named groups with descriptions; they drive
+        the grouping in generated documentation.
+\end{itemize}
+
+FastAPI generates all of this from your annotations: the
+\texttt{response\_model} becomes the success response schema, path and query
+parameters become \texttt{parameters}, the request model becomes
+\texttt{requestBody}, and every Pydantic model is hoisted into
+\texttt{components.schemas}. The customization hook
+(Section~\ref{sec:ch6-code-orders}) replaces \texttt{app.openapi} to inject
+\texttt{servers}, a \texttt{securitySchemes} entry, and extensions such as
+\texttt{x-audience} --- the escape hatch that keeps generated contracts
+publishable as organizational artifacts.
+
+\subsection{ASGI and the Server Stack}
+\label{sec:ch6-asgi}
+
+FastAPI code never touches a socket. Beneath it sits a three-layer stack, and
+knowing exactly where each layer ends is the difference between debugging
+production and guessing at it.
+
+\begin{definition}[ASGI]
+The \emph{Asynchronous Server Gateway Interface}: a callable contract between
+an HTTP server and a Python application. An ASGI application is
+\texttt{async def app(scope, receive, send)}: \texttt{scope} is a dict of
+connection-lifetime metadata (method, path, headers, the \texttt{state} bag);
+\texttt{receive} is an awaitable returning the next event
+(\texttt{http.request} body chunks, \texttt{http.disconnect});
+\texttt{send} awaits outbound events (\texttt{http.response.start} with
+status and headers, then \texttt{http.response.body} chunks).
+\end{definition}
+
+\begin{enumerate}
+  \item \textbf{The server} (uvicorn or hypercorn) owns TCP sockets, TLS
+        termination, HTTP/1.1 parsing, and --- in uvicorn's
+        \texttt{[standard]} build --- the \texttt{uvloop} event loop policy
+        and \texttt{httptools} parser. Its whole job is translating bytes on
+        the wire into ASGI events and back. Uvicorn is the default choice
+        (C-accelerated, minimal); hypercorn adds HTTP/2 and HTTP/3 (QUIC)
+        support.
+  \item \textbf{Starlette} is the ASGI toolkit: the router that matches
+        \texttt{scope["path"]}, the middleware machinery, request/response
+        abstractions, \texttt{TestClient}, and the \emph{lifespan} protocol
+        (startup/shutdown as ASGI messages).
+  \item \textbf{FastAPI} is a routing subclass plus a dependency-injection
+        and validation compiler on top of Starlette. When you write
+        \texttt{@app.get("/orders")}, you are registering a Starlette route
+        whose endpoint wrapper builds the DI graph, runs Pydantic validation,
+        calls your function, and serializes the result.
+\end{enumerate}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      stage/.style={rectangle, rounded corners=2pt, draw=darkblue, fill=blue!5, minimum width=3.3cm, minimum height=0.9cm, align=center},
+      ext/.style={rectangle, rounded corners=2pt, draw=packtgray, fill=lightgray, minimum width=2.2cm, minimum height=0.9cm, align=center},
+      flow/.style={->, >=stealth, shorten >=1pt},
+      lbl/.style={font=\scriptsize\itshape, fill=white, inner sep=1pt}]
+    \node[ext] (client) {HTTP client};
+    \node[stage, right=0.9cm of client] (uvicorn) {uvicorn\\[-2pt]{\scriptsize sockets, TLS, parsing}};
+    \node[stage, right=0.9cm of uvicorn] (mw) {middleware stack\\[-2pt]{\scriptsize correlation, timing}};
+    \node[stage, right=0.9cm of mw] (router) {Starlette router\\[-2pt]{\scriptsize path match}};
+    \node[stage, below=1.2cm of router] (deps) {DI resolution\\[-2pt]{\scriptsize Depends graph}};
+    \node[stage, left=0.9cm of deps] (valid) {Pydantic validation\\[-2pt]{\scriptsize 422 on failure}};
+    \node[stage, left=0.9cm of valid] (handler) {handler\\[-2pt]{\scriptsize def $\to$ threadpool}};
+    \node[stage, left=0.9cm of handler] (serial) {serialization\\[-2pt]{\scriptsize response\_model filter}};
+
+    \draw[flow] (client) -- node[lbl, above]{bytes} (uvicorn);
+    \draw[flow] (uvicorn) -- node[lbl, above]{scope / receive / send} (mw);
+    \draw[flow] (mw) -- (router);
+    \draw[flow] (router) -- (deps);
+    \draw[flow] (deps) -- (valid);
+    \draw[flow] (valid) -- (handler);
+    \draw[flow] (handler) -- (serial);
+    \draw[flow] (serial.south) to [bend right=30] node[lbl, below]{http.response.start / body} (client.south);
+  \end{tikzpicture}
+  \caption{The ASGI request lifecycle. Left of the router is the server; the
+  router and middleware are Starlette; DI, validation, and response-model
+  serialization are FastAPI.}
+  \label{fig:ch6-asgi-pipeline}
+\end{figure}
+
+\textbf{Event-loop implications.} Uvicorn runs one OS thread per worker
+process, and that thread runs one event loop. Every coroutine --- every
+middleware, every \texttt{async def} endpoint, every streaming generator ---
+shares it. A coroutine that blocks (a synchronous database driver, a
+\texttt{time.sleep}, a CPU-heavy serialization) does not block one request;
+it blocks \emph{every} request the worker is serving. The escape hatch is the
+threadpool, discussed next.
+
+\subsection{Sync vs.\ Async Endpoints: Threadpool Semantics}
+\label{sec:ch6-sync-async}
+
+FastAPI dispatches on the \emph{declaration} of your endpoint:
+
+\begin{itemize}
+  \item \texttt{async def} endpoints are awaited directly \textbf{on the
+        event loop}. They are correct when every blocking operation in the
+        body is itself awaitable (async database driver, \texttt{httpx}
+        async client, \texttt{asyncio.sleep}).
+  \item \texttt{def} endpoints are submitted to a threadpool
+        (anyio's limiter, default capacity \textbf{40 threads}) and awaited
+        from the loop. The loop stays responsive; the cost is a thread
+        context switch and a hard ceiling of 40 concurrent blocking calls per
+        worker.
+\end{itemize}
+
+This yields a decision rule with no exceptions: \emph{async when the I/O
+stack is async end-to-end; def when any link in the chain blocks.} The
+Orders API deliberately declares its CRUD endpoints \texttt{def}: the
+\texttt{sqlite3} driver is synchronous, so calling it from
+\texttt{async def} would stall the loop, while the threadpool absorbs it
+correctly. The corollary is the capacity question: if p99 downstream latency
+is $L$ ms and arrival rate is $\lambda$ requests/s, Little's Law says the
+pool needs $\lambda \cdot L / 1000$ slots; 40 slots at 50 ms latency
+saturates near 800 requests/s per worker --- beyond that, requests
+\emph{queue inside the pool} and latencies climb without a single error.
+Section~\ref{sec:ch6-case-study} is the war story of exactly that failure.
+
+When does \texttt{async def} genuinely help? When concurrency per worker is
+the bottleneck and the whole stack is awaitable: proxying, fan-out to several
+upstream APIs (Chapter 2's async client patterns), WebSockets, and
+server-streamed responses. For CPU-bound work neither helps --- that work
+belongs in a subprocess or a task queue.
+
+\textbf{Background tasks vs.\ task queues.} Starlette's
+\texttt{BackgroundTasks} runs callables \emph{after} the response is sent, in
+the same process: ideal for fire-and-forget side effects that may be lost on
+deploy (cache warming, a best-effort audit write). It offers no retries, no
+persistence, no visibility; a worker kill loses the task silently. Anything
+whose loss is a business event --- sending the invoice, provisioning the
+robot --- belongs in a real queue (Celery, arq, a broker-backed outbox;
+Chapter 11 covers event-driven patterns). The decision is one question:
+\emph{if this process dies a millisecond after the response, may the work be
+lost?}
+
+\subsection{The Dependency-Injection Machine}
+\label{sec:ch6-di}
+
+\texttt{Depends} is FastAPI's second compiler: from callable annotations it
+builds, per request, a \emph{directed acyclic graph} of providers.
+
+\begin{itemize}
+  \item \textbf{Resolution.} A dependency is any callable --- function,
+        class, or class instance --- whose own signature is analyzed for
+        parameters, so dependencies compose into sub-dependencies. FastAPI
+        resolves the graph depth-first, caching each provider's result
+        \emph{per request}: if a handler and two of its sub-dependencies all
+        request \texttt{get\_settings}, it executes \emph{once}. The DI
+        showcase (Section~\ref{sec:ch6-code-di}) proves the caching
+        empirically with a resolution counter.
+  \item \textbf{Yield dependencies and cleanup.} A provider may
+        \texttt{yield} its value; code after the \texttt{yield} runs after
+        the response has been sent, in LIFO order, and runs \emph{even when
+        the handler raised}. This is where connections close, sessions
+        commit-or-rollback, and locks release. Pre-\texttt{yield} code runs
+        during resolution; post-\texttt{yield} code is teardown --- never put
+        response-affecting logic after the \texttt{yield}.
+  \item \textbf{Scopes.} Dependencies are request-scoped by default
+        (per-request caching). Process-lifetime singletons belong in
+        \texttt{lifespan} state (as the Orders API does with its repository)
+        or in \texttt{lru\_cache}-backed providers for stateless values such
+        as settings.
+  \item \textbf{Overrides.} \texttt{app.dependency\_overrides} maps the
+        original provider to a replacement, keyed by the callable object
+        itself. It is the canonical test seam: swap the repository for a
+        stub, swap settings for test values, without touching route code ---
+        demonstrated in the test suite (Section~\ref{sec:ch6-code-tests}).
+\end{itemize}
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      dep/.style={rectangle, rounded corners=2pt, draw=darkblue, fill=blue!5, minimum width=3.4cm, minimum height=0.7cm, align=center},
+      res/.style={rectangle, rounded corners=2pt, draw=packtgray, fill=lightgray, minimum width=3.4cm, minimum height=0.9cm, align=center},
+      flow/.style={->, >=stealth, shorten >=1pt},
+      lbl/.style={font=\scriptsize\itshape, fill=white, inner sep=1pt}]
+    \node[dep] (route) {Starlette route match};
+    \node[dep, below=0.9cm of route] (handler) {endpoint \texttt{create\_order}};
+    \node[dep, below left=0.9cm and 0.3cm of handler] (repo) {\texttt{get\_repository}};
+    \node[dep, below right=0.9cm and 0.3cm of handler] (settings) {\texttt{get\_settings}};
+    \node[res, below=0.9cm of repo] (state) {\texttt{app.state.repository}\\[-2pt]{\scriptsize built once in lifespan}};
+    \node[res, below=0.9cm of settings] (cfg) {\texttt{app.state.settings}\\[-2pt]{\scriptsize env-layered, 12-factor}};
+
+    \draw[flow] (route) -- (handler);
+    \draw[flow] (handler) -- node[lbl, above left]{Depends} (repo);
+    \draw[flow] (handler) -- node[lbl, above right]{Depends} (settings);
+    \draw[flow] (repo) -- (state);
+    \draw[flow] (settings) -- (cfg);
+  \end{tikzpicture}
+  \caption{The Orders API dependency graph. Providers (white) resolve
+  per-request and are cached once per request; resources (gray) are
+  process-lifetime singletons constructed once in the lifespan and merely
+  \emph{looked up} by providers. Overrides replace any provider node at test
+  time.}
+  \label{fig:ch6-di-graph}
+\end{figure}
+
+\subsection{Pydantic v2: The Validation Pipeline}
+\label{sec:ch6-pydantic}
+
+Pydantic v2~\cite{pydanticdocs} is a rewrite around \texttt{pydantic-core}, a
+Rust validation engine; the Python layer is a thin schema builder. Two
+consequences matter daily. First, \textbf{performance}: validation of a
+realistic model is commonly 5--20$\times$ faster than v1 --- fast enough that
+``validate everything at the boundary'' stops being a performance
+conversation. Second, \textbf{the validator taxonomy}:
+
+\begin{itemize}
+  \item \texttt{@field\_validator("sku")} runs per field, before or after
+        type coercion (\texttt{mode="before"} / \texttt{mode="after"}), and
+        sees one field in isolation. Use it for per-field normalization and
+        rules --- the Orders API lowercases \texttt{customer\_id} here.
+  \item \texttt{@model\_validator(mode="after")} runs once the whole model is
+        coerced, and sees \emph{all} fields. Use it for cross-field domain
+        invariants --- the Orders API rejects duplicate SKU lines here,
+        because no single field can see the duplication.
+  \item \textbf{Serialization aliases.} \texttt{Field(serialization\_alias=)}
+        decouples the Python name from the wire name; FastAPI serializes
+        response models with \texttt{by\_alias=True}, so
+        \texttt{customer\_id} becomes \texttt{customerId} on the wire while
+        Python code keeps idiomatic names. \texttt{populate\_by\_name=True}
+        keeps construction by Python name legal.
+\end{itemize}
+
+The final piece is the one with security consequences:
+\texttt{response\_model}. FastAPI does not merely document it --- it
+\emph{re-validates and filters} handler return values through it. Fields
+absent from \texttt{response\_model} never reach the wire, which is why the
+Orders API can return \texttt{OrderRecord} objects (carrying
+\texttt{warehouse\_hint} and \texttt{fraud\_score}) from handlers and still
+guarantee clients only ever see the \texttt{OrderRead} contract.
+
+\subsection{Configuration, Logging, and the Operational Surface}
+\label{sec:ch6-ops}
+
+\textbf{12-factor configuration}~\cite{twelvefactor}: config that varies
+between deploys lives in the environment, never in code.
+\texttt{pydantic-settings} gives this a typed front door: a
+\texttt{BaseSettings} subclass declares fields, defaults, and an
+\texttt{env\_prefix} (\texttt{NWR\_}), and the library layers sources ---
+init arguments, then environment variables, then a \texttt{.env} file, then
+defaults --- with earlier sources winning. The layering is the point: tests
+inject \texttt{Settings(repository\_backend="memory")} explicitly; production
+sets \texttt{NWR\_SQLITE\_PATH}; nothing reads \texttt{os.environ} ad hoc.
+\textbf{Secrets boundary:} settings objects may \emph{reference} secrets
+(file paths, key names) but secret material itself enters through the
+environment at deploy time and is never logged, never returned in a response,
+and never committed --- the full treatment is Chapter 16.
+
+\textbf{Structured logging with correlation IDs.} Text logs are for humans at
+a laptop; production log pipelines ingest JSON. The Orders API formats every
+record as one JSON object per line and binds a correlation ID --- the
+incoming \texttt{X-Request-Id} or a minted one --- into a
+\texttt{contextvars.ContextVar} at the outermost middleware, so every log
+line emitted anywhere in the request, in any layer, carries the same ID.
+Chapter 18 builds the full observability stack (metrics, tracing) on this
+foundation.
+
+\textbf{Probes.} Three distinct questions, three distinct endpoints:
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Probe} & \textbf{Question} & \textbf{Checks} \\
+    \midrule
+    Startup & May the process begin receiving probes at all? & Lifespan completion: migrations, cache warmup, config load. \\
+    Readiness (\texttt{/ready}) & May we route traffic to this instance? & Dependencies reachable (repository \texttt{ping()}), warmup done. \\
+    Liveness (\texttt{/health}) & Is the process wedged beyond recovery? & Nothing external --- prove the loop runs; fail $\Rightarrow$ restart. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Probe semantics. Conflating readiness with liveness causes boot
+  loops: a dependency outage makes liveness fail, the orchestrator restarts
+  the pod, which changes nothing.}
+  \label{tab:ch6-probes}
+\end{table}
+
+\textbf{Graceful shutdown.} Uvicorn's lifespan protocol sends
+\texttt{lifespan.shutdown} on SIGTERM; the \texttt{asynccontextmanager}
+resumes after its \texttt{yield}. The discipline: flip readiness to
+unavailable \emph{first} (so the load balancer drains the instance), then
+finish in-flight requests, then close repositories. The Orders API's
+\texttt{lifespan} implements exactly this ordering.
+
+\subsection{Response Engineering}
+\label{sec:ch6-responses}
+
+The response side of the contract deserves the same rigor as the request
+side:
+
+\begin{itemize}
+  \item \textbf{\texttt{response\_model} filtering} --- the security boundary
+        from Section~\ref{sec:ch6-pydantic}: declare the outbound shape, let
+        FastAPI drop everything else.
+  \item \textbf{Status codes} --- 201 with the created representation for
+        POST, 204 with an empty body for DELETE, 422 for validation failure,
+        409 for domain-state conflicts (the invalid transition), 404 for
+        missing resources, 503 for unready dependencies. RFC~9110~\S15
+        defines the semantics~\cite{rfc9110}; Chapter 7 deepens error bodies
+        into full RFC~9457 problem details.
+  \item \textbf{Custom responses} --- return a \texttt{Response} subclass
+        directly to bypass serialization (the error handlers return
+        \texttt{JSONResponse} with \texttt{application/problem+json}), or
+        subclass \texttt{JSONResponse} for alternative encoders.
+  \item \textbf{Streaming} --- \texttt{StreamingResponse} with an iterator
+        sends body chunks as generated, in constant memory; a \emph{sync}
+        generator runs on the threadpool, an \texttt{async} generator on the
+        loop. The NDJSON endpoint in Section~\ref{sec:ch6-code-orders}
+        snapshots the records first, then streams one JSON object per line.
+  \item \textbf{ETags and caching} --- validators and conditional requests
+        are middleware-level concerns; Chapter 10 builds the ETag middleware
+        this chapter points at.
+\end{itemize}
+
+\begin{examplebox}
+\textbf{The accidental-contract trap, concretely.} Without
+\texttt{response\_model}, returning an \texttt{OrderRecord} would serialize
+\texttt{fraud\_score} --- an internal risk signal --- into every client
+response. No exception is raised; the leak ships silently. Declaring
+\texttt{response\_model=OrderRead} makes the leak structurally impossible,
+and the test suite asserts absence of the field. This is why ``always declare
+\texttt{response\_model}'' is a rule, not a style preference.
+\end{examplebox}
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch6-code}
+
+The chapter ships four complete, runnable Python files. Layout:
+
+\begin{minted}{text}
+orders_api.py        # the centerpiece: models, repositories, DI, routes
+middleware.py        # pure-ASGI correlation-ID + timing middleware
+di_showcase.py       # DI mechanics: chains, yield cleanup, caching, overrides
+test_orders_api.py   # offline TestClient suite (17 tests)
+\end{minted}
+
+All four run offline; the test suite completes in about a second. Save them
+in one directory, then (PowerShell):
+
+\begin{minted}{bash}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install "fastapi>=0.110" "uvicorn[standard]>=0.29" "pydantic>=2.7" `
+            "pydantic-settings>=2.2" "httpx>=0.27" "pytest>=8"
+pytest test_orders_api.py -q
+\end{minted}
+
+\subsection{The Centerpiece: The Northwind Robotics Orders API}
+\label{sec:ch6-code-orders}
+
+Read the file top to bottom in the order it is written: settings, logging,
+domain models, repositories, lifespan, dependencies, error mapping, then the
+application factory. Each layer only depends on layers above it --- that
+ordering discipline is what keeps the DI graph acyclic and the file readable
+in one pass.
+
+\begin{minted}{python}
+r"""Northwind Robotics Orders API -- production-grade FastAPI reference service.
+
+Everything runs offline and deterministically. Persistence is either an
+in-memory repository (default) or SQLite, selected by settings.
+
+Run locally (PowerShell):
+    .\.venv\Scripts\Activate.ps1
+    uvicorn orders_api:app --port 8000
+Exercise it:
+    curl.exe http://localhost:8000/health
+    curl.exe -X POST http://localhost:8000/orders -H "Content-Type: application/json" -d '{"customer_id":"acme","lines":[{"sku":"NWR-1001","quantity":2,"unit_price_cents":4999}]}'
+Test it fully in-process (no network):
+    pytest test_orders_api.py -q
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import threading
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from enum import StrEnum
+from itertools import count
+from typing import Annotated, Any, Protocol
+
+from fastapi import Depends, FastAPI, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from middleware import CorrelationIdMiddleware, TimingMiddleware, request_id_var
+
+logger = logging.getLogger("northwind.orders")
+
+# ---------------------------------------------------------------------------
+# Configuration (12-factor: everything environment-driven, nothing hardcoded)
+# ---------------------------------------------------------------------------
+
+
+class Settings(BaseSettings):
+    """Environment-layered configuration; NWR_* env vars override defaults."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="NWR_", env_file=".env", extra="ignore"
+    )
+
+    app_name: str = "northwind-orders-api"
+    app_version: str = "1.0.0"
+    environment: str = "dev"  # dev | staging | prod
+    repository_backend: str = "memory"  # memory | sqlite
+    sqlite_path: str = "orders.db"
+    log_level: str = "INFO"
+
+
+# ---------------------------------------------------------------------------
+# Structured JSON logging (deepened in Chapter 18)
+# ---------------------------------------------------------------------------
+
+
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line, with the correlation ID of the request."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "request_id": request_id_var.get(),
+        }
+        for key in ("method", "path", "status_code", "elapsed_ms"):
+            value = getattr(record, key, None)
+            if value is not None:
+                payload[key] = value
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def configure_logging(level: str) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level.upper())
+
+
+# ---------------------------------------------------------------------------
+# Domain model (Pydantic v2)
+# ---------------------------------------------------------------------------
+
+
+class OrderStatus(StrEnum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    SHIPPED = "shipped"
+    CANCELLED = "cancelled"
+
+
+ALLOWED_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
+    OrderStatus.PENDING: frozenset({OrderStatus.CONFIRMED, OrderStatus.CANCELLED}),
+    OrderStatus.CONFIRMED: frozenset({OrderStatus.SHIPPED, OrderStatus.CANCELLED}),
+    OrderStatus.SHIPPED: frozenset(),  # terminal
+    OrderStatus.CANCELLED: frozenset(),  # terminal
+}
+
+
+class OrderLine(BaseModel):
+    """Immutable value object inside an order."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sku: str = Field(pattern=r"^NWR-[0-9]{4}$", description="Northwind part SKU")
+    quantity: int = Field(ge=1, le=1000)
+    unit_price_cents: int = Field(ge=0, le=10_000_000)
+
+
+class OrderCreate(BaseModel):
+    """Inbound payload. Edge validation here; domain invariants in the model."""
+
+    customer_id: str = Field(min_length=3, max_length=64)
+    lines: list[OrderLine] = Field(min_length=1, max_length=50)
+
+    @field_validator("customer_id")
+    @classmethod
+    def customer_id_must_be_a_slug(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(
+                "customer_id must be alphanumeric (dashes/underscores allowed)"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def reject_duplicate_skus(self) -> "OrderCreate":
+        skus = [line.sku for line in self.lines]
+        if len(skus) != len(set(skus)):
+            raise ValueError(
+                "duplicate SKU lines are not allowed; merge quantities instead"
+            )
+        return self
+
+
+class OrderStatusUpdate(BaseModel):
+    status: OrderStatus
+
+
+class OrderRead(BaseModel):
+    """Outbound contract: exactly what clients are allowed to see."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    customer_id: str = Field(serialization_alias="customerId")
+    lines: list[OrderLine]
+    status: OrderStatus
+    total_cents: int
+    created_at: datetime
+    version: int
+
+
+class OrderRecord(OrderRead):
+    """Stored record: a superset of the outbound contract.
+
+    ``warehouse_hint`` and ``fraud_score`` are internal-only; they never
+    leave the process because every route declares ``response_model=OrderRead``
+    and the streaming endpoint excludes them explicitly.
+    """
+
+    warehouse_hint: str = "auto"
+    fraud_score: float = 0.0
+
+
+class OrderNotFoundError(LookupError):
+    def __init__(self, order_id: str) -> None:
+        super().__init__(f"order {order_id!r} not found")
+        self.order_id = order_id
+
+
+class InvalidTransitionError(ValueError):
+    def __init__(self, current: OrderStatus, target: OrderStatus) -> None:
+        super().__init__(f"cannot transition order from {current} to {target}")
+        self.current = current
+        self.target = target
+
+
+def transition(record: OrderRecord, target: OrderStatus) -> OrderRecord:
+    """Pure domain function: the ONLY place a status is allowed to change."""
+    if target not in ALLOWED_TRANSITIONS[record.status]:
+        raise InvalidTransitionError(record.status, target)
+    return record.model_copy(
+        update={"status": target, "version": record.version + 1}
+    )
+
+
+# ---------------------------------------------------------------------------
+# Repository: the persistence boundary, injected as a dependency
+# ---------------------------------------------------------------------------
+
+
+class OrderRepository(Protocol):
+    def new_id(self) -> str: ...
+    def insert(self, record: OrderRecord) -> OrderRecord: ...
+    def get(self, order_id: str) -> OrderRecord: ...
+    def list(self, *, limit: int, offset: int) -> list[OrderRecord]: ...
+    def replace(self, record: OrderRecord) -> OrderRecord: ...
+    def delete(self, order_id: str) -> None: ...
+    def ping(self) -> bool: ...
+    def close(self) -> None: ...
+
+
+class InMemoryOrderRepository:
+    """Deterministic process-local store; IDs are sequential: ord-0001, ..."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._orders: dict[str, OrderRecord] = {}
+        self._sequence = count(1)
+        self._closed = False
+
+    def new_id(self) -> str:
+        with self._lock:
+            return f"ord-{next(self._sequence):04d}"
+
+    def insert(self, record: OrderRecord) -> OrderRecord:
+        with self._lock:
+            self._orders[record.id] = record
+        return record
+
+    def get(self, order_id: str) -> OrderRecord:
+        try:
+            return self._orders[order_id]
+        except KeyError:
+            raise OrderNotFoundError(order_id) from None
+
+    def list(self, *, limit: int, offset: int) -> list[OrderRecord]:
+        with self._lock:
+            records = list(self._orders.values())  # insertion order = stable
+        return records[offset : offset + limit]
+
+    def replace(self, record: OrderRecord) -> OrderRecord:
+        with self._lock:
+            if record.id not in self._orders:
+                raise OrderNotFoundError(record.id)
+            self._orders[record.id] = record
+        return record
+
+    def delete(self, order_id: str) -> None:
+        with self._lock:
+            if self._orders.pop(order_id, None) is None:
+                raise OrderNotFoundError(order_id)
+
+    def ping(self) -> bool:
+        return not self._closed
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class SQLiteOrderRepository:
+    """SQLite-backed store. sqlite3 is a BLOCKING driver: call it only from
+    ``def`` endpoints, which FastAPI runs on the threadpool (Section 6.3)."""
+
+    def __init__(self, path: str) -> None:
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS orders ("
+            "id TEXT PRIMARY KEY, seq INTEGER NOT NULL, doc TEXT NOT NULL)"
+        )
+        self._conn.commit()
+
+    def new_id(self) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM orders"
+            ).fetchone()
+        return f"ord-{row[0]:04d}"
+
+    def insert(self, record: OrderRecord) -> OrderRecord:
+        seq = int(record.id.rsplit("-", 1)[1])
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO orders (id, seq, doc) VALUES (?, ?, ?)",
+                (record.id, seq, record.model_dump_json()),
+            )
+            self._conn.commit()
+        return record
+
+    def _row_to_record(self, row: tuple[str, str], order_id: str) -> OrderRecord:
+        if row is None:
+            raise OrderNotFoundError(order_id)
+        return OrderRecord.model_validate_json(row[1])
+
+    def get(self, order_id: str) -> OrderRecord:
+        row = self._conn.execute(
+            "SELECT id, doc FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        return self._row_to_record(row, order_id)
+
+    def list(self, *, limit: int, offset: int) -> list[OrderRecord]:
+        rows = self._conn.execute(
+            "SELECT doc FROM orders ORDER BY seq LIMIT ? OFFSET ?", (limit, offset)
+        ).fetchall()
+        return [OrderRecord.model_validate_json(row[0]) for row in rows]
+
+    def replace(self, record: OrderRecord) -> OrderRecord:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE orders SET doc = ? WHERE id = ?",
+                (record.model_dump_json(), record.id),
+            )
+            self._conn.commit()
+        if cursor.rowcount == 0:
+            raise OrderNotFoundError(record.id)
+        return record
+
+    def delete(self, order_id: str) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM orders WHERE id = ?", (order_id,)
+            )
+            self._conn.commit()
+        if cursor.rowcount == 0:
+            raise OrderNotFoundError(order_id)
+
+    def ping(self) -> bool:
+        try:
+            self._conn.execute("SELECT 1")
+            return True
+        except sqlite3.Error:
+            return False
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Lifespan: startup and graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings: Settings = app.state.settings
+    configure_logging(settings.log_level)
+    if settings.repository_backend == "sqlite":
+        repository: OrderRepository = SQLiteOrderRepository(settings.sqlite_path)
+    else:
+        repository = InMemoryOrderRepository()
+    app.state.repository = repository
+    app.state.ready = True  # startup work done; readiness probe may pass
+    logger.info(
+        "startup complete",
+        extra={"backend": settings.repository_backend, "env": settings.environment},
+    )
+    try:
+        yield  # the application serves requests here
+    finally:
+        app.state.ready = False  # stop passing readiness before teardown
+        repository.close()
+        logger.info("shutdown complete")
+
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+
+def get_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
+def get_repository(request: Request) -> OrderRepository:
+    return request.app.state.repository
+
+
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+RepoDep = Annotated[OrderRepository, Depends(get_repository)]
+
+
+# ---------------------------------------------------------------------------
+# Error mapping: domain errors -> RFC 9457-shaped problem documents (ch. 7)
+# ---------------------------------------------------------------------------
+
+
+def problem(
+    status_code: int, title: str, detail: str, **extra: Any
+) -> JSONResponse:
+    body = {
+        "type": "about:blank",
+        "title": title,
+        "status": status_code,
+        "detail": detail,
+        **extra,
+    }
+    return JSONResponse(
+        status_code=status_code,
+        content=body,
+        media_type="application/problem+json",
+    )
+
+
+async def order_not_found_handler(
+    request: Request, exc: OrderNotFoundError
+) -> JSONResponse:
+    return problem(404, "Order not found", str(exc), order_id=exc.order_id)
+
+
+async def invalid_transition_handler(
+    request: Request, exc: InvalidTransitionError
+) -> JSONResponse:
+    return problem(
+        409,
+        "Invalid state transition",
+        str(exc),
+        current=exc.current.value,
+        target=exc.target.value,
+    )
+
+
+async def validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    # Sanitize: never forward raw Pydantic ctx objects to clients.
+    errors = [
+        {
+            "loc": ".".join(str(part) for part in error["loc"]),
+            "msg": error["msg"],
+            "type": error["type"],
+        }
+        for error in exc.errors()
+    ]
+    return problem(422, "Validation failed", "Request payload is invalid", errors=errors)
+
+
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Log the full stack trace server-side; return NONE of it to the client.
+    logger.error("unhandled error on %s", request.url.path, exc_info=exc)
+    return problem(500, "Internal server error", "An unexpected error occurred")
+
+
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings()
+    app = FastAPI(
+        title="Northwind Robotics Orders API",
+        version=settings.app_version,
+        lifespan=lifespan,
+        docs_url="/docs",
+    )
+    app.state.settings = settings
+    app.state.ready = False
+
+    # Last added = outermost. Correlation binds the ID first so the timing
+    # log line and all downstream logs carry it.
+    app.add_middleware(TimingMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
+
+    app.add_exception_handler(OrderNotFoundError, order_not_found_handler)
+    app.add_exception_handler(InvalidTransitionError, invalid_transition_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_exception_handler(Exception, unhandled_error_handler)
+
+    # -- operational endpoints ------------------------------------------------
+
+    @app.get("/health", tags=["ops"])
+    async def health() -> dict[str, str]:
+        # Liveness: is the process alive and able to run a coroutine?
+        return {"status": "ok"}
+
+    @app.get("/ready", tags=["ops"])
+    def readiness(request: Request, repo: RepoDep) -> JSONResponse:
+        # Readiness: MAY we receive traffic? Checks dependencies, not the loop.
+        if not request.app.state.ready or not repo.ping():
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "unavailable"},
+            )
+        return JSONResponse(content={"status": "ready"})
+
+    # -- orders CRUD ----------------------------------------------------------
+
+    @app.post(
+        "/orders",
+        response_model=OrderRead,
+        status_code=status.HTTP_201_CREATED,
+        tags=["orders"],
+    )
+    def create_order(payload: OrderCreate, repo: RepoDep) -> OrderRecord:
+        record = OrderRecord(
+            id=repo.new_id(),
+            customer_id=payload.customer_id,
+            lines=payload.lines,
+            status=OrderStatus.PENDING,
+            total_cents=sum(
+                line.quantity * line.unit_price_cents for line in payload.lines
+            ),
+            created_at=datetime.now(timezone.utc),
+            version=1,
+        )
+        return repo.insert(record)
+
+    @app.get("/orders", response_model=list[OrderRead], tags=["orders"])
+    def list_orders(
+        repo: RepoDep,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> list[OrderRecord]:
+        return repo.list(limit=limit, offset=offset)
+
+    @app.get("/orders/{order_id}", response_model=OrderRead, tags=["orders"])
+    def get_order(order_id: str, repo: RepoDep) -> OrderRecord:
+        return repo.get(order_id)
+
+    @app.patch("/orders/{order_id}", response_model=OrderRead, tags=["orders"])
+    def update_order_status(
+        order_id: str, payload: OrderStatusUpdate, repo: RepoDep
+    ) -> OrderRecord:
+        current = repo.get(order_id)
+        return repo.replace(transition(current, payload.status))
+
+    @app.delete("/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT,
+                tags=["orders"])
+    def delete_order(order_id: str, repo: RepoDep) -> Response:
+        repo.delete(order_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/orders-stream", tags=["orders"])
+    def stream_orders(repo: RepoDep) -> StreamingResponse:
+        # Snapshot first; the sync generator below runs on the threadpool.
+        records = repo.list(limit=10_000, offset=0)
+
+        def ndjson() -> Iterator[bytes]:
+            for record in records:
+                # Internal-only fields must not cross the wire on ANY path.
+                line = record.model_dump_json(
+                    by_alias=True, exclude={"warehouse_hint", "fraud_score"}
+                )
+                yield line.encode("utf-8") + b"\n"
+
+        return StreamingResponse(ndjson(), media_type="application/x-ndjson")
+
+    # -- OpenAPI customization -------------------------------------------------
+
+    def custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title="Northwind Robotics Orders API",
+            version=settings.app_version,
+            description=(
+                "Fictional order management for the Northwind Robotics "
+                "parts universe. Synthetic data only."
+            ),
+            routes=app.routes,
+            servers=[
+                {"url": "http://localhost:8000", "description": "local dev"},
+                {"url": "https://api.northwind-robotics.example",
+                 "description": "production (fictional)"},
+            ],
+        )
+        # Document the API-key scheme used by the edge gateway. Enforcement
+        # itself is Chapter 16's subject; here we only publish the contract.
+        schema.setdefault("components", {}).setdefault("securitySchemes", {})[
+            "ApiKeyAuth"
+        ] = {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+        schema["info"]["x-audience"] = "internal"
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+    return app
+
+
+# Module-level instance for ``uvicorn orders_api:app``.
+app = create_app()
+\end{minted}
+
+
+Walk the file once more with the mechanics of
+Section~\ref{sec:ch6-mechanics} in mind; six design decisions deserve a
+second look:
+
+\begin{enumerate}
+  \item \textbf{The factory, not the module global.} \texttt{create\_app}
+        takes a \texttt{Settings} and returns a configured \texttt{FastAPI}.
+        Tests get isolated applications with deterministic state; uvicorn
+        still gets a module-level \texttt{app}. This is the single most
+        important structural habit in the file.
+  \item \textbf{\texttt{OrderCreate} vs.\ \texttt{OrderRead} vs.\
+        \texttt{OrderRecord}.} Three models, three audiences: inbound
+        validation (with a cross-field \texttt{model\_validator}), outbound
+        contract (with a serialization alias), and the internal superset.
+        The \texttt{response\_model=OrderRead} declaration on every route is
+        the firewall between the second and third.
+  \item \textbf{Repositories behind a \texttt{Protocol}.} Routes never name
+        a storage engine; they name the protocol and receive whatever the
+        lifespan constructed (memory or SQLite) --- or whatever a test
+        injected via \texttt{dependency\_overrides}. Deterministic,
+        sequential IDs (\texttt{ord-0001}, \texttt{ord-0002}, \ldots) keep
+        every test assertion exact; a production repository would mint
+        UUIDv7s at the same seam.
+  \item \textbf{\texttt{def} endpoints, on purpose.} \texttt{sqlite3} is a
+        blocking driver, so the CRUD handlers are plain \texttt{def} and run
+        on the threadpool (Section~\ref{sec:ch6-sync-async}). Only
+        \texttt{/health} --- which touches nothing blocking --- is
+        \texttt{async def}.
+  \item \textbf{Errors are mapped, not raised ad hoc.} Domain exceptions
+        (\texttt{OrderNotFoundError}, \texttt{InvalidTransitionError}) are
+        raised deep in the call stack and translated to RFC~9457-shaped
+        problem documents by registered handlers; the catch-all handler logs
+        the full traceback server-side and returns none of it.
+  \item \textbf{The OpenAPI hook publishes the contract.}
+        \texttt{custom\_openapi} adds \texttt{servers}, an
+        \texttt{ApiKeyAuth} security scheme (enforcement is Chapter 16's
+        subject), and an \texttt{x-audience} extension, then caches the
+        schema on \texttt{app.openapi\_schema} so generation happens once.
+\end{enumerate}
+
+\begin{keyconceptbox}
+\textbf{The lifespan is the composition root.} Everything process-lifetime
+--- the settings object, the repository, the logging configuration --- is
+constructed in exactly one place (\texttt{lifespan}/\texttt{create\_app}) and
+\emph{looked up} everywhere else. Dependencies look up; they do not build.
+When you find a dependency constructing its own database pool per request,
+the composition root has been bypassed.
+\end{keyconceptbox}
+
+\subsection{Middleware Deep-Dive: Correlation IDs and Timing}
+\label{sec:ch6-code-middleware}
+
+Both middlewares are written against the raw ASGI protocol --- no FastAPI or
+Starlette imports --- which is exactly the point: at this layer the framework
+\emph{is} the protocol. Study how \texttt{send} is wrapped to intercept
+\texttt{http.response.start} (the only moment headers can still be added),
+and how the correlation middleware guards non-HTTP scopes (lifespan,
+websocket) before touching anything.
+
+\begin{minted}{python}
+"""Pure-ASGI middleware: correlation IDs and request timing.
+
+Both classes implement the ASGI callable protocol directly --
+``__call__(scope, receive, send)`` -- so nothing here depends on FastAPI
+or Starlette. Registration order matters: the LAST middleware added is the
+OUTERMOST (runs first on the request path, last on the response path):
+
+    app.add_middleware(TimingMiddleware)          # added 1st -> inner
+    app.add_middleware(CorrelationIdMiddleware)   # added 2nd -> outer
+
+Because CorrelationIdMiddleware is outermost, the request-id context
+variable is already bound when TimingMiddleware logs, so every access-log
+line carries the correlation ID.
+"""
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+from contextvars import ContextVar
+from typing import Any, Awaitable, Callable, MutableMapping
+
+# The three callables that make up the ASGI protocol surface.
+ASGIScope = MutableMapping[str, Any]
+ASGIMessage = MutableMapping[str, Any]
+ASGIReceive = Callable[[], Awaitable[ASGIMessage]]
+ASGISend = Callable[[ASGIMessage], Awaitable[None]]
+ASGIApp = Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]
+
+# Bound once per request by CorrelationIdMiddleware; read by the JSON log
+# formatter so every log line inside the request carries the same ID.
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+
+logger = logging.getLogger("northwind.access")
+
+
+class CorrelationIdMiddleware:
+    """Extract (or mint) X-Request-Id, bind it, and echo it on the response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend
+    ) -> None:
+        if scope["type"] != "http":  # pass lifespan/websocket through untouched
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        request_id = (
+            headers.get(b"x-request-id", b"").decode("latin-1")
+            or uuid.uuid4().hex[:16]
+        )
+        token = request_id_var.set(request_id)
+        scope["request_id"] = request_id  # visible to the app via request.scope
+
+        async def send_with_request_id(message: ASGIMessage) -> None:
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                message["headers"].append(
+                    (b"x-request-id", request_id.encode("latin-1"))
+                )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        finally:
+            request_id_var.reset(token)  # never leak IDs across requests
+
+
+class TimingMiddleware:
+    """Measure downstream wall time, add X-Process-Time-Ms, log one JSON line."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = time.perf_counter()
+        status_code = 0
+
+        async def send_with_timing(message: ASGIMessage) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                message.setdefault("headers", [])
+                message["headers"].append(
+                    (b"x-process-time-ms", f"{elapsed_ms:.2f}".encode("ascii"))
+                )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_timing)
+        finally:
+            # Logs even on unhandled exceptions (status_code stays 0).
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "request completed",
+                extra={
+                    "method": scope["method"],
+                    "path": scope["path"],
+                    "status_code": status_code,
+                    "elapsed_ms": round(elapsed_ms, 2),
+                    "request_id": request_id_var.get(),
+                },
+            )
+\end{minted}
+
+
+\textbf{Ordering semantics.} \texttt{add\_middleware} wraps the application
+like layers of an onion: the \emph{last} middleware added is the
+\emph{outermost} --- it runs first on the request path and last on the
+response path. The Orders API adds \texttt{TimingMiddleware} first and
+\texttt{CorrelationIdMiddleware} second, so correlation wraps timing: the
+context variable is already bound when the timing middleware emits its
+access-log line, and that line carries \texttt{request\_id}. Reverse the two
+\texttt{add\_middleware} calls and every access log would show
+\texttt{request\_id="-"}. The \texttt{finally} in both classes matters for
+the same reason: an unhandled exception downstream must still reset the
+context variable and must still produce a log line (with
+\texttt{status\_code} left at 0 --- a silent, greppable marker of ``never
+reached response start'').
+
+\begin{warningbox}
+\textbf{\texttt{BaseHTTPMiddleware} vs.\ pure ASGI.} Starlette's
+\texttt{BaseHTTPMiddleware} is convenient (request/response objects instead
+of raw messages) but historically buffered streaming responses, broke
+\texttt{request.context} propagation into background tasks, and added a
+task-hop of overhead per request. Pure-ASGI middleware, as above, has none
+of those costs and forces you to learn the protocol you are operating on.
+Reach for \texttt{BaseHTTPMiddleware} only when the request/response API
+genuinely simplifies the code.
+\end{warningbox}
+
+\subsection{The DI Showcase: Chains, Yield-Cleanup, Caching, Overrides}
+\label{sec:ch6-code-di}
+
+A minimal, self-checking application that isolates the four DI mechanics.
+Run it directly --- \texttt{python di\_showcase.py} --- and it proves its own
+claims with \texttt{TestClient} assertions.
+
+\begin{minted}{python}
+"""Dependency-injection showcase: chains, yield cleanup, caching, overrides.
+
+Self-checking demo (offline, in-process):
+    python di_showcase.py
+"""
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from typing import Annotated, Protocol
+
+from fastapi import Depends, FastAPI
+from fastapi.testclient import TestClient
+
+
+# --- a tiny domain: a quote-of-the-day service --------------------------------
+
+
+class QuoteSource(Protocol):
+    def quote(self) -> str: ...
+
+
+class HandbookQuoteSource:
+    """The 'real' implementation: reads the Northwind SRE handbook."""
+
+    def quote(self) -> str:
+        return "Robots do not panic. -- Northwind SRE handbook"
+
+
+QUOTE_RESOLUTIONS = {"count": 0}  # observable side effect for the caching demo
+
+
+def get_quote_source() -> HandbookQuoteSource:
+    QUOTE_RESOLUTIONS["count"] += 1
+    return HandbookQuoteSource()
+
+
+QuoteDep = Annotated[QuoteSource, Depends(get_quote_source)]
+
+
+def get_audit_trail(source: QuoteDep) -> list[str]:
+    """Sub-dependency: depends on the SAME QuoteSource the handler requests."""
+    return [f"audit: served quote of length {len(source.quote())}"]
+
+
+# --- a yield dependency with guaranteed cleanup --------------------------------
+
+
+def get_connection() -> Iterator[sqlite3.Connection]:
+    """One in-memory SQLite connection per request, closed afterwards."""
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.execute("CREATE TABLE visits (path TEXT)")
+    conn.execute("INSERT INTO visits (path) VALUES ('/demo')")
+    try:
+        yield conn  # the endpoint (and sub-dependencies) run here
+    finally:
+        conn.close()  # runs even when the endpoint raises
+
+
+ConnectionDep = Annotated[sqlite3.Connection, Depends(get_connection)]
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="di-showcase")
+
+    @app.get("/demo")
+    def demo(
+        direct: QuoteDep,  # requested here AND inside get_audit_trail ...
+        audit: Annotated[list[str], Depends(get_audit_trail)],
+        conn: ConnectionDep,
+    ) -> dict[str, object]:
+        rows = conn.execute("SELECT COUNT(*) FROM visits").fetchone()[0]
+        return {
+            "quote": direct.quote(),
+            "audit": audit,
+            "visits": rows,
+            "quote_resolutions": QUOTE_RESOLUTIONS["count"],
+        }
+
+    return app
+
+
+class FallbackQuoteSource:
+    """Test double injected via dependency_overrides."""
+
+    def quote(self) -> str:
+        return "synthetic fallback quote"
+
+
+if __name__ == "__main__":
+    # 1) Per-request caching: the dependency graph requests QuoteSource twice
+    #    (directly + via the audit sub-dependency) yet resolves it ONCE.
+    with TestClient(create_app()) as client:
+        first = client.get("/demo").json()
+        second = client.get("/demo").json()
+    assert first["quote_resolutions"] == 1, first
+    assert second["quote_resolutions"] == 2, second
+    print("per-request caching OK:", first["quote_resolutions"],
+          "->", second["quote_resolutions"])
+
+    # 2) Overrides: swap the implementation without touching route code.
+    app = create_app()
+    app.dependency_overrides[get_quote_source] = FallbackQuoteSource
+    with TestClient(app) as client:
+        body = client.get("/demo").json()
+    assert body["quote"] == "synthetic fallback quote", body
+    print("override OK:", body["quote"])
+\end{minted}
+
+
+Three observations. First, the \texttt{demo} handler requests
+\texttt{QuoteSource} directly \emph{and} transitively through
+\texttt{get\_audit\_trail}, yet \texttt{quote\_resolutions} increments once
+per request --- per-request caching in action. Second, \texttt{get\_connection}
+is a generator dependency: the connection lives exactly one request and its
+\texttt{finally} runs even when the handler raises; this is the pattern for
+sessions, transactions, and locks. Third, \texttt{dependency\_overrides} is
+keyed by the \emph{original callable}, not by name --- override
+\texttt{get\_quote\_source} and every dependent (including
+\texttt{get\_audit\_trail}) sees the replacement, because resolution happens
+through the graph, not through imports.
+
+\subsection{The Test Suite: Offline, In-Process, Deterministic}
+\label{sec:ch6-code-tests}
+
+\texttt{TestClient}~\cite{httpxdocs} runs the real ASGI application
+in-process --- routing, middleware, DI, validation, serialization --- with no
+socket and no network. Used as a context manager it also drives the
+\emph{lifespan}, so startup and graceful shutdown are under test too, not
+just the routes. The suite covers the four contract surfaces that matter:
+happy-path CRUD, validation errors (422), domain errors (404/409), and the
+generated OpenAPI document itself.
+
+\begin{minted}{python}
+"""TestClient suite for the Orders API: fully offline, fully deterministic."""
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+import di_showcase
+from orders_api import (
+    InMemoryOrderRepository,
+    OrderNotFoundError,
+    Settings,
+    create_app,
+    get_repository,
+)
+
+VALID_ORDER = {
+    "customer_id": "Acme-Robotics",
+    "lines": [{"sku": "NWR-1001", "quantity": 2, "unit_price_cents": 4999}],
+}
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    # The context manager drives the lifespan: startup runs, readiness flips,
+    # and shutdown/close is exercised on exit.
+    app = create_app(Settings(repository_backend="memory"))
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+# -- operational endpoints ----------------------------------------------------
+
+
+def test_health_and_readiness(client: TestClient) -> None:
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/ready").json() == {"status": "ready"}
+
+
+def test_readiness_fails_closed(client: TestClient) -> None:
+    client.app.state.ready = False  # simulate mid-shutdown / failed warmup
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
+
+
+# -- CRUD happy paths ----------------------------------------------------------
+
+
+def test_create_order_filters_internal_fields(client: TestClient) -> None:
+    response = client.post("/orders", json=VALID_ORDER)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["id"] == "ord-0001"  # deterministic IDs
+    assert body["status"] == "pending"
+    assert body["total_cents"] == 9998
+    assert body["customerId"] == "acme-robotics"  # alias + normalization
+    assert "customer_id" not in body
+    # response_model=OrderRead strips internal-only fields:
+    assert "warehouse_hint" not in body
+    assert "fraud_score" not in body
+
+
+def test_get_and_list_orders(client: TestClient) -> None:
+    client.post("/orders", json=VALID_ORDER)
+    client.post(
+        "/orders",
+        json={
+            "customer_id": "globex",
+            "lines": [{"sku": "NWR-2002", "quantity": 1, "unit_price_cents": 100}],
+        },
+    )
+    fetched = client.get("/orders/ord-0002")
+    assert fetched.status_code == 200
+    assert fetched.json()["customerId"] == "globex"
+
+    page = client.get("/orders", params={"limit": 1, "offset": 1})
+    assert [o["id"] for o in page.json()] == ["ord-0002"]
+
+
+def test_status_transition_happy_path(client: TestClient) -> None:
+    client.post("/orders", json=VALID_ORDER)
+    confirmed = client.patch("/orders/ord-0001", json={"status": "confirmed"})
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "confirmed"
+    assert confirmed.json()["version"] == 2
+    shipped = client.patch("/orders/ord-0001", json={"status": "shipped"})
+    assert shipped.json()["status"] == "shipped"
+
+
+def test_delete_order_then_404(client: TestClient) -> None:
+    client.post("/orders", json=VALID_ORDER)
+    assert client.delete("/orders/ord-0001").status_code == 204
+    assert client.get("/orders/ord-0001").status_code == 404
+
+
+# -- validation and domain errors ----------------------------------------------
+
+
+def test_invalid_sku_is_a_422_with_sanitized_errors(client: TestClient) -> None:
+    bad = {"customer_id": "acme", "lines": [
+        {"sku": "not-a-sku", "quantity": 1, "unit_price_cents": 100}]}
+    response = client.post("/orders", json=bad)
+    assert response.status_code == 422
+    body = response.json()
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert body["title"] == "Validation failed"
+    assert body["errors"][0]["loc"] == "body.lines.0.sku"
+    assert "ctx" not in body["errors"][0]  # no raw internals leak
+
+
+def test_duplicate_skus_rejected_by_model_validator(client: TestClient) -> None:
+    dup = {"customer_id": "acme", "lines": [
+        {"sku": "NWR-1001", "quantity": 1, "unit_price_cents": 100},
+        {"sku": "NWR-1001", "quantity": 3, "unit_price_cents": 100}]}
+    response = client.post("/orders", json=dup)
+    assert response.status_code == 422
+    assert "duplicate SKU" in response.json()["errors"][0]["msg"]
+
+
+def test_missing_order_is_a_404_problem(client: TestClient) -> None:
+    response = client.get("/orders/ord-9999")
+    assert response.status_code == 404
+    body = response.json()
+    assert body["title"] == "Order not found"
+    assert body["order_id"] == "ord-9999"
+
+
+def test_invalid_transition_is_a_409(client: TestClient) -> None:
+    client.post("/orders", json=VALID_ORDER)
+    response = client.patch("/orders/ord-0001", json={"status": "shipped"})
+    assert response.status_code == 409
+    body = response.json()
+    assert body["current"] == "pending"
+    assert body["target"] == "shipped"
+
+
+# -- middleware -----------------------------------------------------------------
+
+
+def test_correlation_id_echoed(client: TestClient) -> None:
+    response = client.get("/health", headers={"X-Request-Id": "req-abc-123"})
+    assert response.headers["x-request-id"] == "req-abc-123"
+
+
+def test_correlation_id_minted_when_absent(client: TestClient) -> None:
+    response = client.get("/health")
+    assert len(response.headers["x-request-id"]) == 16
+    assert "x-process-time-ms" in response.headers
+
+
+# -- OpenAPI contract ------------------------------------------------------------
+
+
+def test_openapi_schema_is_customized_and_complete(client: TestClient) -> None:
+    schema = client.get("/openapi.json").json()
+    assert schema["info"]["title"] == "Northwind Robotics Orders API"
+    assert schema["info"]["x-audience"] == "internal"
+    assert {p for p in schema["paths"]} >= {
+        "/orders", "/orders/{order_id}", "/health", "/ready", "/orders-stream"}
+    assert schema["components"]["securitySchemes"]["ApiKeyAuth"] == {
+        "type": "apiKey", "in": "header", "name": "X-API-Key"}
+    assert schema["servers"][0]["url"] == "http://localhost:8000"
+    create_op = schema["paths"]["/orders"]["post"]
+    assert "201" in create_op["responses"]  # status codes documented for free
+    assert "422" in create_op["responses"]
+
+
+# -- streaming --------------------------------------------------------------------
+
+
+def test_stream_orders_as_ndjson(client: TestClient) -> None:
+    client.post("/orders", json=VALID_ORDER)
+    client.post("/orders", json={
+        "customer_id": "globex",
+        "lines": [{"sku": "NWR-2002", "quantity": 5, "unit_price_cents": 50}]})
+    response = client.get("/orders-stream")
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    lines = [json.loads(line) for line in response.text.splitlines()]
+    assert [line["id"] for line in lines] == ["ord-0001", "ord-0002"]
+    assert all("fraud_score" not in line for line in lines)
+
+
+# -- the SQLite backend -------------------------------------------------------------
+
+
+def test_sqlite_repository_roundtrip(tmp_path) -> None:
+    settings = Settings(
+        repository_backend="sqlite", sqlite_path=str(tmp_path / "orders.db")
+    )
+    with TestClient(create_app(settings)) as client:
+        assert client.post("/orders", json=VALID_ORDER).status_code == 201
+        body = client.get("/orders/ord-0001").json()
+        assert body["total_cents"] == 9998
+        # lifecycle: shutdown closed the DB, readiness now fails closed
+    assert client.app.state.ready is False
+
+
+# -- dependency overrides --------------------------------------------------------
+
+
+class EmptyRepository(InMemoryOrderRepository):
+    def get(self, order_id: str):  # every lookup misses
+        raise OrderNotFoundError(order_id)
+
+
+def test_dependency_override_swaps_the_repository() -> None:
+    app = create_app(Settings(repository_backend="memory"))
+    app.dependency_overrides[get_repository] = EmptyRepository
+    with TestClient(app) as client:
+        assert client.get("/orders/ord-0001").status_code == 404
+    app.dependency_overrides.clear()
+
+
+def test_di_showcase_caching_and_override() -> None:
+    app = di_showcase.create_app()
+    with TestClient(app) as client:
+        first = client.get("/demo").json()
+    assert first["quote_resolutions"] == 1  # resolved once per request
+
+    app = di_showcase.create_app()
+    app.dependency_overrides[di_showcase.get_quote_source] = (
+        di_showcase.FallbackQuoteSource)
+    with TestClient(app) as client:
+        assert client.get("/demo").json()["quote"] == "synthetic fallback quote"
+\end{minted}
+
+
+Note what the suite asserts and what it refuses to assert. It asserts the
+\emph{contract}: status codes, problem-document shapes, the aliased wire name
+\texttt{customerId}, the \emph{absence} of internal fields, the correlation
+header, and the contents of \texttt{/openapi.json}. It does not assert log
+timestamps, elapsed times, or minted request-ID values --- those are runtime
+facts, not contract facts, and pinning them would make the suite
+non-deterministic. Deterministic repository IDs (\texttt{ord-0001}) are what
+make every other assertion exact.
+
+\begin{examplebox}
+\textbf{Two seams, two styles.} The suite demonstrates both test seams from
+this chapter. The \texttt{client} fixture uses the \emph{factory seam} ---
+\texttt{create\_app(Settings(repository\_backend="memory"))} --- which is the
+right choice when the whole environment changes. The override tests use the
+\emph{override seam} --- \texttt{app.dependency\_overrides[get\_repository] =
+EmptyRepository} --- which is the right choice when one collaborator changes
+and everything else should stay real. Choosing per test keeps suites fast
+\emph{and} honest.
+\end{examplebox}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch6-pitfalls}
+
+Each of these has caused a real incident or a real data leak. They are
+ordered roughly by how expensive they are to discover late.
+
+\subsection*{Blocking the event loop in \texttt{async def} handlers}
+The single most damaging FastAPI mistake. A synchronous database driver, a
+\texttt{requests} call, or a \texttt{time.sleep} inside \texttt{async def}
+does not block one request --- it blocks the worker's entire event loop:
+every in-flight request stalls, health checks time out, and the orchestrator
+concludes the pod is dead. The rule is structural, not stylistic: if any call
+in the handler chain blocks, the handler is \texttt{def}. Audit dependencies
+too --- a blocking \emph{dependency} under an \texttt{async} endpoint blocks
+exactly the same loop.
+
+\subsection*{Leaking stack traces in 500s}
+Starlette's debug mode renders beautiful tracebacks --- including local
+variables, which means connection strings and customer data --- into the HTTP
+response. Production runs with debug off \emph{and} a registered
+\texttt{Exception} handler that logs the traceback server-side and returns a
+generic problem document. ``It only happens on unexpected errors'' is exactly
+when you cannot predict what the frames contain.
+
+\subsection*{Mutable default dependencies}
+\texttt{def endpoint(cache: dict = \{\})} and module-level dependency
+instances shared across requests are the FastAPI flavor of Python's classic
+mutable-default-argument bug, with concurrency on top: two requests mutating
+one dict is a data race that survives your test suite and detonates under
+load. Providers should construct fresh state per request, or delegate
+shared state to a deliberately synchronized process-lifetime resource built
+in the lifespan (like the repository's \texttt{threading.Lock}).
+
+\subsection*{Validation only at the edge, with no domain invariants}
+Field constraints (\texttt{ge=1}, regex patterns) catch malformed
+\emph{shapes}; they cannot catch malformed \emph{meaning}. ``Pending orders
+cannot ship'' and ``an order may not contain the same SKU twice'' are domain
+invariants: the first lives in the \texttt{transition} function, the second
+in a \texttt{model\_validator}. Systems that validate only shapes end up
+enforcing invariants in the database's error messages --- which is to say,
+not enforcing them at all in any way a client can act on.
+
+\subsection*{\texttt{response\_model} drift}
+Declaring \texttt{response\_model} once and never auditing it rots: new
+internal fields get added to the stored model, someone forgets the model is
+returned from a route, and the field leaks. Defenses: keep the outbound
+model (\texttt{OrderRead}) a distinct class from the stored record
+(\texttt{OrderRecord}), and assert field absence in tests --- the suite's
+\texttt{"fraud\_score" not in body} line is a security control, not a style
+test.
+
+\subsection*{Catching broad \texttt{Exception} in handlers}
+\texttt{except Exception: return JSONResponse(...)} inside a handler swallows
+\emph{programming} errors (a typo'd attribute, a violated invariant) together
+with \emph{operational} errors, converting bugs into plausible-looking 200s
+or 500s with no traceback anywhere. Raise specific domain exceptions; let the
+registered handlers map them; let everything else reach the catch-all, where
+it is logged with full context. Broad catches belong at exactly one layer:
+the outermost error handler.
+
+\subsection*{Heavy work at import time / module scope}
+Connecting to a database, reading files, or building a repository at module
+import means: tests cannot import the module without side effects, every
+uvicorn worker re-does the work on fork, and configuration is frozen before
+anyone could inject it. Everything expensive belongs in
+\texttt{create\_app}/\texttt{lifespan}. The module level should contain only
+declarations --- and the single, side-effect-free
+\texttt{app = create\_app()} line for the server's benefit.
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch6-lab}
+
+\subsection{Lab: Stand Up the Orders API and Interrogate Its Contract}
+\label{sec:ch6-lab-run}
+
+\textbf{Objective.} Run the Orders API locally, exercise it with
+\texttt{curl.exe} and \texttt{TestClient}, and inspect the generated OpenAPI
+document --- offline end to end.
+
+\textbf{Setup} (PowerShell):
+
+\begin{minted}{bash}
+mkdir orders-lab; cd orders-lab
+# save orders_api.py, middleware.py, di_showcase.py, test_orders_api.py here
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install "fastapi>=0.110" "uvicorn[standard]>=0.29" "pydantic>=2.7" `
+            "pydantic-settings>=2.2" "httpx>=0.27" "pytest>=8"
+\end{minted}
+
+\textbf{Step 1 --- run the suite.} \texttt{pytest test\_orders\_api.py -q}
+should report 17 passed in about a second, with no network access. Read one
+JSON log line from the output and find its \texttt{request\_id} field.
+
+\textbf{Step 2 --- run the server.}
+
+\begin{minted}{bash}
+uvicorn orders_api:app --port 8000
+\end{minted}
+
+\textbf{Step 3 --- exercise it} (second PowerShell window; note
+\texttt{curl.exe}, not the \texttt{curl} alias):
+
+\begin{minted}{bash}
+curl.exe http://localhost:8000/health
+curl.exe http://localhost:8000/ready
+curl.exe -X POST http://localhost:8000/orders -H "Content-Type: application/json" `
+  -H "X-Request-Id: lab-001" `
+  -d '{"customer_id":"acme","lines":[{"sku":"NWR-1001","quantity":2,"unit_price_cents":4999}]}'
+curl.exe http://localhost:8000/orders/ord-0001
+curl.exe -X PATCH http://localhost:8000/orders/ord-0001 -H "Content-Type: application/json" `
+  -d '{"status":"shipped"}'
+\end{minted}
+
+Observe: the PATCH returns a 409 problem document (\texttt{pending} cannot go
+to \texttt{shipped}); every response echoes \texttt{x-request-id: lab-001};
+and the response body contains \texttt{customerId} --- never
+\texttt{fraud\_score}.
+
+\textbf{Step 4 --- inspect the contract.}
+
+\begin{minted}{bash}
+curl.exe http://localhost:8000/openapi.json -o openapi.json
+\end{minted}
+
+Open \texttt{openapi.json} and locate: the \texttt{servers} array injected by
+\texttt{custom\_openapi}; the \texttt{ApiKeyAuth} entry under
+\texttt{components.securitySchemes}; the 422 response on
+\texttt{POST /orders}; and the \texttt{OrderRead} schema --- confirm
+\texttt{warehouse\_hint} and \texttt{fraud\_score} appear nowhere in it.
+Then open \texttt{http://localhost:8000/docs} and drive the API from the
+generated Swagger UI.
+
+\textbf{Step 5 --- flip the backend.} Stop the server, set
+\texttt{\$env:NWR\_REPOSITORY\_BACKEND="sqlite"} and
+\texttt{\$env:NWR\_SQLITE\_PATH="lab.db"}, restart, and repeat Step 3. No
+code changed; the environment did. That is the 12-factor property made
+visible. Stop with \texttt{Ctrl+C} and watch the shutdown log line --- the
+lifespan's post-\texttt{yield} code running.
+
+\textbf{Acceptance criteria.} You are done when: the suite passes; the 409
+transition error reproduces; a request without \texttt{X-Request-Id} gets a
+minted 16-hex-digit ID back; and you can point at the exact line in
+\texttt{openapi.json} where the alias \texttt{customerId} is declared.
+
+\subsection{Case Study: The Threadpool Exhaustion Incident}
+\label{sec:ch6-case-study}
+
+\textbf{Context.} A robotics-parts fulfillment service --- one uvicorn worker
+class per pod, four pods --- served a warehouse scanning fleet. Its hottest
+endpoint, \texttt{POST /shipments}, was declared \texttt{async def} because
+``async is faster,'' but its body called the synchronous PostgreSQL driver
+(\texttt{psycopg2} without the async wrapper) three times per request.
+
+\textbf{Symptom.} Latency dashboards showed p99 climbing from 40 ms to 30 s
+every day at the 09:00 scanning shift-change, with \emph{zero} 5xx errors ---
+then mass pod restarts as liveness probes (served by the same event loop)
+began timing out. Restarts made it worse: warming pods re-entered a queue
+that was already saturated.
+
+\textbf{Diagnosis.} The blocking driver calls ran \emph{on the event loop},
+so each of the four workers could make progress on exactly one request at a
+time. Effective concurrency per pod was one, not the hundreds the autoscaler
+assumed; Little's Law did the rest. The tell was in the metrics: event-loop
+lag spiked \emph{before} latency did, and per-pod CPU sat near one core ---
+four busy loops, zero parallelism.
+
+\textbf{The botched first fix.} An engineer converted the endpoint to
+\texttt{def}, moving the driver calls to anyio's threadpool --- correct in
+principle. But the 40-thread default was sized for incidental blocking, not
+for the whole workload: at shift change the pool filled, requests queued
+inside it, and latencies still climbed --- now without loop lag to explain
+them. The second-order lesson: the threadpool is a \emph{bounded resource
+with a queue}, and the queue is invisible unless you instrument pool
+occupancy.
+
+\textbf{Resolution.} Three changes, in order of leverage: (1)~the endpoint
+stayed \texttt{def} and the three driver calls were batched into one
+round-trip, cutting thread-seconds per request by three; (2)~the anyio
+thread limiter was raised to match the measured concurrency need, with pool
+occupancy exported as a metric and alerted; (3)~the roadmap item --- an
+async driver end to end, restoring \texttt{async def} honestly --- was
+scheduled rather than assumed free. Post-incident p99 at shift change: 180 ms.
+
+\textbf{Takeaways.} \texttt{async} is a property of your I/O stack, not your
+function keyword; threadpools are capacity you must size and instrument; and
+liveness probes sharing the event loop turn overload into restart loops ---
+one more reason \texttt{/health} checks nothing external.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch6-self-assessment}
+
+Work these before the interview vault; they are designed to be answered with
+code, not prose.
+
+\begin{enumerate}[label=\textbf{E\arabic*.}, leftmargin=1.2cm, itemsep=0.6em]
+  \item \textbf{Header dependency.} Add a dependency
+        \texttt{get\_api\_version} that reads an \texttt{X-API-Version}
+        header, defaults to \texttt{"1"}, and is available to every route via
+        a typed alias. Write a test asserting the default and the override.
+  \item \textbf{Idempotent create.} Extend \texttt{POST /orders} to accept an
+        \texttt{Idempotency-Key} header: a repeated key with an identical
+        body returns the original 201 response; the same key with a different
+        body returns 409. (Chapter 10 generalizes this.)
+  \item \textbf{Blocking-proof the loop.} Add a middleware that measures
+        event-loop lag (schedule \texttt{asyncio.sleep(0)} and time the
+        delay) and emits it as a log field. Demonstrate the lag with a
+        deliberately blocking endpoint, then fix the endpoint.
+  \item \textbf{Scope audit.} Write a websocket-free pure-ASGI middleware
+        that counts requests per path and exposes the counts on
+        \texttt{/metrics} (Prometheus text format). Why must the counter live
+        on \texttt{app.state} rather than as a middleware attribute?
+        (Hint: middleware instances are per-application; be precise about
+        which \emph{object} would be wrong and why.)
+  \item \textbf{Validator choreography.} Move the duplicate-SKU rule from
+        \texttt{OrderCreate}'s \texttt{model\_validator} to the repository's
+        \texttt{insert}, raising a domain error mapped to 422. Which location
+        is correct, and what does your answer imply about invariants that
+        span \emph{multiple} aggregates (e.g.\ ``a customer may have at most
+        five open orders'')?
+  \item \textbf{Streaming discipline.} Modify \texttt{/orders-stream} to page
+        the repository (\texttt{limit}/\texttt{offset} batches of 100) inside
+        the generator instead of snapshotting first. What failure mode does
+        snapshotting prevent during a long stream with concurrent writes?
+  \item \textbf{Shutdown honesty.} Write a test that opens a streaming
+        response, exits the \texttt{TestClient} context mid-stream, and
+        asserts the repository's \texttt{close()} ran. What does uvicorn do
+        differently from \texttt{TestClient} here, and where is that
+        documented?
+  \item \textbf{Contract pinning.} Add a test that diffs
+        \texttt{/openapi.json} against a checked-in snapshot and fails on any
+        change. Then make a deliberate breaking change (rename a response
+        field) and watch it catch you. This is design-first governance on a
+        code-first toolchain.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch6-interview}
+
+Thirty-six questions, ordered junior $\to$ staff. Answer aloud before
+reading.
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.3cm, itemsep=0.8em]
+
+\item \textbf{What is ASGI, and how does it differ from WSGI?}\\
+The Asynchronous Server Gateway Interface is the contract between an HTTP
+server and a Python application: a single awaitable callable
+\texttt{app(scope, receive, send)}. WSGI is a synchronous, two-argument
+callable (\texttt{environ, start\_response}) that handles exactly one
+request per call and cannot represent websockets, server push, or
+long-lived connections. ASGI's event-channel design supports all of those
+and lets one process interleave thousands of concurrent connections on a
+single event loop.
+
+\item \textbf{Explain the ASGI \texttt{scope}/\texttt{receive}/\texttt{send}
+protocol.}\\
+\texttt{scope} is a connection-lifetime dict: \texttt{type}
+(\texttt{"http"}, \texttt{"websocket"}, \texttt{"lifespan"}), method, path,
+headers, plus the \texttt{state} bag shared with the lifespan.
+\texttt{receive()} is an awaitable yielding the next inbound event ---
+\texttt{http.request} body chunks (with \texttt{more\_body}) or
+\texttt{http.disconnect}. \texttt{send()} awaits outbound events: exactly one
+\texttt{http.response.start} (status + headers) followed by
+\texttt{http.response.body} chunks. Every header mutation must happen before
+\texttt{response.start} is sent --- that is why middleware wraps
+\texttt{send} and intercepts that one message.
+
+\item \textbf{Where does FastAPI end and Starlette begin?}\\
+Starlette owns the ASGI surface: routing, middleware, requests, responses,
+lifespan, \texttt{TestClient}. FastAPI is a Starlette subclass plus a
+compiler: it analyzes your type annotations to build the dependency graph,
+run Pydantic validation, serialize through \texttt{response\_model}, and
+emit OpenAPI. If a feature touches sockets, paths, or the lifespan, it is
+Starlette; if it touches your function signature, it is FastAPI.
+
+\item \textbf{What happens when a \texttt{def} endpoint runs?}\\
+FastAPI detects the plain function and, instead of awaiting it, submits it
+to anyio's threadpool and awaits the \emph{future} on the event loop. The
+loop stays responsive; the handler runs concurrently with other requests on
+a worker thread. The pool is bounded (default 40 tokens), so at most 40
+blocking calls run concurrently per worker --- beyond that, requests queue
+inside the pool.
+
+\item \textbf{When should an endpoint be \texttt{async def}?}\\
+When every blocking operation in its call chain --- including dependencies
+--- is awaitable: an async database driver, an async \texttt{httpx} client,
+\texttt{asyncio.sleep}. If any link blocks, the endpoint must be
+\texttt{def}. The keyword describes your I/O stack, not your performance
+ambitions.
+
+\item \textbf{What is the default threadpool size for \texttt{def}
+endpoints, and how do you change it?}\\
+Forty threads per worker (anyio's default limiter). Raise it in the lifespan
+via anyio's thread limiter API
+(\texttt{anyio.to\_thread.current\_default\_thread\_limiter().total\_tokens
+= N}) and treat the number as a capacity decision you instrument, not a
+magic constant.
+
+\item \textbf{What happens if you call a blocking driver inside
+\texttt{async def}?}\\
+The event loop stalls for the duration of the call. Every concurrent
+request on that worker --- including liveness probes --- freezes, latencies
+climb without errors, and orchestrators start killing healthy-looking pods.
+It is the classic FastAPI production incident; the fix is \texttt{def}
+(threadpool) or a genuinely async driver.
+
+\item \textbf{Walk the full request lifecycle of \texttt{POST /orders}.}\\
+Uvicorn parses bytes and builds the HTTP scope; the middleware stack runs
+outermost-first (correlation, then timing); the Starlette router matches
+\texttt{/orders} + POST; FastAPI resolves the DI graph (\texttt{get\_settings},
+\texttt{get\_repository}, cached per request); Pydantic validates
+\texttt{OrderCreate} (422 on failure, short-circuiting the handler); the
+\texttt{def} handler runs on the threadpool; the returned
+\texttt{OrderRecord} is filtered through \texttt{response\_model=OrderRead}
+and serialized by alias; middleware wraps up on the way out (timing logs,
+correlation echoes the ID); uvicorn writes bytes.
+
+\item \textbf{How does FastAPI's DI resolve sub-dependencies?}\\
+Recursively: a dependency's own signature is analyzed, so
+\texttt{Depends} can appear inside providers. FastAPI flattens the resulting
+DAG at route-registration time and, per request, executes it depth-first
+with a per-request cache keyed by the provider callable --- a shared
+sub-dependency requested twice runs once and both consumers see the same
+instance.
+
+\item \textbf{What is per-request caching of dependencies, and when does it
+not apply?}\\
+Within one request, each provider executes at most once; the result is
+reused everywhere it is depended upon. It does \emph{not} apply across
+requests (no cross-request cache), and you can opt out per use with
+\texttt{Depends(provider, use\_cache=False)} --- needed, for example, when a
+provider mutates state and two consumers genuinely need independent
+instances.
+
+\item \textbf{How do \texttt{yield} dependencies work, and when does cleanup
+run?}\\
+The provider runs to its \texttt{yield}, the yielded value is injected, the
+handler and response complete, and then the code after \texttt{yield} runs
+--- in LIFO order across the graph, and in a \texttt{finally} sense: it runs
+even when the handler raised. Use it for closing connections, committing or
+rolling back transactions, and releasing locks. Never put logic after the
+\texttt{yield} that must affect the response --- the response is already
+sent.
+
+\item \textbf{How do \texttt{dependency\_overrides} work?}\\
+\texttt{app.dependency\_overrides} maps the original provider callable to a
+replacement callable with a compatible signature. Resolution consults the
+map first, so overriding a provider replaces it everywhere in the graph,
+including inside sub-dependencies. Clear the map after the test
+(\texttt{app.dependency\_overrides.clear()}); leaking overrides between
+tests is a classic source of order-dependent suites.
+
+\item \textbf{Pydantic v1 vs.\ v2: what changed, and why is validation
+faster?}\\
+v2 moved the validation engine to \texttt{pydantic-core}, written in Rust,
+making typical model validation 5--20$\times$ faster. The Python API was
+modernized: \texttt{@field\_validator}/\texttt{@model\_validator} replace
+\texttt{@validator}/\texttt{@root\_validator}, \texttt{model\_dump()}/
+\texttt{model\_validate()} replace \texttt{.dict()}/\texttt{parse\_obj()},
+\texttt{model\_config = ConfigDict(...)} replaces \texttt{class Config},
+and v1 shims raise hard errors rather than silently changing behavior.
+
+\item \textbf{\texttt{field\_validator} vs.\ \texttt{model\_validator} ---
+when each?}\\
+Field validators see one field, before or after type coercion; use them for
+per-field normalization and rules (trim, lowercase, format checks). Model
+validators see the coerced whole model; use them for cross-field invariants
+(duplicate detection, ``end after start''). Putting a cross-field rule in a
+field validator fails because sibling fields may not exist yet.
+
+\item \textbf{What is \texttt{serialization\_alias} and when do you use
+it?}\\
+It decouples the Python attribute name from the wire name: Python code uses
+\texttt{customer\_id}; the JSON body carries \texttt{customerId}. FastAPI
+serializes response models with \texttt{by\_alias=True}, so the alias is
+what clients see. Use it when the contract's naming convention (camelCase)
+differs from Python's, without giving up either.
+
+\item \textbf{Why does \texttt{response\_model} matter for security?}\\
+Because it is a filter, not just documentation: FastAPI re-validates handler
+return values against it and drops undeclared fields. Returning an internal
+record that happens to carry \texttt{fraud\_score} or password hashes is
+safe only because the declared outbound model omits them. Without
+\texttt{response\_model}, whatever the ORM object grew last sprint ships to
+clients --- a leak that raises no exception.
+
+\item \textbf{What happens if you omit \texttt{response\_model}?}\\
+FastAPI serializes whatever the handler returns (via its JSON encoder) and
+documents the response as unconstrained. Three costs: internal fields can
+leak, the OpenAPI contract loses its response schema (breaking client
+generation), and serialization bugs surface at runtime instead of at
+response-validation time.
+
+\item \textbf{How are 422 errors produced, and how do you customize
+them?}\\
+When Pydantic validation of path, query, header, or body parameters fails,
+FastAPI raises \texttt{RequestValidationError} before the handler runs, and
+the default handler returns 422 with the error array. Register your own
+handler to reshape it (the Orders API emits an RFC~9457-shaped problem with
+a sanitized \texttt{errors} array); sanitize --- raw Pydantic errors can
+carry internal context objects that do not belong on the wire.
+
+\item \textbf{Liveness vs.\ readiness vs.\ startup probes --- distinguish
+them.}\\
+Startup: has initialization finished (gates the other two). Liveness: is the
+process wedged --- fail it and the orchestrator restarts you; check nothing
+external. Readiness: may traffic be routed here --- checks dependencies and
+warmup; fail it and you are drained, not restarted. Conflating readiness
+into liveness turns a database outage into a restart loop.
+
+\item \textbf{How does graceful shutdown work in uvicorn?}\\
+On SIGTERM, uvicorn stops accepting connections, sends the ASGI
+\texttt{lifespan.shutdown} message, and waits (bounded) for in-flight
+requests. Your lifespan's post-\texttt{yield} code runs: flip readiness off
+first so the load balancer drains you, then close repositories and flush
+logs. SIGKILL after the grace period takes what it takes --- anything
+unflushed is lost.
+
+\item \textbf{\texttt{BackgroundTasks} vs.\ a real task queue?}\\
+\texttt{BackgroundTasks} runs callables after the response, in-process: no
+retries, no persistence, lost on deploy. Suitable for best-effort side
+effects (cache warming, metrics flushes). Work whose loss is a business
+event --- billing, provisioning, notification --- needs a durable queue with
+retries and dead-lettering (Celery, arq, outbox pattern). The deciding
+question: may this work vanish if the process dies one millisecond after the
+response?
+
+\item \textbf{Design-first vs.\ code-first --- argue both sides.}\\
+Design-first: the OpenAPI document is authored and reviewed before code;
+consumers start against mocks immediately; the contract cannot drift
+silently --- at the cost of front-loaded design and a spec/implementation
+skew risk. Code-first: annotations generate the contract, so it is exact by
+construction and iteration is cheap --- at the cost of an ``accidental
+contract'' that changes whenever code does. The synthesis: code-first
+mechanics, design-first governance --- pin and review the generated schema
+in CI.
+
+\item \textbf{Name the top-level keys of an OpenAPI 3.1 document.}\\
+\texttt{openapi} (spec version), \texttt{info} (title, API version),
+\texttt{servers}, \texttt{paths} (path items holding per-method operations),
+\texttt{components} (\texttt{schemas}, \texttt{parameters},
+\texttt{responses}, \texttt{securitySchemes}, \ldots), \texttt{security},
+\texttt{tags}, and \texttt{externalDocs}~\cite{openapi31}.
+
+\item \textbf{How does FastAPI generate the OpenAPI schema, and how do you
+customize it?}\\
+At request time for \texttt{/openapi.json}, \texttt{app.openapi()} walks the
+registered routes and compiles annotations into the document, caching the
+result on \texttt{app.openapi\_schema}. Customize by assigning a replacement
+callable to \texttt{app.openapi}: call \texttt{get\_openapi(...)}, mutate
+the dict (servers, security schemes, \texttt{x-*} extensions), cache, and
+return it. Respect the cache or you regenerate on every docs request.
+
+\item \textbf{What changed between OpenAPI 3.0 and 3.1?}\\
+3.1 aligned \texttt{components.schemas} with full JSON Schema 2020-12: real
+\texttt{type} arrays (\texttt{type: [string, "null"]}) replace the 3.0
+\texttt{nullable} keyword; \texttt{prefixItems}, \texttt{unevaluatedProperties},
+and \texttt{\$defs} become legal; and the \texttt{examples} arrays semantics
+were clarified. For API authors the practical headline is that one schema
+dialect now serves validation, documentation, and codegen.
+
+\item \textbf{Explain 12-factor configuration and pydantic-settings' source
+layering.}\\
+Config that varies per deploy lives in the environment, not in
+code~\cite{twelvefactor}. \texttt{BaseSettings} declares typed fields with
+defaults and an \texttt{env\_prefix}; resolution layers sources with
+precedence: explicit init arguments, environment variables, \texttt{.env}
+file, then field defaults. Tests inject init arguments; production injects
+the environment; nobody parses \texttt{os.environ} ad hoc.
+
+\item \textbf{Where do secrets live, and what must never be logged?}\\
+Secret material enters via the environment (or a secrets manager the
+environment points to) at deploy time; never in source control, never in
+\texttt{.env} files committed to the repo, never in log lines, exception
+messages, or error responses. Settings objects may reference secrets (paths,
+key names); the debug-mode 500 page and careless \texttt{repr} of settings
+are the two classic leak paths.
+
+\item \textbf{Why an application factory instead of module-level app
+construction?}\\
+A factory (\texttt{create\_app(settings)}) gives every test an isolated,
+deterministically configured application and makes the composition root
+explicit. Module-level construction freezes configuration at import time,
+couples import to side effects, and makes parallel tests share state. Keep
+exactly one module-level line --- \texttt{app = create\_app()} --- for
+\texttt{uvicorn module:app}.
+
+\item \textbf{How do you test FastAPI offline?}\\
+With \texttt{TestClient} (or httpx's \texttt{ASGITransport}): the real ASGI
+app runs in-process --- routing, middleware, DI, validation, serialization
+--- over no socket. Use the client as a context manager so the lifespan
+(startup/shutdown) runs; inject test state through the factory or
+\texttt{dependency\_overrides}; and assert the contract --- status codes,
+error shapes, header echoes, and the OpenAPI document itself.
+
+\item \textbf{How would you put a correlation ID on every log line of a
+request?}\\
+Outermost middleware extracts or mints \texttt{X-Request-Id} and binds it to
+a \texttt{contextvars.ContextVar}; a logging \texttt{Formatter} reads the
+variable for every record; the middleware echoes the ID on the response and
+resets the variable in a \texttt{finally}. Context variables (not
+thread-locals) because the request is a coroutine, not a thread.
+
+\item \textbf{Explain middleware ordering semantics.}\\
+\texttt{add\_middleware} wraps the app like an onion: the \emph{last} added
+is \emph{outermost} --- first on the request path, last on the response
+path. Order matters for causality: correlation must wrap timing if the
+timing log should carry the request ID; authentication must wrap anything
+that trusts identity.
+
+\item \textbf{\texttt{BaseHTTPMiddleware} vs.\ pure-ASGI middleware?}\\
+\texttt{BaseHTTPMiddleware} trades the raw protocol for request/response
+objects --- convenient, but it historically buffered streaming responses,
+added a task hop, and had context-propagation bugs with background tasks.
+Pure-ASGI middleware (implement \texttt{\_\_call\_\_(scope, receive, send)})
+has none of those costs and composes at exactly one layer. Prefer pure ASGI
+unless the request/response API materially simplifies the code.
+
+\item \textbf{Why is catching broad \texttt{Exception} inside handlers an
+anti-pattern?}\\
+It collapses programming errors and operational errors into one path: a
+typo returns a plausible 500 (or worse, a 200-with-fallback) with the
+traceback swallowed, and the error budget lies. Raise specific domain
+exceptions, register handlers that map them to precise statuses, and let a
+single catch-all log-and-sanitize everything unexpected. Broad catch at
+exactly one layer.
+
+\item \textbf{How does \texttt{StreamingResponse} work, and what are its
+constraints?}\\
+It takes an iterator of byte chunks and sends one
+\texttt{http.response.body} message per chunk with \texttt{more\_body=True},
+keeping memory constant regardless of payload size. A sync generator runs on
+the threadpool; an \texttt{async} generator on the loop --- so an async
+generator must not block. Headers (including \texttt{Content-Type}) are
+committed at \texttt{response.start}, before the first chunk: you cannot
+change your mind mid-stream, and mid-stream errors can only truncate, not
+re-status.
+
+\item \textbf{How would you size the threadpool for a def-heavy service?}\\
+With Little's Law: required slots $\approx \lambda \cdot L$, with $\lambda$
+the peak arrival rate and $L$ the mean blocking-service time per request in
+seconds. Validate empirically: instrument pool occupancy and queue depth,
+load-test at 2$\times$ expected peak, and set a limit that saturates
+\emph{downstream} before it saturates memory --- a 400-thread pool in front
+of a 50-connection database just moves the queue.
+
+\item \textbf{How would you migrate a blocking production service to async
+safely?}\\
+Instrument first: event-loop lag, threadpool occupancy, downstream latency.
+Migrate the leaves, not the trunk: replace the driver with its async
+equivalent behind the repository protocol, keeping \texttt{def} endpoints.
+Only when the whole chain is awaitable do you flip handlers to
+\texttt{async def}, one route at a time, behind a config flag, with the
+blocking variant still deployable. Gate the rollout on loop-lag SLOs; the
+anti-pattern is the big-bang rewrite where a single missed blocking call
+takes down the loop.
+
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch6-bibliography}
+
+\begin{itemize}[itemsep=0.4em]
+  \item \textbf{FastAPI documentation}~\cite{fastapidocs} --- the reference
+        for path operations, dependencies, middleware, testing, and OpenAPI
+        customization. Read the \emph{Advanced User Guide} sections on
+        dependencies with \texttt{yield} and lifespan; they are this
+        chapter's mechanics in the official voice.
+  \item \textbf{Starlette documentation} --- the ASGI toolkit underneath:
+        routing, middleware, \texttt{TestClient}, lifespan, and the
+        pure-ASGI middleware style used in
+        Section~\ref{sec:ch6-code-middleware}.
+  \item \textbf{Uvicorn documentation} --- deployment, workers, the
+        \texttt{[standard]} extras (\texttt{uvloop}, \texttt{httptools}),
+        and the lifespan/timeout settings that govern graceful shutdown.
+  \item \textbf{Pydantic v2 documentation}~\cite{pydanticdocs} ---
+        validators, serialization aliases, \texttt{ConfigDict}, and the
+        migration guide from v1. The \emph{pydantic-core} architecture notes
+        explain where the 5--20$\times$ speedup comes from.
+  \item \textbf{pydantic-settings documentation} --- source layering,
+        \texttt{env\_prefix}, \texttt{.env} files, and secrets handling.
+  \item \textbf{The OpenAPI 3.1 specification}~\cite{openapi31} --- the
+        normative contract grammar; read the \emph{Paths}, \emph{Operation},
+        \emph{Components}, and \emph{Security Scheme} objects alongside
+        Section~\ref{sec:ch6-openapi}.
+  \item \textbf{The Twelve-Factor App}~\cite{twelvefactor} --- factor III
+        (config in the environment) is the configuration section's backbone;
+        factor IX (disposability) is the graceful-shutdown section's.
+  \item \textbf{RFC 9110 (HTTP Semantics)}~\cite{rfc9110} --- \S15 for the
+        status-code semantics this chapter's routes implement; the status
+        registry entries for 201, 204, 404, 409, and 422.
+  \item \textbf{\emph{Building Microservices}, 2nd ed., Sam
+        Newman}~\cite{newman2021microservices} --- the organizational frame:
+        service boundaries, contract thinking, and why ``the API is the
+        product'' outlives any framework choice.
+  \item \textbf{httpx documentation}~\cite{httpxdocs} --- the
+        \texttt{ASGITransport} mechanism underneath \texttt{TestClient}, and
+        the async client patterns that Chapter 2 introduced.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch6-capstones}
+
+Exactly five projects, progressive. All are offline, deterministic, and use
+only synthetic Northwind Robotics data. Place deliverables under
+\texttt{capstones\textbackslash{}capstone\_NN\_<slug>\textbackslash{}} per the
+workspace conventions.
+
+\subsection{Capstone 1: Todo API with a Full Test Suite [junior]}
+\textbf{Objective.} Build a minimal but \emph{complete} FastAPI service: a
+todo-list API with create, read, list, complete, and delete operations, an
+in-memory repository behind a protocol, and a TestClient suite that covers
+every route.\\
+\textbf{Inputs/Datasets.} A seeded fixture of 20 synthetic todos (titles from
+the Northwind Robotics maintenance log, e.g.\ ``recalibrate arm 7'').\\
+\textbf{Steps.} (1)~Model \texttt{TodoCreate}/\texttt{TodoRead} with
+constraints (title 3--80 chars; \texttt{priority} 1--5). (2)~Implement the
+repository protocol and an in-memory implementation with deterministic IDs.
+(3)~Wire routes with \texttt{response\_model} on all of them and correct
+status codes (201/204/404/422). (4)~Write at least 10 tests: every happy
+path, a 404, and two distinct 422s.\\
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] \texttt{pytest -q} passes offline; IDs are deterministic
+        per fresh app.
+  \item[$\square$] Every route declares \texttt{response\_model}; no internal
+        field appears in any response body.
+  \item[$\square$] The OpenAPI schema documents a 422 response for every
+        route that accepts a body.
+\end{itemize}
+\textbf{Stretch Goals.} Add the correlation-ID middleware and assert the
+header echo; add a \texttt{/todos-stream} NDJSON endpoint with a streaming
+test.
+
+\subsection{Capstone 2: Inventory API with a SQLite Repository [mid]}
+\textbf{Objective.} Rebuild the Orders pattern for warehouse inventory:
+parts, stock levels, and reservations --- with \emph{both} repositories
+(in-memory and SQLite) behind one protocol, selected by
+\texttt{pydantic-settings}, and a readiness probe that actually exercises the
+database.\\
+\textbf{Inputs/Datasets.} A generated fixture of 500 synthetic parts
+(\texttt{NWR-0001}\ldots\texttt{NWR-0500}) with stock counts; 1\,\%
+deliberately invalid rows for negative tests.\\
+\textbf{Steps.} (1)~Model \texttt{Part}, \texttt{Reservation}, and their
+create/read counterparts. (2)~Implement both repositories; the SQLite one
+must create its schema idempotently. (3)~Implement reservation as a
+\emph{domain transition} with invariants (cannot reserve more than on-hand;
+cannot cancel a shipped reservation) mapped to 409. (4)~Make \texttt{/ready}
+fail when the database file is unreadable. (5)~Test both backends through
+the factory seam.\\
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] The same suite passes against \texttt{memory} and
+        \texttt{sqlite} settings with zero code changes.
+  \item[$\square$] Oversubscribing a part returns 409 with a problem document
+        naming the part and the shortfall.
+  \item[$\square$] Readiness returns 503 when the SQLite path is a directory
+        (probing the failure path, not mocking it).
+\end{itemize}
+\textbf{Stretch Goals.} Add optimistic concurrency: a \texttt{version} field
+checked on update (412 Precondition Failed on mismatch; Chapter 10
+generalizes).
+
+\subsection{Capstone 3: Plugin-Style Dependency-Injection Architecture [senior]}
+\textbf{Objective.} Refactor the Orders API so that \emph{repositories,
+notifiers, and pricing policies are plugins}: implementations register
+themselves in a module-level registry, settings select them by name, and the
+lifespan composes the chosen set --- with a test suite that swaps each plugin
+via \texttt{dependency\_overrides} without touching route code.\\
+\textbf{Inputs/Datasets.} The chapter's Orders API; two synthetic notifier
+plugins (``webhook-log'' and ``audit-ndjson'') and two pricing policies
+(``list'' and ``fleet-discount'').\\
+\textbf{Steps.} (1)~Define protocols for \texttt{Notifier} and
+\texttt{PricingPolicy}. (2)~Build a registry (name $\to$ factory) with
+fail-fast errors on unknown names. (3)~Extend \texttt{Settings} with
+\texttt{notifier: str} and \texttt{pricing: str}; the lifespan instantiates
+the selection. (4)~Thread both through DI into the order lifecycle (price on
+create, notify on status change). (5)~Prove isolation: each plugin has tests
+using overrides, and one test boots every registry entry.\\
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Adding a new plugin touches exactly one new file plus one
+        registry line --- no route or factory edits.
+  \item[$\square$] Booting with \texttt{NWR\_NOTIFIER=bogus} fails at startup
+        with an actionable error, not at first request.
+  \item[$\square$] Override tests demonstrate that notifications and pricing
+        are replaceable per test, per request graph.
+\end{itemize}
+\textbf{Stretch Goals.} Emit the effective plugin set and versions into
+\texttt{/health} and into a startup log line; add a contract test that every
+registered notifier satisfies the protocol against a shared behavioral suite.
+
+\subsection{Capstone 4: Async Migration of a Blocking Service [senior]}
+\textbf{Objective.} Take a deliberately blocking service (synchronous SQLite
+repository, \texttt{time.sleep}-simulated latency) and migrate it to
+correct-concurrency form, \emph{proving} each step with an event-loop-lag
+middleware and a concurrency benchmark --- the Section~\ref{sec:ch6-case-study}
+incident, reproduced and fixed in miniature.\\
+\textbf{Inputs/Datasets.} A provided baseline service where
+\texttt{async def} handlers call blocking code (the bug); a seeded dataset of
+1{,}000 orders; a benchmark script issuing 200 concurrent requests through
+\texttt{ASGITransport}.\\
+\textbf{Steps.} (1)~Write the loop-lag middleware and the benchmark; capture
+baseline p50/p99 and loop lag. (2)~Fix variant A: handlers become
+\texttt{def} (threadpool). Re-measure. (3)~Fix variant B: replace the
+repository with an \texttt{asyncio.to\_thread}-wrapped implementation behind
+the same protocol and restore \texttt{async def}. Re-measure. (4)~Write the
+decision memo: which variant ships, and what limiter setting, with the
+numbers.\\
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Baseline shows loop lag $> 5\,$s under load; both fixed
+        variants show lag $< 50\,$ms.
+  \item[$\square$] p99 under 200-way concurrency improves by an order of
+        magnitude; results are reproducible across three runs.
+  \item[$\square$] The memo cites pool occupancy evidence, not folklore.
+\end{itemize}
+\textbf{Stretch Goals.} Add a third variant using a genuinely async store
+(an \texttt{asyncio.Queue}-backed fake) and explain the remaining
+differences; instrument and graph threadpool queue depth during the
+transition.
+
+\subsection{Capstone 5: OpenAPI-First Generator Round-Trip [staff]}
+\textbf{Objective.} Close the design-first loop: author
+\texttt{orders.openapi.yaml} by hand for a superset of the chapter's API
+(adding shipments), generate a FastAPI skeleton and a typed Python client
+from it, implement the skeleton, and build a CI-style gate that fails when
+the running app's schema diverges from the authored contract --- then perform
+a governed contract change end to end.\\
+\textbf{Inputs/Datasets.} The authored spec; the chapter's Orders API as the
+seed implementation; a ``change request'' adding an optional
+\texttt{priority} field to orders (backward compatible) and one renaming a
+field (breaking).\\
+\textbf{Steps.} (1)~Author the 3.1 spec with \texttt{servers},
+\texttt{components}, \texttt{securitySchemes}, and complete error responses.
+(2)~Generate or hand-synthesize the skeleton from the spec; implement against
+it. (3)~Implement the diff gate: fetch \texttt{/openapi.json}, compare
+against the pinned spec, classify every difference as breaking or
+compatible. (4)~Apply the compatible change: spec first, code second, gate
+green. (5)~Attempt the breaking change and document how the gate stops it.\\
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] The gate classifies the seeded compatible and breaking
+        changes correctly, with human-readable reasons.
+  \item[$\square$] The running service passes its own gate; the pinned spec
+        and the generated schema round-trip with zero diffs.
+  \item[$\square$] The typed client consumes the service in a TestClient
+        integration test with no hand-edited models.
+  \item[$\square$] A written policy states who may bump which version number
+        and when (feeding Chapter 9 and Chapter 20).
+\end{itemize}
+\textbf{Stretch Goals.} Emit the diff report as an RFC~9457 problem document;
+extend the gate to detect \emph{undocumented} endpoints (in code, absent
+from spec) as a distinct violation class.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch6-deps}
+
+Everything in this chapter pins to a minimal \texttt{requirements.txt}:
+
+\begin{minted}{text}
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.7
+pydantic-settings>=2.2
+httpx>=0.27
+pytest>=8
+\end{minted}
+
+Install on Windows/PowerShell:
+
+\begin{minted}{bash}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{fastapi}
+\textbf{Description.} The framework itself: annotation-driven routing,
+dependency injection, Pydantic integration, and OpenAPI generation on top of
+Starlette~\cite{fastapidocs}.\\
+\textbf{Why included.} The subject of the chapter; every listing runs on it.\\
+\textbf{Alternatives.} \textbf{Flask} (synchronous WSGI, vast ecosystem, no
+native validation or contract generation), \textbf{Django Ninja}
+(FastAPI-style typed APIs inside the Django universe --- choose when you
+already pay for Django), \textbf{Litestar} (comparable typed-ASGI framework
+with a batteries-included posture), \textbf{aiohttp} (lower-level async
+framework for when you want to own the stack).\\
+\textbf{Installation.} \texttt{pip install "fastapi>=0.110"}.
+
+\subsection{uvicorn[standard]}
+\textbf{Description.} The ASGI server: sockets, TLS, HTTP parsing, and the
+event loop. The \texttt{[standard]} extra pulls in \texttt{uvloop} and
+\texttt{httptools} --- the C-accelerated loop policy and parser used in
+production.\\
+\textbf{Why included.} Runs the app in the lab; its lifespan and shutdown
+semantics are part of the chapter's operational surface. Not needed by the
+test suite --- \texttt{TestClient} speaks ASGI directly, a fact worth
+noticing.\\
+\textbf{Alternatives.} \textbf{hypercorn} (HTTP/2 and HTTP/3 support),
+\textbf{daphne} (Channels ecosystem), \textbf{granian} (Rust-based server).\\
+\textbf{Installation.} \texttt{pip install "uvicorn[standard]>=0.29"} (quote
+the brackets in PowerShell).
+
+\subsection{pydantic}
+\textbf{Description.} Data validation and settings-independent modeling:
+the \texttt{BaseModel}, validators, and serialization machinery the whole
+contract is built from~\cite{pydanticdocs}. v2's \texttt{pydantic-core} is a
+Rust engine; validation speed stops being a design constraint.\\
+\textbf{Why included.} Every inbound payload, outbound contract, and stored
+record in the chapter is a Pydantic model; \texttt{response\_model} filtering
+is a Pydantic behavior.\\
+\textbf{Alternatives.} \textbf{attrs + cattrs} (class authoring plus
+explicit (de)serialization; more assembly, less magic), \textbf{msgspec}
+(extremely fast, schema-first, stricter), \textbf{dataclasses + manual
+checks} (the honest baseline you now know how to beat).\\
+\textbf{Installation.} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{pydantic-settings}
+\textbf{Description.} The \texttt{BaseSettings} layer: typed, environment-
+layered configuration with prefixes, \texttt{.env} files, and explicit
+precedence --- 12-factor factor III as a library~\cite{twelvefactor}.\\
+\textbf{Why included.} The Orders API's \texttt{Settings} is its composition
+root input; the test suite's determinism depends on injecting it explicitly.\\
+\textbf{Alternatives.} \textbf{dynaconf} (multi-format, heavier),
+\textbf{environs} (thin env parsing), \textbf{os.environ plus discipline}
+(viable until the first time you need types or layering --- usually week
+two).\\
+\textbf{Installation.} \texttt{pip install "pydantic-settings>=2.2"}.
+
+\subsection{httpx}
+\textbf{Description.} The HTTP client whose \texttt{ASGITransport} powers
+\texttt{TestClient}~\cite{httpxdocs}: requests are dispatched straight into
+the ASGI callable, no socket involved.\\
+\textbf{Why included.} Offline testing is this chapter's non-negotiable;
+httpx is also the client library of Chapter 2, so one mental model serves
+both directions of the wire.\\
+\textbf{Alternatives.} \textbf{requests} (synchronous, no ASGI transport ---
+fine for scripting, wrong here), \textbf{aiohttp} client (async, different
+API).\\
+\textbf{Installation.} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest}
+\textbf{Description.} The test runner: fixtures, parametrization, and the
+\texttt{tmp\_path} fixture the SQLite test uses for hermetic file state.\\
+\textbf{Why included.} The chapter's entire verification story --- 17 tests,
+offline, one second --- is a pytest suite; Chapters 19 builds the full
+quality-engineering practice on it.\\
+\textbf{Alternatives.} \textbf{unittest} (stdlib, zero install, more
+ceremony), \textbf{nose2} (largely historical).\\
+\textbf{Installation.} \texttt{pip install "pytest>=8"}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch6-summary}
+
+\begin{itemize}[itemsep=0.4em]
+  \item \textbf{The contract is the product.} Design-first and code-first
+        differ in who authors the OpenAPI document, not in whether it exists;
+        pin, review, and CI-assert the generated schema and you get code-first
+        speed with design-first governance.
+  \item \textbf{ASGI is three callables.} \texttt{scope}, \texttt{receive},
+        \texttt{send} --- uvicorn translates bytes to events, Starlette routes
+        them, FastAPI compiles your annotations around them, and one event
+        loop per worker runs the whole show.
+  \item \textbf{\texttt{async} describes your I/O stack, not your wishes.}
+        Any blocking link makes the endpoint \texttt{def}; the 40-thread
+        pool is capacity you must size and instrument, as the threadpool
+        exhaustion incident demonstrates.
+  \item \textbf{DI is a per-request DAG with seams.} Sub-dependencies resolve
+        depth-first, cache once per request, clean up after the response via
+        \texttt{yield}, and swap wholesale via
+        \texttt{dependency\_overrides}.
+  \item \textbf{Pydantic v2 is the validation boundary and
+        \texttt{response\_model} is the security boundary.} Field validators
+        normalize, model validators enforce invariants, aliases decouple
+        names, and the response model guarantees internal fields never reach
+        the wire.
+  \item \textbf{Operations are designed, not bolted on.} Settings through the
+        environment, JSON logs with correlation IDs, three probes with three
+        distinct meanings, and a lifespan that flips readiness before it
+        closes anything.
+  \item \textbf{Test the contract in-process.} \texttt{TestClient} drives the
+        real app --- middleware, DI, validation, lifespan --- offline; assert
+        status codes, error shapes, header echoes, and the OpenAPI document
+        itself.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch6-quickref}
+
+\subsection*{Endpoint Decision Table}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Situation} & \textbf{Reach for} \\
+    \midrule
+    Async I/O end-to-end (async driver, \texttt{httpx}) & \texttt{async def} endpoint, awaited on the loop. \\
+    Any blocking call (sync driver, \texttt{requests}) & \texttt{def} endpoint --- the threadpool absorbs it. \\
+    CPU-bound work & Neither: subprocess or task queue; the loop and the pool are both wrong. \\
+    Best-effort side effect after response & \texttt{BackgroundTasks}. \\
+    Work that must survive a deploy & Durable task queue / outbox (Chapter 11). \\
+    Constant-memory large payload & \texttt{StreamingResponse}; sync generator $=$ threadpool, async $=$ loop. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Endpoint and execution-model decisions at a glance.}
+\end{table}
+
+\subsection*{Dependency-Injection Cheat-Sheet}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Mechanism} & \textbf{Rule to remember} \\
+    \midrule
+    \texttt{Annotated[T, Depends(p)]} & Declare once as a type alias; reuse everywhere. \\
+    Sub-dependencies & Providers can \texttt{Depends} too; the graph is flattened and resolved depth-first. \\
+    Per-request cache & Each provider runs at most once per request; \texttt{use\_cache=False} opts out. \\
+    \texttt{yield} cleanup & Post-\texttt{yield} runs after the response, LIFO, even on exceptions. \\
+    Process-lifetime state & Build in \texttt{lifespan}, store on \texttt{app.state}, look up via providers. \\
+    Test seam & \texttt{app.dependency\_overrides[original] = fake}; clear after the test. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{DI rules that prevent the common incidents.}
+\end{table}
+
+\subsection*{Lifecycle Ordering}
+\begin{enumerate}
+  \item Uvicorn parses bytes $\to$ builds the HTTP \texttt{scope}.
+  \item Middleware, outermost first (last \texttt{add\_middleware} is outermost).
+  \item Starlette router matches path and method.
+  \item DI graph resolves (per-request cache populated).
+  \item Pydantic validates inputs --- 422 short-circuits here.
+  \item Handler runs: \texttt{async def} on the loop, \texttt{def} on the pool.
+  \item Return value filtered through \texttt{response\_model}, serialized by alias.
+  \item Middleware unwinds (headers already committed at
+        \texttt{http.response.start}).
+  \item \texttt{yield}-dependency cleanup runs (LIFO).
+  \item Background tasks run; on SIGTERM the lifespan's post-\texttt{yield}
+        code runs last.
+\end{enumerate}
+
+\input{chapters/_standard_addendum}

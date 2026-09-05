@@ -1,0 +1,87 @@
+openapi: 3.1.0
+info:
+  title: Northwind Robotics Telemetry API
+  version: 1.1.0
+  description: >-
+    Batch ingestion and querying of synthetic robot telemetry streams
+    (motor current, battery voltage, wheel odometry).
+  contact:
+    name: Telemetry Platform Team
+    email: telemetry@northwind-robotics.example
+  x-lifecycle:
+    state: published
+    owner: team-telemetry
+servers:
+  - url: https://api.northwind-robotics.example/telemetry/v1
+    description: Production (synthetic)
+paths:
+  /telemetry-readings:
+    get:
+      operationId: listTelemetryReadings
+      summary: List telemetry readings with cursor pagination
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of telemetry readings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadingPage'
+        default:
+          description: Unexpected error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  schemas:
+    Reading:
+      type: object
+      required: [robotId, recordedAt, metric, value]
+      properties:
+        robotId:
+          type: string
+        recordedAt:
+          type: string
+          format: date-time
+        metric:
+          type: string
+          x-classification: internal
+        value:
+          type: number
+    ReadingPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reading'
+        nextCursor:
+          type: string
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string

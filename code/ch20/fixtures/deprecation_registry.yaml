@@ -1,0 +1,42 @@
+# Synthetic deprecation campaign registry for the legacy Fleet API v1.
+api: fleet
+version: v1
+replacement: v2
+announce_date: "2026-03-02"
+kill_date: "2026-09-01"   # hard sunset: version returns HTTP 410 after this
+consumers:
+  - name: fleet-dashboard
+    owner: team-telemetry
+    tier: internal
+    status: migrated
+    weekly_calls: 0
+    last_contact: "2026-05-04"
+    notes: Cut over to v2 in sprint 12.
+  - name: maintenance-planner
+    owner: team-operations
+    tier: internal
+    status: in_progress
+    weekly_calls: 8200
+    last_contact: "2026-06-29"
+    notes: Blocked on v2 bulk endpoint; ETA 2026-08-01.
+  - name: partner-robologix
+    owner: external:robologix
+    tier: external
+    status: in_progress
+    weekly_calls: 41000
+    last_contact: "2026-06-21"
+    notes: Contracted migration window ends 2026-08-15.
+  - name: warehouse-scanner
+    owner: team-warehouse
+    tier: internal
+    status: not_started
+    weekly_calls: 1300
+    last_contact: "2026-04-10"
+    notes: Team dissolved; ownership transferred to team-fleet-platform.
+  - name: legacy-billing-hook
+    owner: unknown
+    tier: internal
+    status: unresponsive
+    weekly_calls: 95
+    last_contact: null
+    notes: Discovered via gateway telemetry; no owner in catalog. Shadow API!

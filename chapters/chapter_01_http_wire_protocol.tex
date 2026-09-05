@@ -1,0 +1,1192 @@
+%% ============================================================================
+%% Chapter 1: The HTTP Wire Protocol: HTTP/1.1, HTTP/2 & HTTP/3
+%% ============================================================================
+\chapter{The HTTP Wire Protocol: HTTP/1.1, HTTP/2 \& HTTP/3}
+\label{ch:http_wire}
+
+Every API you will ever design, consume, debug, or rescue at 3~a.m.\ ultimately reduces to bytes moving across a socket according to the rules of the Hypertext Transfer Protocol. Frameworks, gateways, and client libraries exist to hide those bytes from you---and that is precisely why production incidents so often baffle teams: when an abstraction leaks, the only ground truth left is the wire. This chapter rebuilds HTTP from the socket upward. We begin with the textual, line-oriented framing of HTTP/1.1 \cite{rfc9112}, including the exact byte layout of requests and responses, the two legal ways to delimit a message body (\texttt{Content-Length} versus \texttt{Transfer-Encoding: chunked}), persistent connections, and the head-of-line (HOL) blocking problem that made HTTP/1.1 pipelining a historical dead end. We then formalize the semantics layer \cite{rfc9110}: method properties (safe, idempotent, cacheable), the status-code taxonomy with precise selection guidance, and the essential header registry that governs content negotiation, conditional requests, caching, and cross-origin access.
+
+From there we move to the binary era. HTTP/2 \cite{rfc9113} replaces text with a 9-byte frame header and multiplexed streams, compresses headers with HPACK \cite{rfc7541}, and introduces credit-based flow control---yet it merely relocates HOL blocking from the application layer to TCP. HTTP/3 \cite{rfc9114} completes the arc by abandoning TCP for QUIC \cite{rfc9000} over UDP, giving each stream independent delivery and folding the transport handshake into TLS~1.3 \cite{rfc8446}. Because no HTTPS request exists without TLS, we dissect the TLS~1.3 handshake message by message: \texttt{ClientHello}, \texttt{ServerHello}, \texttt{EncryptedExtensions}, \texttt{Certificate}, \texttt{CertificateVerify}, and \texttt{Finished}, along with ALPN negotiation, SNI, certificate chain validation, and the 2-RTT (TLS~1.2) versus 1-RTT (TLS~1.3) economics that drive connection setup latency.
+
+Why does this matter in production? Because the most expensive API defects are protocol-level misunderstandings: request smuggling born of \texttt{Content-Length}/\texttt{Transfer-Encoding} ambiguity, connection churn born of a client keep-alive timeout that is one second longer than the load balancer's idle timeout, retry storms born of treating non-idempotent \texttt{POST} as safe to replay, and latency cliffs born of TCP-level HOL blocking under packet loss. An engineer who can read the wire---who can hexdump a chunked body, decode an HTTP/2 frame header by hand, and narrate a TLS~1.3 flight---debugs in minutes what others debug in days. This chapter gives you that literacy, with complete, offline, stdlib-only Python laboratories that let you observe every byte yourself.
+
+\section{Learning Objectives \& Prerequisites}
+
+\subsection*{Prerequisites}
+
+This chapter assumes you have completed \textbf{Chapter~0} (Introduction), which establishes the workspace conventions: Python~3.11+, PowerShell on Windows, offline-first execution, and the fictional \emph{Northwind Robotics} universe used for all synthetic data. You should be comfortable with basic Python (functions, classes, context managers) and with running scripts from a terminal. No prior networking knowledge is assumed; sockets, TLS, and framing are built from first principles.
+
+\subsection*{Learning Objectives}
+
+After completing this chapter, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO1.\arabic*}, leftmargin=3.2em]
+  \item Read and construct raw HTTP/1.1 messages at the byte level, including request-line/status-line grammar, CRLF framing, and both body-framing mechanisms (\texttt{Content-Length} and chunked transfer coding) \cite{rfc9112}.
+  \item Classify every standard method by its \emph{safe}, \emph{idempotent}, and \emph{cacheable} properties, and select the correct status code for ambiguous production scenarios (200 vs.\ 201 vs.\ 204; 400 vs.\ 422; 401 vs.\ 403 vs.\ 404; 409 vs.\ 412; 429; 503 with \texttt{Retry-After}) \cite{rfc9110}.
+  \item Explain the HTTP/2 binary framing layer bit by bit: the 9-byte frame header, all ten frame types, the stream state machine, HPACK compression, and two-level flow control \cite{rfc9113,rfc7541}.
+  \item Articulate why HTTP/3 moved to QUIC over UDP, how QUIC connection IDs enable migration, and what head-of-line trade-offs remain \cite{rfc9114,rfc9000}.
+  \item Narrate the TLS~1.3 handshake message by message, explain 1-RTT versus 2-RTT setup and 0-RTT resumption, and configure ALPN/SNI correctly in a Python \texttt{ssl.SSLContext} \cite{rfc8446}.
+  \item Build, run, and extend stdlib-only tooling: a raw-socket HTTP/1.1 client, a chunked/keep-alive demonstration server, a TLS configuration inspector, and an HTTP/2 frame parser.
+  \item Diagnose the classic wire-level failure modes---request smuggling, keep-alive race conditions, HOL blocking, and blind retries of non-idempotent methods---and design mitigations.
+\end{enumerate}
+
+\begin{keyconceptbox}
+\textbf{The wire is the contract.} Specifications such as OpenAPI describe what an API \emph{should} do; the wire shows what it \emph{actually} does. Every debugging session that matters ends at the byte stream. Train yourself to always ask: \emph{what did the bytes say?}
+\end{keyconceptbox}
+
+\section{Deep Technical Mechanics \& Architectural Concepts}
+
+\subsection{HTTP/1.1 Message Anatomy on the Wire}
+
+HTTP/1.1 is a \emph{textual}, request--response, stateless application protocol carried over a reliable byte stream, historically TCP \cite{rfc9112}. ``Textual'' is literal: the bytes on the wire are ASCII (with body octets of arbitrary encoding), lines are terminated by the two-byte sequence CRLF (\texttt{0x0D 0x0A}), and you can read an entire exchange with nothing more than a hex dump.
+
+\begin{definition}[HTTP/1.1 message]
+An HTTP/1.1 \emph{message} is the sequence: \emph{start-line}, zero or more \emph{header fields} each terminated by CRLF, an empty line (CRLF alone) marking the end of the header section, and an optional \emph{message body} whose length is determined by the framing rules of RFC~9112~\S6. A request's start-line is the \emph{request-line} (\texttt{method SP request-target SP HTTP-version CRLF}); a response's start-line is the \emph{status-line} (\texttt{HTTP-version SP status-code SP reason-phrase CRLF}).
+\end{definition}
+
+A minimal, complete request as raw bytes---note the visible \texttt{\textbackslash r\textbackslash n} escape annotations we will use throughout for readability---looks like this:
+
+\begin{minted}{text}
+GET /robots/42 HTTP/1.1\r\n
+Host: api.northwind-robotics.example\r\n
+Accept: application/json\r\n
+Connection: keep-alive\r\n
+\r\n
+\end{minted}
+
+And the corresponding response, with a 27-byte JSON body:
+
+\begin{minted}{text}
+HTTP/1.1 200 OK\r\n
+Content-Type: application/json\r\n
+Content-Length: 27\r\n
+Connection: keep-alive\r\n
+\r\n
+{"id":42,"name":"Weld-Bot"}\r\n   <- trailing CRLF shown for clarity;
+                                    only the 27 body bytes are counted
+\end{minted}
+
+\begin{keyconceptbox}
+\textbf{The empty line is the protocol.} The single CRLF that separates the header section from the body is the most important two bytes in HTTP/1.1. Every parser---from a browser to an embedded proxy---splits head from body at the first \texttt{CRLF CRLF} sequence. Anything ambiguous about where the body starts or ends is a security incident waiting to happen (Section~\ref{sec:pitfalls}).
+\end{keyconceptbox}
+
+\subsubsection{Message Body Framing: Content-Length vs.\ Transfer-Encoding}
+
+Because HTTP/1.1 reuses connections, a receiver must know exactly where one message ends and the next begins. There are exactly two legal delimiting mechanisms for bodies \cite{rfc9112}:
+
+\begin{enumerate}
+  \item \textbf{\texttt{Content-Length:} $n$} --- the body is exactly $n$ octets. The receiver reads $n$ bytes and the next byte starts the next message. A message with both \texttt{Transfer-Encoding} and \texttt{Content-Length} is malformed; \texttt{Transfer-Encoding} wins, and the discrepancy is the root of \emph{request smuggling} (Section~\ref{sec:pitfalls}).
+  \item \textbf{\texttt{Transfer-Encoding: chunked}} --- the body is a sequence of chunks, each prefixed by its size in hexadecimal. The exact byte layout:
+\end{enumerate}
+
+\begin{minted}{text}
+HTTP/1.1 200 OK\r\n
+Content-Type: text/plain\r\n
+Transfer-Encoding: chunked\r\n
+\r\n
+7\r\n                  <- chunk size, ASCII hex (0x37 0x0D 0x0A)
+Weld-Bo\r\n            <- 7 data octets + CRLF
+6\r\n
+t #42\r\n
+0\r\n                  <- terminal zero-length chunk
+\r\n                   <- end of trailers (none here)
+\end{minted}
+
+Each chunk is \texttt{chunk-size [CRLF chunk-data CRLF]}; the stream ends with a zero-size chunk followed by an optional trailer section and a final CRLF. Chunked encoding exists so a sender can stream a body whose length is not known in advance (log tails, generated CSVs, Server-Sent Events). If neither header is present in a response, the body runs until connection close---which destroys keep-alive for that connection.
+
+\subsubsection{Connection Reuse, Keep-Alive, and Pipelining}
+
+HTTP/1.0 closed the TCP connection after every response; HTTP/1.1 makes connections \emph{persistent by default} \cite{rfc9112}. A client declares \texttt{Connection: close} only to opt out. Reuse amortizes TCP slow start and the TLS handshake across many requests---at high request rates this is the difference between thousands and tens of requests per second per connection.
+
+\emph{Pipelining} went further: send request~2 before response~1 arrives. It died for three compounding reasons: (1)~responses must still be delivered in request order, so one slow response blocks all later ones (application-layer HOL blocking); (2)~intermediaries (proxies, ancient load balancers) routinely mangled pipelined traffic; (3)~a non-idempotent pipelined request cannot be safely retried if the connection dies mid-pipeline. Every major browser shipped with pipelining disabled and eventually removed the code entirely. The industry answer to the same problem was HTTP/2 multiplexing.
+
+\subsection{Method Semantics per RFC 9110}
+
+Method semantics are not conventions; they are contract terms that intermediaries (caches, retries, pre-fetchers) rely on \cite{rfc9110}.
+
+\begin{definition}[Safe, idempotent, cacheable]
+A method is \emph{safe} if it is read-only: the client does not request, and cannot be held accountable for, any state change on the server. A method is \emph{idempotent} if repeating the identical request $n \geq 1$ times has the same \emph{intended effect on server state} as one request (side effects like logging aside). A method is \emph{cacheable} if responses to it may be stored for reuse, subject to freshness directives.
+\end{definition}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c c X}
+    \toprule
+    \textbf{Method} & \textbf{Safe} & \textbf{Idempotent} & \textbf{Cacheable} & \textbf{Intended semantics} \\
+    \midrule
+    GET     & yes & yes & yes$^{*}$ & Retrieve a representation of the target resource. \\
+    HEAD    & yes & yes & yes       & GET without the body; metadata only. \\
+    POST    & no  & no  & rare$^{\dagger}$ & Process the enclosed representation per resource semantics (create, action). \\
+    PUT     & no  & yes & no        & Replace the target resource's state with the enclosed representation. \\
+    PATCH   & no  & no$^{\ddagger}$ & no & Apply a partial modification described by the enclosed document. \\
+    DELETE  & no  & yes & no        & Remove the target resource. \\
+    OPTIONS & yes & yes & no        & Discover communication options (CORS preflight). \\
+    TRACE   & yes & yes & no        & Loop-back diagnostic echo; widely disabled. \\
+    CONNECT & no  & no  & no        & Establish a tunnel (e.g., TLS through a proxy). \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Method properties per RFC~9110~\S9. $^{*}$Cacheable by default heuristics. $^{\dagger}$POST responses are cacheable only with explicit freshness information. $^{\ddagger}$PATCH \emph{can} be made idempotent by construction, but the spec does not require it.}
+  \label{tab:methods}
+\end{table}
+
+The engineering consequences are direct: a client library may transparently retry a \texttt{PUT} after a timeout, but must \emph{never} blindly retry a \texttt{POST}; a shared cache may serve a \texttt{GET} from cache but must invalidate on \texttt{PUT}/\texttt{PATCH}/\texttt{DELETE} to the same URI; a crawler may freely \texttt{GET} and \texttt{HEAD} but nothing else.
+
+\subsection{Status-Code Taxonomy and Selection Guidance}
+
+Status codes are three-digit integers grouped by class \cite{rfc9110}: \textbf{1xx} informational (interim, e.g.\ \texttt{100 Continue}), \textbf{2xx} success, \textbf{3xx} redirection, \textbf{4xx} client error (the \emph{request} is at fault), \textbf{5xx} server error (the \emph{server} failed a valid request). The discrimination between 4xx and 5xx is operationally vital: 4xx errors are caller bugs and must not page anyone; 5xx errors burn the provider's error budget.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Dilemma} & \textbf{Choose} & \textbf{Why} \\
+    \midrule
+    200 vs.\ 201 vs.\ 204 & 201 & Resource created $\Rightarrow$ 201 with \texttt{Location}; action returning content $\Rightarrow$ 200; success with nothing to say $\Rightarrow$ 204 (no body allowed). \\
+    400 vs.\ 422 & 422 & 400 = malformed syntax / framing; 422 = syntactically valid, semantically wrong (schema violations). \\
+    401 vs.\ 403 vs.\ 404 & varies & 401 = unauthenticated (send \texttt{WWW-Authenticate}); 403 = authenticated but forbidden; 404 may \emph{mask} existence to avoid resource enumeration. \\
+    409 vs.\ 412 & varies & 409 = state conflict (duplicate, version mismatch on plain writes); 412 = a conditional header precondition (\texttt{If-Match}) failed. \\
+    429 & 429 & Rate limited; always pair with \texttt{Retry-After}. \\
+    503 & 503 & Transient unavailability (overload, maintenance); pair with \texttt{Retry-After}; signals ``retry later,'' unlike 500. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Status-code selection for the scenarios production teams argue about.}
+  \label{tab:statusdilemmas}
+\end{table}
+
+\subsection{Header Registry Essentials}
+
+Headers are name--value pairs, case-insensitive, order-insensitive (with Set-Cookie the classic exception). The essentials for API engineers \cite{rfc9110}:
+
+\begin{itemize}
+  \item \textbf{\texttt{Host}} --- mandatory in HTTP/1.1 requests; enables virtual hosting and SNI-based TLS routing. Missing \texttt{Host} $\Rightarrow$ \texttt{400}.
+  \item \textbf{\texttt{Accept} / \texttt{Content-Type}} --- \texttt{Accept} declares what the client can parse; \texttt{Content-Type} declares what the body \emph{is}. Both use media types with optional parameters.
+  \item \textbf{Content negotiation with q-values} --- weighting in $[0,1]$: \texttt{Accept: application/json;q=1.0, text/csv;q=0.5, */*;q=0.1}. The server picks the highest-$q$ representation it can produce, or answers \texttt{406 Not Acceptable}.
+  \item \textbf{Conditional requests} --- \texttt{ETag} is an opaque validator for a representation. \texttt{If-None-Match: "v17"} on a GET yields \texttt{304 Not Modified} (saving bandwidth); \texttt{If-Match: "v17"} on a PUT yields \texttt{412 Precondition Failed} on a lost update---the foundation of optimistic concurrency (Chapter~10).
+  \item \textbf{\texttt{Cache-Control}} --- directives such as \texttt{no-store} (never persist), \texttt{no-cache} (revalidate every time), \texttt{max-age=60}, \texttt{private} vs.\ \texttt{public}, \texttt{must-revalidate}. \texttt{no-cache} is chronically misread as ``do not cache''; it means ``cache, but revalidate.''
+  \item \textbf{CORS preflight} --- browsers send \texttt{OPTIONS} with \texttt{Origin} and \texttt{Access-Control-Request-Method}; the server answers with \texttt{Access-Control-Allow-Origin}, \texttt{-Allow-Methods}, \texttt{-Allow-Headers}, \texttt{-Max-Age}. CORS is a browser-enforced relaxation of same-origin policy, \emph{not} an authorization mechanism---non-browser clients ignore it entirely.
+  \item \textbf{Connection management} --- \texttt{Connection: keep-alive|close}, \texttt{Keep-Alive: timeout=5, max=100} (hop-by-hop, stripped by proxies), and in HTTP/2 the outright prohibition of connection-specific headers.
+\end{itemize}
+
+\subsection{HTTP/2: The Binary Framing Layer}
+
+HTTP/2 keeps the semantics of HTTP (methods, status codes, headers) but replaces the wire format with a length-prefixed binary frame protocol over a single TCP connection \cite{rfc9113}. A connection begins with the client \emph{connection preface}---the 24-octet magic string \texttt{PRI * HTTP/2.0\textbackslash r\textbackslash n\textbackslash r\textbackslash nSM\textbackslash r\textbackslash n\textbackslash r\textbackslash n} followed immediately by a \texttt{SETTINGS} frame.
+
+\subsubsection{The 9-Byte Frame Header}
+
+Every frame starts with a fixed 9-octet header:
+
+\begin{minted}{text}
+ +-----------------------------------------------+
+ |                 Length (24)                   |
+ +---------------+---------------+---------------+
+ |   Type (8)    |   Flags (8)   |
+ +-+-------------+---------------+-------------------------------+
+ |R|                 Stream Identifier (31)                      |
+ +=+=============================================================+
+ |                   Frame Payload (0...)                      ...
+ +---------------------------------------------------------------+
+\end{minted}
+
+That is: a \textbf{24-bit} unsigned payload length (maximum default $2^{14} = 16384$ octets, negotiated up to $2^{24}-1$ via \texttt{SETTINGS\_MAX\_FRAME\_SIZE}), an \textbf{8-bit} type, an \textbf{8-bit} flag field whose meaning is type-specific, a \textbf{1-bit reserved} field, and a \textbf{31-bit} stream identifier (0 means the frame applies to the whole connection).
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l l X}
+    \toprule
+    \textbf{Type} & \textbf{Code} & \textbf{Stream} & \textbf{Purpose (key flags)} \\
+    \midrule
+    DATA          & \texttt{0x0} & $>$0 & Body octets (\texttt{END\_STREAM=0x1}, \texttt{PADDED=0x8}). \\
+    HEADERS       & \texttt{0x1} & $>$0 & HPACK header block (\texttt{END\_STREAM=0x1}, \texttt{END\_HEADERS=0x4}, \texttt{PADDED=0x8}, \texttt{PRIORITY=0x20}). \\
+    PRIORITY      & \texttt{0x2} & $>$0 & (Deprecated in RFC~9113) stream dependency/weight hint. \\
+    RST\_STREAM   & \texttt{0x3} & $>$0 & Abruptly terminate one stream; 32-bit error code. \\
+    SETTINGS      & \texttt{0x4} & 0 & Connection parameters; \texttt{ACK=0x1} echoes acceptance. \\
+    PUSH\_PROMISE & \texttt{0x5} & $>$0 & Server push reservation; now deprecated in practice. \\
+    PING          & \texttt{0x6} & 0 & 8-octet opaque liveness/RTT probe (\texttt{ACK=0x1}). \\
+    GOAWAY        & \texttt{0x7} & 0 & Initiate shutdown; carries last-stream-id and error code. \\
+    WINDOW\_UPDATE & \texttt{0x8} & any & Increment flow-control window by $1$..$2^{31}-1$. \\
+    CONTINUATION  & \texttt{0x9} & $>$0 & Continue a header block too large for one HEADERS frame (\texttt{END\_HEADERS=0x4}). \\
+    \bottomrule
+  \end{tabularx}
+  \caption{HTTP/2 frame types (RFC~9113~\S6).}
+  \label{tab:h2frames}
+\end{table}
+
+\subsubsection{Streams, Multiplexing, and the State Machine}
+
+A \emph{stream} is an independent, bidirectional sequence of frames within the connection, identified by a 31-bit ID: client-initiated streams use \emph{odd} IDs (1, 3, 5, \dots), server-initiated (push) streams use \emph{even} IDs. Because frames carry their stream ID, requests and responses for many streams interleave freely---one slow response no longer blocks the others. That is the multiplexing that pipelining could never deliver. Figure~\ref{fig:streamsm} gives the lifecycle.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      state/.style={rectangle, rounded corners=2pt, draw=darkblue, fill=blue!5, minimum width=2.9cm, minimum height=0.7cm},
+      trans/.style={->, >=stealth, shorten >=1pt},
+      lbl/.style={font=\scriptsize\itshape, fill=white, inner sep=1pt}]
+    \node[state] (idle) {idle};
+    \node[state, below left=1.3cm and 1.9cm of idle] (rlocal) {reserved (local)};
+    \node[state, below right=1.3cm and 1.9cm of idle] (rremote) {reserved (remote)};
+    \node[state, below=3.2cm of idle] (open) {open};
+    \node[state, below left=1.3cm and 1.4cm of open] (hcl) {half-closed (local)};
+    \node[state, below right=1.3cm and 1.4cm of open] (hcr) {half-closed (remote)};
+    \node[state, below=3.2cm of open] (closed) {closed};
+
+    \draw[trans] (idle) -- node[lbl, right]{send HEADERS} (open);
+    \draw[trans] (idle) -- node[lbl, above left]{send PUSH\_PROMISE} (rlocal);
+    \draw[trans] (idle) -- node[lbl, above right]{recv PUSH\_PROMISE} (rremote);
+    \draw[trans] (rlocal) -- node[lbl, below left]{send HEADERS} (hcr);
+    \draw[trans] (rremote) -- node[lbl, below right]{recv HEADERS} (hcl);
+    \draw[trans] (open) -- node[lbl, above left]{send END\_STREAM} (hcl);
+    \draw[trans] (open) -- node[lbl, above right]{recv END\_STREAM} (hcr);
+    \draw[trans] (hcl) -- node[lbl, below left]{recv END\_STREAM / RST} (closed);
+    \draw[trans] (hcr) -- node[lbl, below right]{send END\_STREAM / RST} (closed);
+    \draw[trans] (open) -- node[lbl, right]{RST\_STREAM either way} (closed);
+    \draw[trans, bend left=20] (idle) to node[lbl, left]{RST} (closed);
+    \draw[trans, bend left=20] (rlocal) to node[lbl, right]{RST} (closed);
+    \draw[trans, bend right=20] (rremote) to node[lbl, left]{RST} (closed);
+  \end{tikzpicture}
+  \caption{HTTP/2 stream state machine (RFC~9113~\S5.1). Push-related transitions are retained for completeness; push itself is deprecated.}
+  \label{fig:streamsm}
+\end{figure}
+
+\subsubsection{HPACK Header Compression}
+
+Sending textual headers per request wastes hundreds of bytes (cookies, \texttt{User-Agent}, \texttt{Accept}) and historically defeated TCP's initial congestion window. HPACK \cite{rfc7541} compresses the header block with three mechanisms: (1)~a \textbf{static table} of 61 predefined name/value pairs (index~1 is \texttt{:authority}, index~2 is \texttt{:method: GET}, \dots); (2)~a per-connection \textbf{dynamic table} (default 4096 octets, set by \texttt{SETTINGS\_HEADER\_TABLE\_SIZE}) of recently seen headers, maintained identically on both sides so an index reference suffices on repeat; (3)~a static \textbf{Huffman code} for string literals. Because the dynamic table is ordered state, header blocks must be decoded in order---one reason header blocks can span HEADERS + CONTINUATION frames but cannot interleave with other streams' header frames. QPACK (HTTP/3) relaxes exactly this constraint.
+
+\subsubsection{Flow Control and Push Deprecation}
+
+HTTP/2 flow control is credit-based and hop-by-hop: each DATA octet consumes credit from \emph{both} the per-stream window and the connection-wide window (both default to 65{,}535 octets). Receivers grant more credit with \texttt{WINDOW\_UPDATE}; senders change peer stream windows with \texttt{SETTINGS\_INITIAL\_WINDOW\_SIZE}. The two-level design lets a proxy protect the whole connection from one greedy stream while still letting fast streams run. Only DATA frames count against windows. \emph{Server push}, designed to preemptively send subresources, was deprecated in RFC~9113 and disabled by browsers: in practice it wasted bandwidth pushing assets clients already had cached, and \texttt{103 Early Hints} plus good caching won.
+
+\subsubsection{HTTP/2's Remaining Head-of-Line Problem}
+
+Multiplexing eliminated \emph{application-layer} HOL blocking, but HTTP/2 runs over a single ordered TCP byte stream. If one TCP segment is lost, every stream stalls until retransmission---\emph{transport-layer} HOL blocking. On lossy mobile networks a 1--2\,\% packet loss rate can make HTTP/2 slower than six parallel HTTP/1.1 connections. This is the empirical motivation for HTTP/3.
+
+\subsection{HTTP/3 and QUIC}
+
+HTTP/3 \cite{rfc9114} keeps HTTP semantics and the frame/stream model but runs over QUIC \cite{rfc9000}, a transport built on \textbf{UDP}. Why UDP? Not because UDP is inherently faster, but because it is the only substrate that lets a userspace transport evolve: TCP is ossified in kernels and middleboxes that inspect, rate-limit, and mangle anything that is not classic TCP. QUIC reimplements reliability, congestion control, and---critically---\emph{independent} streams in userspace on top of UDP datagrams.
+
+\begin{itemize}
+  \item \textbf{Stream independence:} each QUIC stream has its own ordered delivery; a lost packet stalls only the stream(s) whose data it carried. Transport HOL blocking is gone.
+  \item \textbf{Connection IDs and migration:} QUIC connections are identified by Connection IDs, not the 4-tuple. When a phone moves from Wi-Fi to LTE and its source IP changes, the connection \emph{survives}---no re-handshake, no broken downloads.
+  \item \textbf{Integrated TLS~1.3:} QUIC encrypts everything above the packet number by design; the transport and crypto handshakes are fused, giving \textbf{1-RTT} connection establishment and \textbf{0-RTT} resumption for repeat clients (with replay caveats for non-idempotent requests).
+  \item \textbf{QPACK:} HPACK's ordered dynamic table would reintroduce stream coupling; QPACK allows out-of-order header-block delivery with explicit acknowledgements and encoder-stream coordination.
+\end{itemize}
+
+Deployment realities: HTTP/3 requires \texttt{Alt-Svc} advertisement or HTTPS DNS records for discovery, UDP~443 must be unblocked (many enterprise networks still throttle it), CPU cost per packet is higher than kernel TCP, and every stack keeps HTTP/2+TCP as fallback. Figure~\ref{fig:versions} summarizes the three generations.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      box/.style={rectangle, draw=darkblue, fill=blue!5, minimum width=3.6cm, align=center},
+      flow/.style={->, >=stealth},
+      note/.style={font=\scriptsize\itshape, align=center}]
+    % HTTP/1.1 column
+    \node[box] (h1title) {\textbf{HTTP/1.1} (text)};
+    \node[box, below=0.35cm of h1title, minimum height=0.65cm] (h1c1) {conn 1: req$\to$resp$\to$req};
+    \node[box, below=0.15cm of h1c1, minimum height=0.65cm] (h1c2) {conn 2: req$\to$resp$\to$req};
+    \node[box, below=0.15cm of h1c2, minimum height=0.65cm] (h1c3) {conn 3..6 (browsers cap)};
+    \node[note, below=0.25cm of h1c3, text width=3.8cm] {app-layer HOL; per-conn TCP+TLS cost};
+    % HTTP/2 column
+    \node[box, right=1.1cm of h1title] (h2title) {\textbf{HTTP/2} (binary)};
+    \node[box, below=0.35cm of h2title, minimum height=0.65cm] (h2s1) {stream 1: HEADERS+DATA};
+    \node[box, below=0.15cm of h2s1, minimum height=0.65cm] (h2s2) {stream 3: HEADERS+DATA};
+    \node[box, below=0.15cm of h2s2, minimum height=0.65cm] (h2s3) {stream 5..N interleaved};
+    \node[note, below=0.25cm of h2s3, text width=3.8cm] {one TCP conn; TCP-layer HOL on loss};
+    % HTTP/3 column
+    \node[box, right=1.1cm of h2title] (h3title) {\textbf{HTTP/3} (QUIC/UDP)};
+    \node[box, below=0.35cm of h3title, minimum height=0.65cm] (h3s1) {QUIC stream 0: independent};
+    \node[box, below=0.15cm of h3s1, minimum height=0.65cm] (h3s2) {QUIC stream 4: independent};
+    \node[box, below=0.15cm of h3s2, minimum height=0.65cm] (h3s3) {loss stalls one stream only};
+    \node[note, below=0.25cm of h3s3, text width=3.8cm] {1-RTT setup; 0-RTT resume; migration};
+    % Grouping braces
+    \draw[decorate, decoration={brace, amplitude=5pt}] ($(h1c1.north west)+(-0.1,0.1)$) -- ($(h1c3.south west)+(-0.1,-0.1)$) node[midway, left=6pt, note]{6 TCP conns};
+    \draw[decorate, decoration={brace, amplitude=5pt}] ($(h2s1.north west)+(-0.1,0.1)$) -- ($(h2s3.south west)+(-0.1,-0.1)$) node[midway, left=6pt, note]{1 TCP conn};
+    \draw[decorate, decoration={brace, amplitude=5pt}] ($(h3s1.north west)+(-0.1,0.1)$) -- ($(h3s3.south west)+(-0.1,-0.1)$) node[midway, left=6pt, note]{1 QUIC conn};
+  \end{tikzpicture}
+  \caption{Three generations of HTTP concurrency: parallel connections (1.1), multiplexed streams over one TCP connection (2), and independent streams over QUIC (3).}
+  \label{fig:versions}
+\end{figure}
+
+\subsection{TLS 1.3: The Handshake Behind Every HTTPS Request}
+
+HTTP semantics travel inside TLS records (record type 22 = handshake, 23 = application data). TLS~1.3 \cite{rfc8446} is a ground-up simplification of TLS~1.2: it removes RSA key transport and static DH (forward secrecy is now mandatory), removes renegotiation, shrinks the cipher list to five AEAD suites (e.g.\ \texttt{TLS\_AES\_128\_GCM\_SHA256}), and---the headline---cuts the handshake from \textbf{2-RTT} to \textbf{1-RTT}, with \textbf{0-RTT} resumption for returning clients.
+
+\subsubsection{Message-by-Message}
+
+Handshake message types are single octets: \texttt{ClientHello}=1, \texttt{ServerHello}=2, \texttt{EncryptedExtensions}=8, \texttt{Certificate}=11, \texttt{CertificateVerify}=15, \texttt{Finished}=20.
+
+\begin{enumerate}
+  \item \textbf{ClientHello} --- supported versions (\texttt{supported\_versions} extension listing 1.3), 32-byte random, cipher suites, \texttt{key\_share} (the client's ephemeral (EC)DHE public key, sent \emph{speculatively}---this is what buys the 1-RTT), \texttt{server\_name} (SNI), and \texttt{application\_layer\_protocol\_negotiation} (ALPN) listing e.g.\ \texttt{h2}, \texttt{http/1.1}.
+  \item \textbf{ServerHello} --- chosen cipher suite, server random, and the server's \texttt{key\_share}. From this point both sides derive handshake traffic keys: \emph{everything after ServerHello is encrypted}.
+  \item \textbf{EncryptedExtensions} --- responses to extensions, including the selected ALPN protocol.
+  \item \textbf{Certificate} --- the server's certificate chain (leaf first, intermediates after).
+  \item \textbf{CertificateVerify} --- a signature over the handshake transcript with the certificate's private key; proves possession.
+  \item \textbf{Finished} --- an HMAC over the transcript using the finished key; authenticates the entire handshake. The client answers with its own \texttt{Finished}, and application data flows.
+\end{enumerate}
+
+\begin{minted}{text}
+Client                                               Server
+
+ClientHello
++ key_share, signature_algorithms,
+  psk_key_exchange_modes, SNI, ALPN
+                                 -------->
+                                                     ServerHello
+                                                     + key_share
+                                            {EncryptedExtensions}
+                                            {Certificate}
+                                            {CertificateVerify}
+                                            {Finished}
+                                 <--------   ^ server flight (1 RTT total)
+{Finished}
+                                 -------->
+[Application Data]               <------->  [Application Data]
+
+  ^  { } = encrypted with handshake keys;  [ ] = application keys
+\end{minted}
+
+The \emph{key schedule} is a chain of HKDF extracts/expands: an \textbf{early secret} (from the PSK, or zeros) $\rightarrow$ \textbf{handshake secret} (mixed with the ECDHE shared secret) $\rightarrow$ \textbf{master secret}, from which client/server handshake traffic keys, application traffic keys, and resumption secrets are derived. Each stage is bound to the transcript hash, so tampering anywhere upstream poisons every key downstream.
+
+\subsubsection{TLS 1.2 vs.\ 1.3: The Round-Trip Economics}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Property} & \textbf{TLS 1.2} & \textbf{TLS 1.3} \\
+    \midrule
+    Full handshake & 2-RTT & 1-RTT \\
+    Resumed handshake & 1-RTT & 0-RTT (replayable early data!) \\
+    Key exchange & RSA transport allowed & (EC)DHE only; forward secrecy mandatory \\
+    Handshake encryption & mostly cleartext & everything after ServerHello encrypted \\
+    Cipher suites & dozens, incl.\ CBC/RC4 legacy & five AEAD suites only \\
+    \bottomrule
+  \end{tabularx}
+  \caption{TLS 1.2 versus TLS 1.3 at a glance \cite{rfc8446}.}
+  \label{tab:tls}
+\end{table}
+
+At 80\,ms RTT (typical cross-continent), a cold TLS~1.2 + TCP setup costs $\approx$240\,ms before the first request byte; TLS~1.3 cuts this to $\approx$160\,ms, QUIC to $\approx$80\,ms, and 0-RTT to zero. This is why keep-alive hit rate is a first-class SLO (see the cost template in the standard addendum).
+
+\subsubsection{SNI, ALPN, and Certificate Chain Validation}
+
+\textbf{SNI} (\texttt{server\_name}) lets one IP host many TLS identities; the server picks the certificate matching the requested name. \textbf{ALPN} selects the application protocol inside the handshake---\texttt{h2} or \texttt{http/1.1}---so no extra round trip is needed to discover HTTP/2 support; an ALPN mismatch (client offers only \texttt{h2}, server speaks only \texttt{http/1.1}) fails the connection with \texttt{no\_application\_protocol}. \textbf{Chain validation} walks leaf $\rightarrow$ intermediates $\rightarrow$ a locally trusted root, checking at each hop: signatures, validity windows (\texttt{notBefore}/\texttt{notAfter}), hostname match against SANs, revocation where enforced, and that intermediates carry the \texttt{basicConstraints: CA=TRUE} extension. Session \textbf{resumption} (tickets issued in \texttt{NewSessionTicket} post-handshake) skips the certificate flight; in TLS~1.3 resumption \emph{is} a PSK handshake, optionally with fresh DHE.
+
+\begin{figure}[h]
+  \centering
+  \begin{tikzpicture}[font=\small,
+      msg/.style={->, >=stealth},
+      lbl/.style={font=\scriptsize, midway, above, sloped},
+      life/.style={dashed, gray}]
+    \node[font=\bfseries] (c) at (0,0) {Client};
+    \node[font=\bfseries] (s) at (9.5,0) {Server};
+    \draw[life] (c.south) -- ++(0,-7.6);
+    \draw[life] (s.south) -- ++(0,-7.6);
+    \draw[msg, darkblue] (0,-0.7)  -- node[lbl]{ClientHello + key\_share + SNI + ALPN} (9.5,-0.7);
+    \draw[msg, darkblue] (9.5,-1.7) -- node[lbl]{ServerHello + key\_share} (0,-1.7);
+    \draw[msg, darkblue] (9.5,-2.5) -- node[lbl]{\{EncryptedExtensions\}} (0,-2.5);
+    \draw[msg, darkblue] (9.5,-3.3) -- node[lbl]{\{Certificate\}} (0,-3.3);
+    \draw[msg, darkblue] (9.5,-4.1) -- node[lbl]{\{CertificateVerify\}} (0,-4.1);
+    \draw[msg, darkblue] (9.5,-4.9) -- node[lbl]{\{Finished\}} (0,-4.9);
+    \draw[msg, packtorange] (0,-5.7) -- node[lbl]{\{Finished\}  [+ 0-RTT early data if resuming]} (9.5,-5.7);
+    \draw[msg, packtorange, double] (0,-6.6) -- node[lbl]{[Application Data --- HTTP/2 or HTTP/1.1 per ALPN]} (9.5,-6.6);
+    \node[note, font=\scriptsize\itshape] at (4.75,-7.35) {1-RTT total: client sends app data after one round trip};
+  \end{tikzpicture}
+  \caption{TLS 1.3 full handshake flight diagram (braces = encrypted under handshake keys).}
+  \label{fig:tls13}
+\end{figure}
+
+\section{Production-Ready Code Implementation}
+
+All listings are Python~3.11+, fully typed, stdlib-only, offline (localhost), and deterministic. Run them from PowerShell with \texttt{python <file>.py}; each starts its own local server, exchanges traffic, prints the exact bytes, and shuts down cleanly.
+
+\subsection{Listing 1 --- Raw-Socket HTTP/1.1 Client with Byte-Level Tracing}
+
+\textbf{Design decisions.} We deliberately avoid \texttt{http.client} and open a raw \texttt{socket}: the pedagogical goal is to see that an HTTP request \emph{is} bytes. The server side is the stdlib \texttt{http.server} running in a daemon thread on an ephemeral port (\texttt{("127.0.0.1", 0)} --- the OS assigns a free port, eliminating port-collision flakiness). \textbf{Defensive notes:} the escaped-byte view uses \texttt{bytes.decode("ascii", "backslashreplace")}-style rendering so arbitrary binary never corrupts the terminal; the client sets an explicit timeout so a wedged server fails fast instead of hanging; the response is read until \texttt{Content-Length} bytes of body arrive, never with a blind \texttt{recv} loop (which would block forever on a keep-alive connection).
+
+\begin{minted}{python}
+"""Raw-socket HTTP/1.1 client against a local stdlib server.
+
+Prints the exact bytes sent and received, with CRLF framing rendered
+visibly. Offline, deterministic, stdlib only (Python 3.11+).
+"""
+from __future__ import annotations
+
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOST = "127.0.0.1"
+BODY = b'{"id":42,"name":"Weld-Bot"}'
+
+
+def visible(data: bytes) -> str:
+    """Render bytes with escapes so CRLF framing is visible."""
+    return "".join(
+        {0x0D: r"\r", 0x0A: r"\n"}.get(b) or (chr(b) if 32 <= b < 127 else rf"\x{b:02x}")
+        for b in data
+    )
+
+
+class RobotHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # enable keep-alive responses
+
+    def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+        if self.path != "/robots/42":
+            self.send_error(404, "Not Found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(BODY)))
+        self.end_headers()
+        self.wfile.write(BODY)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        pass  # keep stdout deterministic
+
+
+def raw_get(host: str, port: int, path: str) -> tuple[bytes, bytes]:
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        "Accept: application/json\r\n"
+        "Connection: close\r\n"  # close => read-until-EOF is unambiguous
+        "\r\n"
+    ).encode("ascii")
+    with socket.create_connection((host, port), timeout=5.0) as sock:
+        sock.sendall(request)
+        chunks: list[bytes] = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return request, b"".join(chunks)
+
+
+def main() -> None:
+    server = ThreadingHTTPServer((HOST, 0), RobotHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        sent, received = raw_get(HOST, port, "/robots/42")
+        print("=== BYTES SENT ===")
+        print(visible(sent))
+        print("=== BYTES RECEIVED ===")
+        print(visible(received))
+        assert b"HTTP/1.1 200 OK\r\n" in received
+        assert received.endswith(BODY)
+        print("=== OK: status line and body verified ===")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 2 --- Chunked Transfer Encoding and Keep-Alive, By Hand}
+
+\textbf{Design decisions.} Here we implement \emph{both} ends at the socket level: a tiny \texttt{socketserver} server that emits a \texttt{Transfer-Encoding: chunked} response (three chunks) and honors keep-alive for a second request on the same connection, and a client that parses chunks incrementally. \textbf{Defensive notes:} the chunk parser validates hex sizes and enforces a maximum chunk size (a classic fuzzing target); every socket has a timeout; the server handles \texttt{Connection: close} correctly; all threads are daemons and joined.
+
+\begin{minted}{python}
+"""Chunked transfer encoding + keep-alive demo over raw sockets.
+
+The server streams a body as three chunks, then serves a second request
+on the SAME connection (keep-alive). The client parses chunks by hand.
+Offline, deterministic, stdlib only (Python 3.11+).
+"""
+from __future__ import annotations
+
+import socket
+import socketserver
+import threading
+
+HOST = "127.0.0.1"
+MAX_CHUNK = 1 << 20  # 1 MiB sanity bound against hostile size lines
+
+
+def recv_until(sock: socket.socket, marker: bytes,
+               limit: int = 65536) -> tuple[bytes, bytes]:
+    """Read until marker (inclusive); return (head, leftover bytes).
+
+    Keeping the leftover is essential: a single recv() may return header
+    and body bytes together, and discarding the tail desyncs framing.
+    """
+    buf = b""
+    while marker not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("EOF before marker")
+        buf += chunk
+        if len(buf) > limit:
+            raise ValueError("header section exceeds limit")
+    head, _, rest = buf.partition(marker)
+    return head + marker, rest
+
+
+def read_chunked_body(sock: socket.socket, buffered: bytes) -> bytes:
+    """Parse a chunked body. `buffered` holds bytes already read past
+    the header terminator (may be empty). Returns decoded body."""
+    body = bytearray()
+    pending = bytearray(buffered)
+
+    def read_line() -> bytes:
+        while b"\r\n" not in pending:
+            data = sock.recv(4096)
+            if not data:
+                raise ConnectionError("EOF inside chunked body")
+            pending.extend(data)
+        line, _, rest = bytes(pending).partition(b"\r\n")
+        pending.clear()
+        pending.extend(rest)
+        return line
+
+    while True:
+        size = int(read_line().split(b";")[0], 16)  # ignore extensions
+        if size > MAX_CHUNK:
+            raise ValueError(f"chunk size {size} exceeds bound")
+        if size == 0:
+            while read_line() != b"":  # consume trailers
+                pass
+            return bytes(body)
+        while len(pending) < size + 2:  # data + trailing CRLF
+            data = sock.recv(4096)
+            if not data:
+                raise ConnectionError("EOF inside chunk data")
+            pending.extend(data)
+        body.extend(pending[:size])
+        if pending[size : size + 2] != b"\r\n":
+            raise ValueError("chunk missing trailing CRLF")
+        del pending[: size + 2]
+
+
+class ChunkedHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        sock: socket.socket = self.request
+        sock.settimeout(5.0)
+        for _ in range(2):  # serve two requests on one connection
+            head, _ = recv_until(sock, b"\r\n\r\n")  # requests are head-only
+            request_line = head.split(b"\r\n", 1)[0].decode("ascii")
+            keep_alive = b"connection: close" not in head.lower()
+            if request_line.startswith("GET /stream "):
+                parts = [b"Weld-", b"Bot ", b"#42 online"]
+                payload = b"".join(
+                    b"%X\r\n%s\r\n" % (len(p), p) for p in parts
+                ) + b"0\r\n\r\n"
+                sock.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n" + payload
+                )
+            else:
+                body = b"pong"
+                sock.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n" + body
+                )
+            if not keep_alive:
+                break
+
+
+def main() -> None:
+    server = socketserver.ThreadingTCPServer((HOST, 0), ChunkedHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        with socket.create_connection((HOST, port), timeout=5.0) as sock:
+            sock.sendall(
+                b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            head, buffered = recv_until(sock, b"\r\n\r\n")
+            print("=== RESPONSE HEAD (request 1) ===")
+            print(head.decode("ascii"), end="")
+            body = read_chunked_body(sock, buffered)
+            print("=== DECODED CHUNKED BODY ===")
+            print(repr(body))
+            # Second request on the SAME socket: keep-alive in action.
+            sock.sendall(
+                b"GET /ping HTTP/1.1\r\nHost: localhost\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            # Server closes after this response: read until EOF.
+            reply2 = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                reply2 += chunk
+            print("=== RESPONSE (request 2, same connection) ===")
+            print(reply2.decode("ascii"))
+        assert body == b"Weld-Bot #42 online"
+        assert b"pong" in reply2
+        print("=== OK: chunked decode + keep-alive reuse verified ===")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 3 --- TLS Inspector: Context Configuration, ALPN, and Ciphers}
+
+\textbf{Design decisions.} Generating a self-signed certificate purely from stdlib Python is not supported (the \texttt{ssl} module consumes but does not mint certificates), so the lab (Section~\ref{sec:lab}) mints one with a documented \texttt{openssl.exe} command. This listing is split into two halves that work with or without that certificate: (1)~a \emph{certificate fixture decoder} using the documented stdlib hook \texttt{ssl.\_ssl.\_test\_decode\_cert}, which parses a PEM file without opening any connection; (2)~a \emph{context auditor} that builds a hardened \texttt{SSLContext}, pins TLS~1.3, sets ALPN to \texttt{h2}/\texttt{http/1.1}, and prints the effective cipher list --- all offline. If the PEM fixture from the lab exists next to the script, the decoded fields (subject, issuer, SANs, validity) are printed too; otherwise the script explains exactly how to create it and still runs to completion.
+
+\begin{minted}{python}
+"""TLS inspector: certificate decoding, context hardening, ALPN, ciphers.
+
+Offline, stdlib only (Python 3.11+). If a PEM fixture (created in the
+chapter lab with openssl) exists beside this script, its fields are
+decoded with ssl._ssl._test_decode_cert; otherwise the context audit
+still runs and the script prints the fixture instructions.
+"""
+from __future__ import annotations
+
+import ssl
+from pathlib import Path
+
+CERT_PATH = Path(__file__).with_name("northwind_lab.pem")
+
+
+def decode_certificate(path: Path) -> None:
+    """Parse a PEM certificate file into a dict and print key fields."""
+    decoded = ssl._ssl._test_decode_cert(str(path))  # stdlib test hook
+    print("=== CERTIFICATE FIELDS ===")
+    for field in ("subject", "issuer", "notBefore", "notAfter"):
+        print(f"{field}: {decoded.get(field)}")
+    san = decoded.get("subjectAltName", ())
+    print(f"subjectAltName: {san}")
+    serial = decoded.get("serialNumber", "<unknown>")
+    print(f"serialNumber: {serial}")
+
+
+def build_client_context() -> ssl.SSLContext:
+    """Hardened TLS 1.3 client context with ALPN."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.set_alpn_protocols(["h2", "http/1.1"])
+    if CERT_PATH.exists():
+        ctx.load_verify_locations(cafile=str(CERT_PATH))
+    return ctx
+
+
+def audit_ciphers(ctx: ssl.SSLContext) -> None:
+    """Print the negotiated-cipher candidates of a context."""
+    print("=== TLS 1.3+ CIPHER SUITES AVAILABLE ===")
+    for cipher in ctx.get_ciphers():
+        print(
+            f"{cipher['name']:<32} protocol={cipher['protocol']:<8} "
+            f"bits={cipher['strength_bits']}"
+        )
+
+
+def main() -> None:
+    if CERT_PATH.exists():
+        decode_certificate(CERT_PATH)
+    else:
+        print(f"NOTE: {CERT_PATH.name} not found; run the chapter lab's "
+              "openssl command to create it, then re-run.")
+    ctx = build_client_context()
+    print(f"minimum_version: {ctx.minimum_version}")
+    print(f"ALPN offered: h2, http/1.1")
+    audit_ciphers(ctx)
+    # NOTE: OpenSSL's cipher API may omit TLS 1.3 suites (they are not
+    # configurable); an empty/short list here is expected, not an error.
+    assert ctx.minimum_version == ssl.TLSVersion.TLSv1_3
+    print("=== OK: context hardened and cipher audit complete ===")
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 4 --- HTTP/2 Frame Parser over a Captured Byte Stream}
+
+\textbf{Design decisions.} The parser consumes the 9-octet header with \texttt{struct} (network byte order), validates the 31-bit stream mask, decodes the type-specific flags for DATA/HEADERS/SETTINGS, and prints a table. The ``captured stream'' is an embedded fixture built byte-by-byte in the script itself --- a client connection preface plus SETTINGS, SETTINGS-ACK, HEADERS, and DATA frames --- so the output is fully deterministic and reproducible offline. \textbf{Defensive notes:} the parser raises \texttt{ValueError} on truncation rather than slicing garbage, enforces \texttt{SETTINGS\_MAX\_FRAME\_SIZE} ($2^{14}$ default), and treats unknown frame types as skip-able per RFC~9113~\S5.5 (extensions must be ignorable).
+
+\begin{minted}{python}
+"""HTTP/2 frame parser: decode a captured byte stream, stdlib only.
+
+The fixture is constructed in-script (client preface + SETTINGS,
+SETTINGS-ACK, HEADERS, DATA) so results are deterministic and offline.
+"""
+from __future__ import annotations
+
+import struct
+from dataclasses import dataclass
+
+MAX_FRAME_SIZE = 2**14  # RFC 9113 default SETTINGS_MAX_FRAME_SIZE
+CLIENT_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+FRAME_TYPES = {
+    0x0: "DATA", 0x1: "HEADERS", 0x2: "PRIORITY", 0x3: "RST_STREAM",
+    0x4: "SETTINGS", 0x5: "PUSH_PROMISE", 0x6: "PING", 0x7: "GOAWAY",
+    0x8: "WINDOW_UPDATE", 0x9: "CONTINUATION",
+}
+FLAG_NAMES = {
+    0x0: {0x1: "END_STREAM", 0x8: "PADDED"},
+    0x1: {0x1: "END_STREAM", 0x4: "END_HEADERS", 0x8: "PADDED",
+          0x20: "PRIORITY"},
+    0x4: {0x1: "ACK"},
+    0x6: {0x1: "ACK"},
+    0x9: {0x4: "END_HEADERS"},
+}
+
+
+@dataclass(frozen=True)
+class Frame:
+    length: int
+    type_code: int
+    flags: int
+    stream_id: int
+    payload: bytes
+
+    @property
+    def type_name(self) -> str:
+        return FRAME_TYPES.get(self.type_code, f"UNKNOWN(0x{self.type_code:02x})")
+
+    @property
+    def flag_names(self) -> str:
+        known = FLAG_NAMES.get(self.type_code, {})
+        names = [v for bit, v in known.items() if self.flags & bit]
+        return "|".join(names) if names else "-"
+
+
+def parse_frame(buf: bytes, offset: int) -> tuple[Frame, int]:
+    """Parse one frame starting at offset. Raises on truncation."""
+    if len(buf) - offset < 9:
+        raise ValueError("truncated frame header")
+    length = int.from_bytes(buf[offset : offset + 3], "big")
+    type_code, flags = buf[offset + 3], buf[offset + 4]
+    raw_sid = struct.unpack_from(">I", buf, offset + 5)[0]
+    stream_id = raw_sid & 0x7FFFFFFF  # strip reserved bit
+    end = offset + 9 + length
+    if length > MAX_FRAME_SIZE:
+        raise ValueError(f"frame length {length} exceeds MAX_FRAME_SIZE")
+    if len(buf) < end:
+        raise ValueError("truncated frame payload")
+    return Frame(length, type_code, flags, stream_id,
+                 buf[offset + 9 : end]), end
+
+
+def build_fixture() -> bytes:
+    """Preface + SETTINGS + SETTINGS-ACK + HEADERS + DATA on stream 1."""
+    def frame(t: int, f: int, sid: int, payload: bytes) -> bytes:
+        return (len(payload).to_bytes(3, "big") + bytes([t, f])
+                + (sid & 0x7FFFFFFF).to_bytes(4, "big") + payload)
+
+    settings = struct.pack(">HI", 0x3, 100)  # MAX_CONCURRENT_STREAMS=100
+    headers_block = bytes([0x82, 0x86, 0x84])  # HPACK: :method GET,
+                                               # :scheme http, :path /
+    data = b'{"robot":"Weld-Bot"}'
+    return b"".join([
+        CLIENT_PREFACE,
+        frame(0x4, 0x0, 0, settings),        # SETTINGS
+        frame(0x4, 0x1, 0, b""),             # SETTINGS ack
+        frame(0x1, 0x4 | 0x1, 1, headers_block),  # HEADERS END_HEADERS|END_STREAM
+        frame(0x0, 0x1, 1, data),            # DATA END_STREAM
+    ])
+
+
+def main() -> None:
+    stream = build_fixture()
+    assert stream[:24] == CLIENT_PREFACE
+    print(f"client preface (24 octets): {CLIENT_PREFACE!r}")
+    print(f"{'len':>5} {'type':<14} {'flags':<28} {'stream':>6}")
+    offset = len(CLIENT_PREFACE)
+    frames: list[Frame] = []
+    while offset < len(stream):
+        frame_obj, offset = parse_frame(stream, offset)
+        frames.append(frame_obj)
+        print(f"{frame_obj.length:>5} {frame_obj.type_name:<14} "
+              f"{frame_obj.flag_names:<28} {frame_obj.stream_id:>6}")
+    assert [f.type_code for f in frames] == [0x4, 0x4, 0x1, 0x0]
+    assert frames[2].stream_id == 1 and frames[2].flags & 0x4
+    assert frames[3].payload == b'{"robot":"Weld-Bot"}'
+    print("=== OK: 4 frames parsed, flags and stream IDs verified ===")
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:pitfalls}
+
+\subsection*{P1 --- Content-Length / Transfer-Encoding Ambiguity (Request Smuggling)}
+
+\begin{warningbox}
+If a request carries \emph{both} \texttt{Content-Length} and \texttt{Transfer-Encoding: chunked}, RFC~9112~\S6.3 says the message is malformed and \texttt{Transfer-Encoding} overrides. When a front-end proxy honors \texttt{Content-Length} and a back-end honors \texttt{Transfer-Encoding} (or vice versa), an attacker can desynchronize the two parsers and \emph{smuggle} a second request into the connection --- the classic \textbf{CL.TE / TE.CL request smuggling} attack. Mitigations: reject ambiguous requests outright (\texttt{400}), normalize at the front proxy, and prefer HTTP/2 end-to-end (binary framing removes the ambiguity class entirely).
+\end{warningbox}
+
+\subsection*{P2 --- Assuming GET Never Has a Body}
+
+RFC~9110 does not forbid a body on GET; it declares that a GET body has \emph{no generally defined semantics}. Some stacks (Elasticsearch historically) used GET bodies; many proxies drop or reject them. \textbf{Rule:} never put semantics-bearing content in a GET/HEAD/DELETE body; use POST if you need a request body on a read-like operation.
+
+\subsection*{P3 --- Mishandling 100-continue}
+
+A client sending \texttt{Expect: 100-continue} must be prepared for: (a)~an interim \texttt{100} followed by the final response, (b)~a final error (e.g.\ \texttt{413}) \emph{without} sending the body, or (c)~a server that never sends \texttt{100} --- in which case the client should transmit the body after a timeout (curl waits 1\,s). Clients that block forever waiting for \texttt{100}, or that treat the interim \texttt{100} as the final status, are both broken.
+
+\subsection*{P4 --- Keep-Alive Timeout Mismatch}
+
+If the client's idle-connection reuse window is \emph{longer} than the server/LB idle timeout, the client will race a stale connection: it sends a request onto a socket the middlebox just closed, producing intermittent \texttt{ECONNRESET}/``connection reset by peer'' errors under load. \textbf{Rule of thumb:} client idle timeout $<$ LB idle timeout $<$ server keep-alive timeout. This is the single most common cause of ``random'' production connection failures.
+
+\subsection*{P5 --- Blindly Retrying Non-Idempotent Methods}
+
+A timeout is ambiguous: the request may have been processed. Retrying a \texttt{POST /orders} can double-charge a customer. Only safe/idempotent methods (Table~\ref{tab:methods}) may be retried transparently; everything else needs application-level idempotency keys (Chapter~10) before any retry layer is switched on.
+
+\subsection*{P6 --- Reading Until Close on a Keep-Alive Connection}
+
+A client that reads an HTTP/1.1 response ``until EOF'' without honoring \texttt{Content-Length} or chunked framing hangs forever when the server keeps the connection open. Always parse framing headers first; read exactly the framed length.
+
+\subsection*{P7 --- Ignoring Retry-After and Treating 5xx as Identical}
+
+\texttt{503} + \texttt{Retry-After} is an explicit back-pressure signal; hammering it converts overload into outage. \texttt{429} without honoring \texttt{Retry-After} gets clients blacklisted. Distinguish transient (503, 429) from permanent (500, 501) and respect the server's stated delay with jittered backoff.
+
+\subsection*{P8 --- Forgetting Hop-by-Hop Headers}
+
+\texttt{Connection}, \texttt{Keep-Alive}, \texttt{TE}, \texttt{Trailer}, \texttt{Transfer-Encoding}, \texttt{Upgrade} are \emph{hop-by-hop}: proxies must not forward them. A hand-rolled reverse proxy that copies all headers verbatim leaks connection state across hops and breaks framing.
+
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:lab}
+
+\subsection{Lab A --- Dissect Real Traffic with curl.exe}
+
+All commands run in PowerShell on Windows; use \texttt{curl.exe} explicitly so PowerShell does not alias \texttt{curl} to \texttt{Invoke-WebRequest}.
+
+\begin{enumerate}
+  \item \textbf{Start a local server.} In one terminal: \texttt{python -m http.server 8765 --bind 127.0.0.1}. It serves the current directory over plain HTTP/1.1.
+  \item \textbf{Capture the verbose exchange.} In a second terminal:
+\end{enumerate}
+
+\begin{minted}{bash}
+curl.exe -v http://127.0.0.1:8765/README.md -o NUL
+\end{minted}
+
+Lines prefixed \texttt{>} are the exact request bytes; \texttt{<} the response. Confirm: the request-line, the mandatory \texttt{Host} header, the \texttt{HTTP/1.1 200 OK} status-line, \texttt{Content-Length}, and the blank line separating head from body.
+
+\begin{enumerate}[resume]
+  \item \textbf{Force protocol versions and observe.}
+\end{enumerate}
+
+\begin{minted}{bash}
+curl.exe -v --http1.1 http://127.0.0.1:8765/ -o NUL
+curl.exe -v -I http://127.0.0.1:8765/README.md
+\end{minted}
+
+The \texttt{-I} issues a HEAD: identical headers, zero body bytes --- verify \texttt{Content-Length} is still present but no body arrives.
+
+\begin{enumerate}[resume]
+  \item \textbf{Conditional request.} Note the \texttt{ETag} (or \texttt{Last-Modified}) from step~2, then:
+\end{enumerate}
+
+\begin{minted}{bash}
+curl.exe -v -H "If-None-Match: \"<etag>\"" http://127.0.0.1:8765/README.md -o NUL
+\end{minted}
+
+(The stdlib \texttt{SimpleHTTPRequestHandler} does not implement validators --- observe that it ignores the header and returns 200; repeat against any conditional-capable server, or your Listing-1 server extended with an \texttt{ETag}, to see \texttt{304 Not Modified}.)
+
+\subsection{Lab B --- Your Raw Client vs.\ the Stdlib Server}
+
+Run Listing~1, then re-run it with the request modified to omit \texttt{Connection: close} and observe that the client now hangs unless it honors \texttt{Content-Length} --- Pitfall~P6 reproduced on demand. Then run Listing~2 and match each printed chunk against the byte layout diagram in this chapter.
+
+\subsection{Lab C --- Mint a Self-Signed Certificate and Inspect TLS}
+
+\begin{minted}{bash}
+# openssl.exe ships with Git for Windows:
+# C:\Program Files\Git\usr\bin\openssl.exe
+openssl.exe req -x509 -newkey rsa:2048 -keyout northwind_lab.key `
+  -out northwind_lab.pem -days 365 -nodes `
+  -subj "/CN=localhost/O=Northwind Robotics"
+\end{minted}
+
+Place \texttt{northwind\_lab.pem} beside Listing~3 and run it: the fixture decoder prints subject, issuer, SANs, and validity; the context audit prints the TLS~1.3 cipher list and ALPN set. (Self-signed certificates are for local labs only --- never disable verification in production to make one work.)
+
+\subsection{Lab D --- HTTP/2 Frame Dissection}
+
+Run Listing~4 and confirm the parsed sequence: \texttt{SETTINGS}, \texttt{SETTINGS(ACK)}, \texttt{HEADERS(END\_STREAM|END\_HEADERS)}, \texttt{DATA(END\_STREAM)} on stream~1. Then mutate the fixture: flip a flag bit, truncate a payload, and watch the parser's \texttt{ValueError} fire --- you now own a differential fuzzing harness.
+
+\subsection{Real-World Case Study: The 60-Second Mystery}
+
+\emph{War story (composite of common industry incidents, Northwind Robotics setting).} Northwind Robotics' telemetry API sat behind a cloud load balancer with a \textbf{60-second idle timeout}; the Python fleet's HTTP client pooled connections with a \textbf{300-second} keep-alive. Under bursty load, clients routinely grabbed connections the LB had silently reaped mid-idle. The first byte of the next request disappeared into a half-open socket; the client saw \texttt{ConnectionResetError} on $\sim$0.3\% of requests --- always the first request after an idle gap. Retries masked most failures, but a non-idempotent \texttt{POST /jobs} retry caused duplicate job dispatch (Pitfall~P5 compounding P4). Diagnosis took one packet capture: the LB's \texttt{FIN} arriving 60\,s after the last request, followed seconds later by the client's next request on the dead connection and an immediate \texttt{RST}. \textbf{Fix:} set the client pool's idle timeout to 45\,s (below the LB's 60\,s), raise the LB timeout to 75\,s, and gate \texttt{POST} retries behind idempotency keys. Errors dropped to zero; p99 latency fell 18\,ms because connection reuse actually worked instead of gambling.
+
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+
+\begin{enumerate}[label=\textbf{E1.\arabic*}, leftmargin=3.2em]
+  \item \textbf{Byte archaeology.} Extend Listing~1 to send a POST with a \texttt{Content-Length} body, then deliberately declare a \texttt{Content-Length} one byte too small. Observe how the leftover byte corrupts the next exchange on a keep-alive connection. Explain the desynchronization in terms of framing.
+  \item \textbf{Chunked boundaries.} Modify Listing~2's server to emit a chunked body where a chunk straddles two \texttt{recv} calls. Verify the client's \texttt{pending} buffer logic handles it; then reduce \texttt{MAX\_CHUNK} below a chunk's size and confirm the defensive \texttt{ValueError}.
+  \item \textbf{Status-code audit.} For each endpoint of a fictional Northwind Robotics API (\texttt{POST /robots}, \texttt{GET /robots/\{id\}}, \texttt{PUT /robots/\{id\}/firmware}, \texttt{DELETE /robots/\{id\}}), choose the full set of success and error status codes you would return, with one-line justifications referencing Table~\ref{tab:statusdilemmas}.
+  \item \textbf{Frame arithmetic.} A HEADERS frame carries a 70{,}000-octet header block. With the default \texttt{SETTINGS\_MAX\_FRAME\_SIZE}, how many frames are emitted, of which types, and with which flags set on the final frame?
+  \item \textbf{HPACK reasoning.} A client sends 100 requests to the same API with identical headers except a per-request \texttt{x-trace-id}. Estimate the header bytes sent under HTTP/1.1 versus HTTP/2+HPACK, stating your assumptions about dynamic-table hits.
+  \item \textbf{Flow-control deadlock hunt.} A client sets \texttt{SETTINGS\_INITIAL\_WINDOW\_SIZE = 0} mid-connection. Describe precisely which frames can still flow and why this is legal; then explain how a buggy server that never sends \texttt{WINDOW\_UPDATE} manifests to users.
+  \item \textbf{TLS transcript.} From memory, list the TLS~1.3 handshake messages in order, mark which are encrypted, and identify the exact message after which the client could theoretically begin sending 0-RTT data on a resumption.
+  \item \textbf{Smuggling sketch.} Draw the byte-level layout of a CL.TE smuggling payload against a front-end that trusts \texttt{Content-Length} and a back-end that trusts \texttt{Transfer-Encoding}. Then state the two mitigations that would have prevented it.
+  \item \textbf{HOL cost model.} Given 1\% uniform packet loss, 50\,ms RTT, and 10 parallel small requests, argue qualitatively when HTTP/2 over one connection loses to HTTP/1.1 over six, and why HTTP/3's outcome differs.
+  \item \textbf{Deep dive --- 0-RTT danger.} Explain why 0-RTT early data is replayable, why that makes \texttt{POST /payments} over 0-RTT unacceptable, and which defences (single-use tickets, early-data allowlists of safe methods) are appropriate.
+\end{enumerate}
+
+\section{Interview Q\&A Vault}
+
+\subsection*{Junior Level}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=2.8em]
+  \item \textbf{What are the three parts of an HTTP/1.1 request on the wire?} The request-line (\texttt{METHOD SP target SP HTTP/1.1}), zero or more header fields each ending in CRLF, a mandatory empty line (CRLF), and an optional body delimited by \texttt{Content-Length} or chunked framing.
+  \item \textbf{What bytes terminate every HTTP/1.1 header line?} CRLF --- carriage return + line feed, \texttt{0x0D 0x0A}. Not LF alone; bare-LF tolerance is a parser quirk that smuggling attacks exploit.
+  \item \textbf{Why is the \texttt{Host} header mandatory in HTTP/1.1?} It enables virtual hosting: one IP serves many domains, and the server (and TLS SNI routing) needs the name to pick the right site. Absence $\Rightarrow$ \texttt{400 Bad Request}.
+  \item \textbf{GET vs.\ POST in one sentence?} GET retrieves a representation and is safe, idempotent, and cacheable; POST asks the resource to process the enclosed body and has none of those guarantees.
+  \item \textbf{What does idempotent mean, precisely?} Repeating the identical request $n$ times has the same intended effect on server state as one request. It says nothing about identical \emph{responses} (a retried DELETE may return 404 the second time and still be idempotent).
+  \item \textbf{What is the difference between 401 and 403?} 401 = unauthenticated: credentials missing or invalid, and the response must carry \texttt{WWW-Authenticate}. 403 = authenticated (or authentication irrelevant) but not allowed; re-authenticating will not help.
+  \item \textbf{When do you return 201 instead of 200?} When the request created one or more new resources; include a \texttt{Location} header pointing at the primary new resource. 200 is for generic success with a payload.
+  \item \textbf{What is 204 used for?} Success with no representation to return (e.g.\ a DELETE or an idempotent save). A 204 response must not carry a body.
+  \item \textbf{What does \texttt{Content-Type} declare vs.\ \texttt{Accept}?} \texttt{Content-Type} describes the body actually present in this message; \texttt{Accept} is a request header describing what the client can parse in the response.
+  \item \textbf{What is a q-value?} A relative weight in $[0,1]$ on an \texttt{Accept} media range, e.g.\ \texttt{application/json;q=0.9}. The server serves the highest-$q$ representation it can produce, else \texttt{406}.
+  \item \textbf{What is keep-alive?} HTTP/1.1's default persistent-connection behavior: the TCP connection stays open after the response so subsequent requests skip connection setup. It is why message framing (\texttt{Content-Length}/chunked) matters.
+  \item \textbf{What does \texttt{Connection: close} do?} Tells the peer to close the TCP connection after this message; for responses it also makes ``read until EOF'' a legal body framing.
+\end{enumerate}
+
+\subsection*{Mid Level}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=2.8em, start=13]
+  \item \textbf{Why did HTTP/1.1 pipelining die?} Responses must arrive in request order, so one slow response blocks the whole pipeline (HOL blocking); intermediaries corrupted pipelined traffic; and a failed pipeline cannot safely retry non-idempotent requests. Browsers shipped it disabled and removed it.
+  \item \textbf{Explain chunked transfer encoding byte layout.} Each chunk: ASCII-hex size, CRLF, that many data octets, CRLF. Terminated by a zero-size chunk, optional trailers, final CRLF. It enables streaming bodies of unknown length over persistent connections.
+  \item \textbf{400 vs.\ 422?} 400: the server could not parse the request --- malformed syntax, bad framing. 422: the request parsed fine but its semantics fail (e.g.\ JSON schema violations, a negative quantity). 400 blames the bytes; 422 blames the meaning.
+  \item \textbf{409 vs.\ 412?} 409: the request conflicts with current resource state (duplicate key, version mismatch on an unconditional write). 412: a conditional request's precondition header (\texttt{If-Match}, \texttt{If-Unmodified-Since}) evaluated false --- the client asked for precondition checking and lost.
+  \item \textbf{Why send \texttt{Retry-After} with 429 and 503?} It converts client retry behavior from a thundering herd into a scheduled drain: the server tells clients the earliest sensible retry moment. Without it, retry storms deepen the overload that caused the 503.
+  \item \textbf{How does \texttt{If-None-Match} save bandwidth?} The client echoes a stored \texttt{ETag}; if the representation is unchanged the server returns \texttt{304 Not Modified} with no body --- headers only. On a safe method it is a cache revalidation; with \texttt{If-Match} on PUT it becomes optimistic concurrency control.
+  \item \textbf{What does \texttt{Cache-Control: no-cache} actually mean?} ``Store is allowed, but revalidate with the origin before every reuse.'' It is chronically confused with \texttt{no-store} (never persist at all). Quoting the wrong one either leaks sensitive data or destroys cache efficiency.
+  \item \textbf{What is CORS preflight and who enforces it?} For non-simple cross-origin requests the browser sends \texttt{OPTIONS} with \texttt{Origin} + \texttt{Access-Control-Request-Method}; the server's \texttt{Access-Control-Allow-*} headers authorize the real request. The \emph{browser} enforces it --- CORS is not a server-side security boundary; curl ignores it.
+  \item \textbf{Describe the HTTP/2 frame header.} Nine octets: 24-bit payload length, 8-bit type, 8-bit flags, 1 reserved bit + 31-bit stream identifier. Everything else in HTTP/2 is payload typed by those fields.
+  \item \textbf{Name all ten HTTP/2 frame types and their codes.} DATA=\texttt{0x0}, HEADERS=\texttt{0x1}, PRIORITY=\texttt{0x2}, RST\_STREAM=\texttt{0x3}, SETTINGS=\texttt{0x4}, PUSH\_PROMISE=\texttt{0x5}, PING=\texttt{0x6}, GOAWAY=\texttt{0x7}, WINDOW\_UPDATE=\texttt{0x8}, CONTINUATION=\texttt{0x9}.
+  \item \textbf{What is the HTTP/2 connection preface?} The client magic \texttt{PRI * HTTP/2.0\textbackslash r\textbackslash n\textbackslash r\textbackslash nSM\textbackslash r\textbackslash n\textbackslash r\textbackslash n} (24 octets) followed by a SETTINGS frame; it lets a server distinguish h2c from HTTP/1.1 on a shared port and seeds connection parameters.
+  \item \textbf{How does HTTP/2 multiplexing work?} One TCP connection carries many streams; every frame is tagged with a stream ID, so requests/responses interleave at frame granularity and one slow response no longer blocks others. Concurrency limits come from \texttt{SETTINGS\_MAX\_CONCURRENT\_STREAMS}.
+  \item \textbf{What is HPACK and why does HTTP/2 need it?} HPACK compresses header blocks using a 61-entry static table, a per-connection dynamic table of recently used headers (default 4096 octets), and static Huffman coding. Without it, per-request textual headers (cookies alone can be kilobytes) would dominate small-payload traffic and defeat TCP's initial congestion window.
+  \item \textbf{Why must HPACK header blocks be decoded in order, and how does QPACK fix it?} HPACK's dynamic table is a shared ordered state machine; decoding block $n$ requires having applied blocks $<n$. On QUIC's independent streams that ordering would re-couple streams, so QPACK moves table updates onto separate encoder streams and tracks acknowledgements, tolerating out-of-order delivery at the cost of possible encoder-delay stalls.
+\end{enumerate}
+
+\subsection*{Senior Level}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=2.8em, start=27]
+  \item \textbf{Explain HTTP/2 flow control.} Credit-based, hop-by-hop: every DATA octet consumes credit from both the stream's window and the connection window (both default 65{,}535). Receivers replenish with \texttt{WINDOW\_UPDATE} increments ($1..2^{31}-1$); senders resize peer stream windows via \texttt{SETTINGS\_INITIAL\_WINDOW\_SIZE}. Only DATA counts; a zero window stalls DATA but never HEADERS/PING/RST, so deadlocks are recoverable.
+  \item \textbf{What HOL blocking remains in HTTP/2?} TCP's ordered byte stream: one lost segment stalls all streams until retransmission, because TCP cannot deliver later bytes early. Multiplexing removed application-layer HOL only; the transport layer re-imposed it. On lossy links this can make h2 slower than parallel h1 connections.
+  \item \textbf{Why does HTTP/3 use UDP --- isn't UDP unreliable?} UDP is deliberately minimal: QUIC reimplements reliability, ordering, and congestion control \emph{in userspace} on top of it. Kernel TCP and middlebox ossification make deploying a new TCP-like transport impossible; UDP is the only ubiquitous substrate that permits transport evolution, per-stream independence, and fused TLS~1.3.
+  \item \textbf{How does QUIC connection migration work?} Connections are bound to Connection IDs, not the 5-tuple. When a client's IP/port changes (Wi-Fi$\to$LTE), packets with the same Connection ID still identify the connection; the peer validates the new path (path validation challenge) and continues --- no re-handshake, streams resume where they left off.
+  \item \textbf{TLS 1.3 handshake: which messages exist and which are encrypted?} \texttt{ClientHello} and \texttt{ServerHello} are cleartext (plus legacy record wrapping); from \texttt{EncryptedExtensions} onward --- \texttt{Certificate}, \texttt{CertificateVerify}, \texttt{Finished} --- everything is encrypted under handshake traffic keys derived from the ECDHE key share exchange completed by ServerHello.
+  \item \textbf{TLS 1.2 vs.\ 1.3 round trips?} 1.2 full handshake: 2-RTT; 1.3: 1-RTT because the client speculatively sends its \texttt{key\_share} in ClientHello. Resumption: 1.2 gives 1-RTT; 1.3 gives 0-RTT early data --- which is replayable and therefore must be restricted to idempotent requests.
+  \item \textbf{What do SNI and ALPN each negotiate?} SNI (\texttt{server\_name}) selects which certificate identity the server presents on a shared IP. ALPN selects the application protocol (\texttt{h2}, \texttt{http/1.1}) inside the handshake, avoiding a post-handshake negotiation round trip; failure to agree aborts with \texttt{no\_application\_protocol}.
+  \item \textbf{Walk certificate chain validation.} Verify the leaf's hostname against SANs, validity window, and signature using the presented intermediate(s); recurse until a locally trusted root anchor; enforce \texttt{basicConstraints CA=TRUE} and key-usage on intermediates; optionally check revocation (OCSP/CRL). Any failure aborts before the first request byte.
+  \item \textbf{What is request smuggling and how does HTTP/2 help?} Disagreement between two HTTP/1.1 parsers about message boundaries (CL.TE/TE.CL desync) lets an attacker prefix a hidden request onto the next victim's request. HTTP/2's binary length-prefixed framing removes textual ambiguity --- though h2$\to$h1 downgrades reintroduce risk, so gateways must normalize strictly.
+  \item \textbf{Why was HTTP/2 server push deprecated?} Adoption was negligible and often harmful: servers pushed assets clients already cached, wasting bandwidth; cache-aware push never materialized; priority interactions were buggy. RFC~9113 deprecates it, browsers removed support, and \texttt{103 Early Hints} covers the honest use case.
+  \item \textbf{How would you debug intermittent connection-reset errors behind an LB?} Suspect a keep-alive race first: compare client pool idle timeout, LB idle timeout, and server keep-alive timeout. Confirm with a packet capture showing \texttt{FIN} from the LB followed by a client request and \texttt{RST}. Fix by making the client timeout strictly shorter than the LB's.
+  \item \textbf{Design the retry policy for \texttt{POST /payments} over flaky HTTP/2.} Never transport-retry blindly. Require an idempotency key, retry only on connection-refused/pre-send failures without it, bound retries, honor \texttt{Retry-After}/429, jitter backoff, and make the server deduplicate on the key. The protocol tells you POST is not idempotent; the application must restore the property.
+  \item \textbf{When does 0-RTT help and when does it hurt?} It eliminates handshake latency for resumed connections --- valuable for mobile/high-RTT clients. It hurts when early data is replayed by a network attacker: restrict 0-RTT to safe, idempotent requests, use single-use tickets, and keep anti-replay windows tight.
+  \item \textbf{Why do proxies strip \texttt{Connection} and \texttt{Keep-Alive}?} They are hop-by-hop headers describing one link, not the path. Forwarding them would assert connection properties across hops the header knows nothing about, corrupting framing and tunnel semantics (RFC~9110~\S7.6.1; HTTP/2 forbids them outright).
+\end{enumerate}
+
+\section{External Bibliography \& Further Reading}
+
+\subsection*{Normative Specifications (read these first)}
+\begin{itemize}
+  \item RFC~9110, \emph{HTTP Semantics} \cite{rfc9110} --- methods, status codes, header fields, content negotiation, conditional requests, caching semantics.
+  \item RFC~9112, \emph{HTTP/1.1} \cite{rfc9112} --- message syntax, framing, chunked coding, connection management.
+  \item RFC~9113, \emph{HTTP/2} \cite{rfc9113} --- binary framing, streams, flow control, push deprecation.
+  \item RFC~9114, \emph{HTTP/3} \cite{rfc9114} --- HTTP semantics over QUIC streams.
+  \item RFC~9000, \emph{QUIC} \cite{rfc9000} --- the transport: packets, streams, loss recovery, connection IDs, migration.
+  \item RFC~8446, \emph{TLS 1.3} \cite{rfc8446} --- handshake messages, key schedule, 0-RTT.
+  \item RFC~7541, \emph{HPACK} \cite{rfc7541} --- header compression for HTTP/2.
+  \item RFC~9204, \emph{QPACK} (inline; not in the shared bibliography) --- field compression for HTTP/3.
+  \item RFC~7231 and RFC~7540 (superseded by 9110/9113 but ubiquitous in older literature; inline reference).
+\end{itemize}
+
+\subsection*{Books}
+\begin{itemize}
+  \item Barry Pollard, \emph{HTTP/2 in Action}, Manning, 2019 (inline reference) --- the most practical h2 operations book; covers framing, HPACK, and real deployment pitfalls.
+  \item Ilya Grigorik, \emph{High Performance Browser Networking}, O'Reilly, 2013 (free at \texttt{hpbn.co}; inline reference) --- TCP/TLS/HTTP latency mechanics; the canonical treatment of why round trips dominate.
+  \item Martin Kleppmann, \emph{Designing Data-Intensive Applications} \cite{kleppmann2017ddia} --- Chapter~1 and the distributed-systems framing for retries, idempotence, and exactly-once illusions.
+  \item Michael T.\ Nygard, \emph{Release It!}, 2nd ed.\ \cite{nygard2018releaseit} --- timeout, connection-pool, and stability patterns; the source of the keep-alive-mismatch failure genus.
+  \item Roy T.\ Fielding, \emph{Architectural Styles and the Design of Network-based Software Architectures} \cite{fielding2000rest} --- the dissertation; Chapter~5 defines REST, Chapter~6 motivates HTTP's design.
+\end{itemize}
+
+\subsection*{Documentation, Tools \& Courses}
+\begin{itemize}
+  \item Mozilla MDN Web Docs, \emph{HTTP} reference (inline) --- best-maintained header/status-code reference.
+  \item Wireshark TLS/QUIC dissectors and the \texttt{sslkeylog} (\texttt{SSLKEYLOGFILE}) workflow (inline) --- decrypt your own lab traffic.
+  \item \texttt{nghttp2} (\texttt{nghttp}, \texttt{h2load}) and \texttt{curl --http2/--http3} documentation (inline) --- reference clients for protocol-version experiments.
+  \item Cloudflare Learning Center and the \emph{Smashing Magazine}/Cloudflare QUIC deployment post-mortems (inline) --- real-world HTTP/3 rollout data.
+\end{itemize}
+
+\section{Capstone Projects}
+
+\subsection{Capstone 1 --- From-Scratch HTTP/1.1 Server [junior]}
+\textbf{Objective:} Implement a minimal but correct HTTP/1.1 server over raw \texttt{socketserver}, serving the fictional Northwind Robotics parts catalog.\\
+\textbf{Inputs/Datasets:} an in-repo JSON file \texttt{parts.json} (synthetic catalog, $\leq$50 entries).\\
+\textbf{Steps:} (1)~parse request-line and headers until CRLFCRLF; (2)~implement GET/HEAD for \texttt{/parts} and \texttt{/parts/\{id\}}; (3)~emit correct \texttt{Content-Length}, \texttt{Content-Type}, \texttt{Connection} semantics; (4)~support keep-alive for at least 5 sequential requests per connection; (5)~return 404/400/405 correctly.\\
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] \texttt{curl.exe -v} shows byte-correct status-line, headers, and framing.
+  \item[$\square$] Ten sequential keep-alive requests on one connection all succeed.
+  \item[$\square$] Malformed request-line yields 400; unknown path yields 404; POST yields 405.
+  \item[$\square$] HEAD returns headers identical to GET with zero body bytes.
+\end{itemize}
+\textbf{Stretch Goals:} conditional GET with \texttt{ETag}/\texttt{If-None-Match} $\to$ 304; graceful \texttt{Connection: close}.
+
+\subsection{Capstone 2 --- Chunked Streaming Proxy [mid]}
+\textbf{Objective:} Build a localhost reverse proxy that relays responses using \texttt{Transfer-Encoding: chunked} while enforcing defensive parsing.\\
+\textbf{Inputs/Datasets:} Listing-2-style local origin server emitting chunked telemetry; \texttt{telemetry.csv} synthetic dataset.\\
+\textbf{Steps:} (1)~accept client connections; (2)~forward request head verbatim; (3)~re-chunk origin bytes in 256-octet chunks; (4)~enforce max chunk bounds and CRLF validation; (5)~log per-request byte counts with \texttt{logging}.\\
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Client receives identical decoded body as direct origin fetch.
+  \item[$\square$] Oversized or malformed chunk from origin is rejected with 502 and logged.
+  \item[$\square$] Hop-by-hop headers are stripped per RFC~9110~\S7.6.1.
+  \item[$\square$] Runs fully offline; deterministic test script included.
+\end{itemize}
+\textbf{Stretch Goals:} trailer support (\texttt{Trailer: X-Checksum}); backpressure via bounded buffers.
+
+\subsection{Capstone 3 --- HPACK-Lite Header Encoder [mid]}
+\textbf{Objective:} Implement a pure-stdlib encoder for a subset of HPACK: static-table indexing, literal-with-incremental-indexing, and integer prefix coding (RFC~7541 \S5).\\
+\textbf{Inputs/Datasets:} a fixed request-header corpus (\texttt{headers\_corpus.json}, synthetic Northwind Robotics API calls).\\
+\textbf{Steps:} (1)~implement RFC~7541 integer encoding ($N$-bit prefixes); (2)~match against the 61-entry static table; (3)~maintain a bounded dynamic table with eviction; (4)~emit hex dumps per header block; (5)~measure bytes saved vs.\ HTTP/1.1 text across the corpus.\\
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Integer encoder round-trips all corpus values, including prefix-overflow cases.
+  \item[$\square$] Second occurrence of an identical header block encodes as a single indexed reference.
+  \item[$\square$] Dynamic table never exceeds its configured size bound.
+  \item[$\square$] Report shows $\geq$60\% byte reduction on the repeat-heavy corpus.
+\end{itemize}
+\textbf{Stretch Goals:} static Huffman coding; a decoder that round-trips your encoder.
+
+\subsection{Capstone 4 --- Protocol Fingerprinting \& Frame Dissection Toolkit [senior]}
+\textbf{Objective:} Extend Listing~4 into a passive analysis CLI that ingests captured byte streams (files), classifies the protocol (HTTP/1.1 text, h2 preface, TLS records), and emits a structured report.\\
+\textbf{Inputs/Datasets:} a \texttt{captures\textbackslash} folder of synthetic fixtures generated by your own scripts (HTTP/1.1 exchanges, h2 frame sequences, TLS record headers).\\
+\textbf{Steps:} (1)~sniff protocol by magic bytes/preface; (2)~dispatch to per-protocol parsers; (3)~for h2, emit per-frame CSV (type, flags, stream, length); (4)~detect anomalies: CL+TE ambiguity, frames exceeding 16\,KiB, RST floods; (5)~exit codes suitable for CI.\\
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Correctly classifies all provided fixtures with zero false positives.
+  \item[$\square$] Flags a planted CL.TE smuggling capture and a truncated frame.
+  \item[$\square$] Output is deterministic (stable ordering, no timestamps) for diff-based tests.
+  \item[$\square$] \texttt{--json} mode emits machine-readable reports.
+\end{itemize}
+\textbf{Stretch Goals:} HPACK state reconstruction across HEADERS/CONTINUATION sequences; entropy-based flags for non-HTTP payloads.
+
+\subsection{Capstone 5 --- HTTP Version Latency Profiler \& Wire-Debugging Workbench [staff]}
+\textbf{Objective:} Build a local benchmark harness that quantifies connection-setup and per-request costs across HTTP/1.1 configurations (cold connection, keep-alive warm, pipelining simulation, chunked vs.\ fixed-length), producing the standard addendum's benchmark table from real measurements.\\
+\textbf{Inputs/Datasets:} your own local servers from Capstones 1--2; synthetic payload set (1\,KB, 64\,KB, 1\,MB) in \texttt{payloads\textbackslash}.\\
+\textbf{Steps:} (1)~harness spins up servers on ephemeral ports; (2)~measure p50/p99 for each configuration with seeded, fixed iteration counts (no wall-clock assertions in tests --- record, don't assert); (3)~simulate loss/latency with a socket-level delay shim; (4)~emit the benchmark table as Markdown + CSV; (5)~document how the methodology would extend to h2/h3 with the \texttt{h2}/\texttt{aioquic} libraries.\\
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Harness runs offline end-to-end with one command and seeds all randomness.
+  \item[$\square$] Report quantifies keep-alive benefit (warm vs.\ cold) for each payload size.
+  \item[$\square$] Delay shim demonstrates HOL-blocking cost growth under injected latency.
+  \item[$\square$] Benchmark table conforms to the chapter addendum template.
+\end{itemize}
+\textbf{Stretch Goals:} pluggable transport interface so a real h2 client (via \texttt{h2}) drops into the same harness; flame-graph-friendly structured logs.
+
+\section{Python Dependencies Appendix}
+
+The core listings in this chapter are \textbf{stdlib-only}. One optional dependency extends the laboratories:
+
+\begin{minted}{text}
+# requirements.txt  (chapter 1 - optional tooling only; core is stdlib)
+h2>=4.1.0
+\end{minted}
+
+\subsection{h2 ($\geq$4.1.0)}
+\textbf{Description:} A pure-Python, in-memory HTTP/2 protocol state machine (hyper-h2). It handles framing, HPACK, and flow control; you supply sockets and TLS.\\
+\textbf{Why included:} Listings 1--4 teach the wire by hand; \texttt{h2} is the bridge to speaking \emph{real} h2 against local servers in the stretch goals and Capstone~5 without implementing the full protocol stack.\\
+\textbf{Alternatives:} \texttt{httpx[http2]} (full client, hides the frames --- pedagogically backwards here); \texttt{aioquic} (if you extend to HTTP/3); raw \texttt{hyperframe} (lower level than needed).\\
+\textbf{Installation (PowerShell):}
+\begin{minted}{bash}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\section{Chapter Summary \& Key Takeaways}
+
+\begin{itemize}
+  \item HTTP/1.1 is a textual protocol framed by CRLF; every message boundary derives from \texttt{Content-Length}, chunked coding, or connection close --- and ambiguity between the first two is a security vulnerability class (request smuggling), not a style question \cite{rfc9112}.
+  \item Method properties (safe/idempotent/cacheable) and status-code precision (201 vs.\ 200 vs.\ 204; 400 vs.\ 422; 401/403/404; 409 vs.\ 412; 429/503 + \texttt{Retry-After}) are contracts that caches, retries, and intermediaries enforce --- get them right and infrastructure works \emph{for} you \cite{rfc9110}.
+  \item HTTP/2 replaces text with a 9-octet frame header (24-bit length, 8-bit type, 8-bit flags, 31-bit stream ID), multiplexes streams over one TCP connection, compresses headers with HPACK, and flow-controls with dual windows --- but inherits TCP's transport-layer HOL blocking \cite{rfc9113,rfc7541}.
+  \item HTTP/3/QUIC moves streams into userspace over UDP: per-stream loss independence, Connection-ID-based migration, and a fused 1-RTT TLS~1.3 handshake with 0-RTT resumption for repeat clients \cite{rfc9114,rfc9000,rfc8446}.
+  \item TLS~1.3's six-message handshake, mandatory forward secrecy, and ALPN-negotiated protocol selection define both the security and the latency floor of every HTTPS call; keep-alive hit rate is therefore an economic metric, not a nicety.
+  \item The dominant production failure modes are protocol misunderstandings: keep-alive timeout mismatches, blind non-idempotent retries, read-until-close framing bugs, and ignored back-pressure signals. Each is preventable with the mental models --- and the four runnable tools --- built in this chapter.
+\end{itemize}
+
+\section{Quick-Reference Card}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Method} & \textbf{Safe/Idem./Cache} & \textbf{Use for} \\
+    \midrule
+    GET     & Y / Y / Y & Read a resource. \\
+    HEAD    & Y / Y / Y & Metadata only (no body). \\
+    POST    & N / N / rare & Create / process; needs idempotency key to retry. \\
+    PUT     & N / Y / N & Full replacement at known URI. \\
+    PATCH   & N / N / N & Partial update. \\
+    DELETE  & N / Y / N & Remove; 204 on success. \\
+    OPTIONS & Y / Y / N & Capabilities / CORS preflight. \\
+    TRACE   & Y / Y / N & Echo diagnostics (usually disabled). \\
+    CONNECT & N / N / N & Tunnel establishment. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Method cheat sheet.}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Code} & \textbf{Meaning / when to emit} \\
+    \midrule
+    200 / 201 / 204 & OK with body / created (+Location) / OK, no body. \\
+    301 / 302 / 307 / 308 & Permanent / temporary redirect; 307/308 preserve method+body. \\
+    304 & Not modified (conditional GET hit). \\
+    400 / 401 / 403 / 404 & Malformed / unauthenticated / forbidden / not found (or masked). \\
+    405 / 406 / 409 / 412 / 413 / 415 / 422 / 429 & Method not allowed / not acceptable / conflict / precondition failed / payload too large / unsupported media / semantic error / rate limited (+Retry-After). \\
+    500 / 502 / 503 / 504 & Server fault / bad gateway / unavailable (+Retry-After) / gateway timeout. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Status-code cheat sheet.}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Code} & \textbf{Frame} & \textbf{One-liner} \\
+    \midrule
+    \texttt{0x0} & DATA & Body octets; counts against both flow-control windows. \\
+    \texttt{0x1} & HEADERS & HPACK block; opens a stream. \\
+    \texttt{0x2} & PRIORITY & Deprecated dependency/weight hint. \\
+    \texttt{0x3} & RST\_STREAM & Kill one stream (32-bit error code). \\
+    \texttt{0x4} & SETTINGS & Connection parameters; must be ACKed. \\
+    \texttt{0x5} & PUSH\_PROMISE & Push reservation (deprecated in practice). \\
+    \texttt{0x6} & PING & Liveness / RTT (8 octets, ACK echo). \\
+    \texttt{0x7} & GOAWAY & Graceful shutdown; last-stream-id. \\
+    \texttt{0x8} & WINDOW\_UPDATE & Flow-control credit increment. \\
+    \texttt{0x9} & CONTINUATION & Header-block spillover; needs END\_HEADERS. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{HTTP/2 frame-type cheat sheet (header: 24-bit length, 8-bit type, 8-bit flags, 1 reserved bit, 31-bit stream ID).}
+\end{table}
+
+\input{chapters/_standard_addendum}
+

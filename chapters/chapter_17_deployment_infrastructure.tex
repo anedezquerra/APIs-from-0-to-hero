@@ -1,0 +1,2869 @@
+%% ============================================================================
+%% Chapter 17: Deployment & Infrastructure: Containers, Gateways & Edge
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Deployment \& Infrastructure: Containers, Gateways \& Edge}
+\label{ch:deployment}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Every chapter before this one ended at the same invisible boundary: the
+API worked \emph{on your machine}. This chapter is about the far harsher
+question of whether it keeps working while the machine underneath it is
+being replaced, scaled, drained, upgraded, or killed. Deployment is not a
+soup of YAML that ops people sprinkle on finished code; it is the
+continuation of the API contract by other means. A client does not
+experience your code --- it experiences the behavior of your code
+\emph{while infrastructure is changing around it}. The difference between
+a platform and a pile of services is whether a routine Tuesday-afternoon
+deploy is indistinguishable, from the caller's side, from no deploy at all.
+
+Three ideas organize everything that follows. First, the \emph{immutable
+artifact}: a container image is the unit of deployment, and its quality is
+a security and reliability property, not a cosmetic one. Multi-stage
+builds, pinned digests, non-root users, and read-only filesystems are not
+hygiene theater; they shrink the attack surface to a fraction of a
+convenience image and make every byte in production traceable to a
+commit. Second, \emph{process discipline}: inside the container your
+process is PID~1, which makes signal handling your responsibility, and
+termination is a four-act protocol --- stop accepting, drain in-flight
+work, time out, exit --- that must be choreographed with the platform's
+\emph{preStop} hooks, \texttt{terminationGracePeriodSeconds}, and the
+embarrassingly long lag between a Pod dying and the rest of the cluster
+noticing. Third, \emph{progressive delivery}: you never actually deploy a
+version; you migrate traffic between versions, gated by metrics, with a
+rollback path rehearsed before it is needed~\cite{nygard2018releaseit,beyer2016sre}.
+
+We treat the API gateway as what it operationally is --- a policy
+enforcement point that absorbs cross-cutting concerns (JWT validation,
+rate limiting, request transformation, canary routing) so the service
+code does not --- and we draw the boundary lines between gateway, ingress,
+and service mesh precisely, because muddling them produces double TLS
+terminations, duplicated rate limits, and unowned failures. On Kubernetes
+we go past the tour and into the semantics that bite: the exact failure
+behavior of startup versus readiness versus liveness probes (demonstrated
+with a deterministic simulator, not asserted), the CPU-throttling latency
+trap that \texttt{limits} create, HPA stabilization windows,
+PodDisruptionBudgets, and the rolling-update arithmetic of
+\texttt{maxSurge} and \texttt{maxUnavailable}. We close the loop at the
+edge: TLS termination placement, certificate automation, CDN caching rules
+for APIs, WAF essentials, and the north-south/east-west distinction that
+decides which of these boxes a packet even visits.
+
+Everything runnable is offline, deterministic, and localhost-only: a
+graceful-shutdown proof that catches a termination signal \emph{during} a
+slow request and shows the drain completing; a probe-semantics simulator
+that replays a boot, a dependency outage, and a deadlock against the
+kubelet's rules; and a canary analyzer that runs Wald's sequential
+probability ratio test over synthetic metric series and promotes or rolls
+back on evidence, not vibes. The Dockerfile and the Kubernetes manifests
+are complete and production-shaped but are \emph{reviewed line by line},
+not applied --- reading infrastructure critically is the skill this
+chapter exists to teach.
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch17-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able
+to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Author a production multi-stage Dockerfile for a FastAPI service:
+        separate build and runtime stages, choose between slim and
+        distroless bases, run as a non-root \texttt{USER}, control the
+        build context with \texttt{.dockerignore}, order instructions for
+        layer-cache reuse, pin base images by digest, and wire
+        \texttt{HEALTHCHECK} and read-only filesystems --- and justify
+        every line as attack-surface or reproducibility engineering.
+  \item Explain the PID~1 problem and implement the graceful-shutdown
+        sequence --- stop accepting, drain, timeout, exit --- including
+        uvicorn's \texttt{SIGTERM} behavior, \emph{preStop} hooks, and
+        load-balancer connection draining, and prove drain semantics
+        empirically with the chapter's signal-driven demo.
+  \item Compare Kong, Envoy, and NGINX as API gateways across routing,
+        authentication offload, rate limiting, transformation, and canary
+        support; position gateway versus ingress versus service mesh; and
+        argue for the gateway as the policy enforcement point for
+        north-south traffic.
+  \item Design Kubernetes workloads for APIs with correct probe semantics
+        (startup gates liveness/readiness; readiness removes endpoints
+        without restarts; liveness restarts only process-local death),
+        resource requests and limits that avoid throttle-induced latency,
+        HPA metrics and stabilization windows, PodDisruptionBudgets, and
+        rolling-update parameters chosen from replica-count arithmetic.
+  \item Select and operate a progressive-delivery strategy --- blue-green,
+        canary with traffic-splitting math and metric-gated promotion, or
+        feature flags --- including automated rollback signals and the
+        expand-and-contract database discipline that makes rollbacks
+        possible at all (Chapter~\ref{ch:versioning}).
+  \item Place TLS termination deliberately (edge, re-encrypt,
+        passthrough), automate certificate lifecycles, define CDN cache
+        behavior for APIs (what to cache, cache keys, purge semantics),
+        apply WAF essentials, and classify any hop as north-south or
+        east-west.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes Chapters~0--16, with four load-bearing dependencies.
+Chapter~\ref{ch:fastapi} (Building APIs with FastAPI) supplies the Orders
+API we containerize and the \texttt{TestClient}/uvicorn mechanics the
+shutdown demo leans on~\cite{fastapidocs}. Chapter~\ref{ch:rate_limiting}
+(Rate Limiting) supplies the algorithms the gateway offloads and the
+header contract the edge must preserve.
+Chapter~\ref{ch:microservices} (Microservices \& Resilience) supplies
+timeouts, retries, and circuit breakers --- the behaviors that make
+connection draining and endpoint-removal lag survivable rather than
+fatal~\cite{newman2021microservices}. Chapter~\ref{ch:api_security} (API
+Security Engineering) supplies the JWT validation, secret handling, and
+transport-security vocabulary reused at the gateway and the edge. The
+expand-and-contract migration discussion calls back to
+Chapter~\ref{ch:versioning} (Versioning \& Evolution). The Twelve-Factor
+App's process and config factors~\cite{twelvefactor} are referenced
+throughout; a passing familiarity with the release-engineering chapter of
+the Google SRE book~\cite{beyer2016sre} helps but is not required.
+
+\subsection*{Setup}
+All runnable listings execute offline on Windows with Python~3.11+ and
+localhost only. One-time setup from PowerShell in a scratch directory:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi uvicorn httpx pytest pyyaml
+\end{minted}
+
+The Dockerfile and Kubernetes manifests are reviewed, not applied, so no
+Docker daemon or cluster is required. If you want to go further,
+Section~\ref{sec:ch17-deps} gives \texttt{winget} install lines for the
+optional toolchain (\texttt{docker}, \texttt{kubectl}, \texttt{k6}).
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch17-mechanics}
+
+\subsection{The Immutable Artifact: What a Container Image Actually Is}
+\label{sec:ch17-image}
+
+A container image is not a lightweight virtual machine and it is not a
+zip file of your app. It is a \emph{content-addressed stack of filesystem
+layers} plus a small JSON manifest: each layer is a diff, each diff is
+addressed by the SHA-256 of its contents, and the image itself is
+addressed by the digest of the manifest. Two operational facts follow
+immediately, and both are security facts before they are convenience
+facts. First, layers are shared and cached: two images built from the
+same base literally share those bytes on disk, which is why base-image
+choice dominates image size and why instruction ordering dominates build
+time. Second, a \emph{tag} like \texttt{3.12-slim} is a mutable pointer a
+registry can retarget at any time, while a \emph{digest}
+(\texttt{python@sha256:\ldots}) names exactly one manifest forever.
+Pinning by digest is the difference between ``we deployed what we
+tested'' and ``we deployed whatever the tag pointed at that morning.''
+
+\begin{definition}[Immutable artifact]
+An \emph{immutable artifact} is a deployable unit whose contents are fixed
+at build time and identified by a cryptographic digest, so that every
+running instance can be traced to exactly one build, and a rollback is a
+pointer change to a previous digest rather than a new build.
+\end{definition}
+
+\textbf{Multi-stage anatomy.} A multi-stage Dockerfile contains at least
+two \texttt{FROM} instructions. The first stage --- the \emph{build}
+stage --- is allowed to be fat: compilers, headers, package managers, and
+your full dependency resolver live there, because that stage is discarded.
+The final stage --- the \emph{runtime} stage --- receives only copied
+artifacts: a virtual environment or a \texttt{site-packages} tree, your
+source, nothing else. The attack-surface math is simple and brutal: every
+binary in the runtime image is a thing an attacker with remote code
+execution can invoke, so a runtime stage containing \texttt{gcc},
+\texttt{curl}, and a shell is a gift; a runtime stage containing
+\texttt{python}, your wheels, and no shell at all forces an attacker to
+bring their own tooling through whatever hole they already have.
+
+\textbf{Base-image spectrum.} The practical spectrum runs from
+\texttt{python:3.12} (full Debian, $\sim$1~GB, everything present,
+everything exposable) through \texttt{python:3.12-slim}
+($\sim$150~MB, no compiler, a shell and coreutils remain) to
+\textit{distroless}
+(\texttt{gcr.io/distroless/python3}: Python, glibc, CA certificates, and
+\emph{nothing else} --- no shell, no package manager, typically
+$\sim$50--80~MB for a FastAPI service). Distroless is the strongest
+default for interpreters that need no OS packages; slim is the pragmatic
+choice when you need one or two system libraries or when your
+organization's vulnerability scanner needs an OS package database to
+reason about. The wrong default is the full image ``because something
+might need it'' --- something might also exploit it.
+
+\textbf{Non-root, read-only, health-checked.} Three more lines of the
+same argument. Containers on Docker and Kubernetes run as UID~0 by
+default; a process that escapes as container-root is far closer to host
+root than one that first has to escalate from an unprivileged UID, so the
+runtime stage ends with \texttt{USER} set to a created non-root account.
+A \texttt{readOnlyRootFilesystem} (or \texttt{docker run --read-only})
+turns whole exploit classes --- webshell drops, config tampering, binary
+replacement --- into no-ops, at the price of explicitly mounting writable
+\texttt{tmpfs} for the few paths that genuinely need writes.
+\texttt{HEALTHCHECK} (or its Kubernetes successor, the probe, which
+subsumes it there) encodes the service's own opinion of its health into
+the artifact instead of leaving it tribal.
+
+\textbf{Layer-caching discipline.} BuildKit caches each instruction's
+result and invalidates the cache from the first changed instruction
+downward. The discipline is therefore: order instructions from
+least-frequently-changed to most-frequently-changed (base image, system
+packages, dependency manifests, dependency install, \emph{then} source),
+and control what \texttt{COPY . .} can even see with
+\texttt{.dockerignore} --- excluding \texttt{.git}, virtual environments,
+test artifacts, and any secrets that wandered into the working tree. An
+unignored \texttt{.env} copied into an image layer is a credential leak
+that survives deletion, because the layer remains in the image history.
+
+\begin{warningbox}
+A file deleted in a later \texttt{RUN rm} is still present in the earlier
+layer and recoverable from the image. ``Install, use, delete in one
+\texttt{RUN}'' is a size optimization; ``copy secret, delete secret in a
+later layer'' is a breach. Secrets never enter the build context or a
+layer --- use BuildKit \texttt{--mount=type=secret} for build-time needs
+and runtime secret mounts for deploy-time needs
+(Chapter~\ref{ch:api_security}).
+\end{warningbox}
+
+\subsection{Process Discipline: PID 1, Signals, and the Four-Act Shutdown}
+\label{sec:ch17-process}
+
+In a Linux namespace, PID~1 is special in two ways that matter to an API
+author. First, orphaned processes are re-parented to PID~1, which is
+responsible for reaping zombies; second, and more important here, a
+process only receives a signal it has not installed a handler for if that
+signal's default disposition applies --- and for PID~1 the kernel
+\emph{only delivers signals for which a handler is explicitly installed}.
+An application that spawns a shell wrapper that spawns the server, or a
+naive process that never calls \texttt{signal.signal}, can therefore be
+unreachable by \texttt{SIGTERM}: Kubernetes asks politely, waits
+\texttt{terminationGracePeriodSeconds}, and then issues
+\texttt{SIGKILL} --- every in-flight request severed mid-write. The fixes
+are boring and absolute: use \texttt{exec} (or no shell at all --- the
+exec form of \texttt{ENTRYPOINT}/\texttt{CMD}) so your server \emph{is}
+PID~1, and let the server framework install proper handlers. uvicorn
+does: on \texttt{SIGTERM} it sets \texttt{should\_exit}, stops accepting
+new connections, waits for in-flight requests up to
+\texttt{timeout\_graceful\_shutdown}, runs ASGI lifespan shutdown, and
+exits.
+
+\begin{definition}[Graceful shutdown sequence]
+\emph{Graceful shutdown} is the ordered protocol: (1)~\textbf{stop
+accepting} --- close listeners and fail readiness so no new traffic is
+routed; (2)~\textbf{drain} --- allow in-flight requests to finish up to a
+budget; (3)~\textbf{timeout} --- abort stragglers that exceed the budget
+so the process cannot hang forever; (4)~\textbf{exit} --- release
+resources and terminate with a status the supervisor can interpret.
+Skipping act~(1) routes new work to a dying instance; skipping act~(2)
+drops requests clients paid for; skipping act~(3) turns a deploy into a
+wedged rollout.
+\end{definition}
+
+The platform choreography has two sharp edges. First, the
+\textbf{preStop hook}: when Kubernetes decides to terminate a Pod, it
+runs the container's \texttt{preStop} hook \emph{before} sending
+\texttt{SIGTERM}, and endpoint removal (updating the Service's Endpoint
+objects, propagating to kube-proxy/iptables or the gateway's load
+balancer) happens \emph{concurrently} --- not before, not after. A Pod
+can therefore receive \texttt{SIGTERM} while stale endpoints still route
+it fresh traffic for several seconds. The standard mitigation is a
+deliberate \texttt{sleep} in \texttt{preStop} (5--10~seconds is common)
+so the process keeps serving while the endpoint update fans out, then
+accepts the signal into a quieted listener. Second,
+\textbf{connection draining at the load balancer} is the same idea one
+tier up: cloud LBs and gateways mark the target ``draining,'' stop
+sending new connections, and wait for existing ones --- your
+\texttt{terminationGracePeriodSeconds} must exceed the LB drain timeout
+plus your slowest request, or the platform kills the process with work
+still in flight. Section~\ref{sec:ch17-lab} replays the war story in
+which exactly one missing \texttt{preStop} sleep turned a routine rolling
+deploy into dropped checkouts.
+
+\begin{keyconceptbox}
+Termination is a \emph{race you must rig}, not an event you can order:
+SIGTERM, endpoint removal, and LB draining start concurrently. You rig it
+by making your server tolerant of late traffic (preStop sleep), tolerant
+of early signals (drain logic), and explicit about the budget
+(terminationGracePeriodSeconds $>$ slowest request $+$ preStop delay).
+\end{keyconceptbox}
+
+\subsection{The API Gateway: Policy Enforcement Point for North-South Traffic}
+\label{sec:ch17-gateway}
+
+An API gateway is a reverse proxy with opinions. It terminates client
+connections at the edge of your platform and applies the cross-cutting
+concerns that must be uniform across services: authentication offload,
+rate limiting, request/response transformation, routing, and telemetry.
+The architectural argument is the one from Chapter~\ref{ch:microservices}:
+any policy implemented in $N$ services is implemented $N$ times,
+differently, and audited never; a policy enforced once at the gateway is
+uniform, versioned, and testable. \textbf{JWT validation at the edge} is
+the canonical example --- the gateway verifies the signature, expiry, and
+issuer against cached JWKS and rejects forged or expired tokens before
+they consume a single cycle of service CPU, while services receive an
+already-authenticated identity in a trusted header
+(Chapter~\ref{ch:api_security}). \textbf{Rate limiting at the gateway}
+(Chapter~\ref{ch:rate_limiting}) protects every upstream uniformly with
+one configuration language instead of $N$ middleware copies.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    \textbf{Capability} & \textbf{Kong} & \textbf{Envoy} & \textbf{NGINX (OSS / Plus)} \\
+    \midrule
+    Core proxy engine & NGINX + OpenResty (Lua) & purpose-built C++ L4/L7 proxy & NGINX \\
+    Routing & rich: host/path/method/headers, plugins & very rich: L7 match, weights, retries & host/path/regex map; headers via config \\
+    Auth offload (JWT) & first-class plugin (JWKS, claims checks) & JWT authn filter (JWKS, claims) & Plus native; OSS via njs/Lua modules \\
+    Rate limiting & plugin (local/Redis, per consumer/route) & local token bucket + global rate-limit service & \texttt{limit\_req} (GCRA); Plus adds key-value store \\
+    Request transformation & plugin ecosystem (Lua) & Lua/Wasm filters; header/body mutation & \texttt{sub\_filter}, headers, njs scripting \\
+    Canary routing & traffic-split plugin, weighted upstreams & native weighted clusters (first-class) & \texttt{split\_clients} / Plus API \\
+    Extensibility model & plugin hub + custom Lua/Go/JS/Python & Wasm/Lua/ext\_proc; the mesh data-plane standard & modules at compile time; njs runtime \\
+    Config style & declarative (DB or deck YAML), dynamic API & xDS APIs (built for control planes) & static files + reload (Plus: dynamic API) \\
+    Operational posture & gateway-first, admin API, enterprise suite & building block: gateways/meshes embed it & ubiquitous, minimal deps, least dynamic \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Gateway capabilities matrix. Envoy is the substrate many
+  gateways and meshes (Istio, Consul, Contour, Gloo) are built from; Kong
+  is a batteries-included gateway on NGINX; NGINX itself is the minimal,
+  static-configuration baseline.}
+  \label{tab:ch17-gateway-matrix}
+\end{table}
+
+\textbf{Gateway vs.\ ingress vs.\ mesh.} These three are conflated
+constantly and are distinguished by \emph{what they terminate and where
+their policy boundary sits}. \emph{Ingress} (the Kubernetes resource and
+its controllers) is the narrowest: a cluster-standard way to route
+north-south HTTP(S) to Services, with TLS termination and host/path
+rules --- a gateway subset with a portable vocabulary. An \emph{API
+gateway} is a product-tier edge: everything ingress does plus auth
+offload, rate limiting, transformation, developer portals, and
+analytics --- the \textbf{policy enforcement point} for north-south
+traffic. A \emph{service mesh} (sidecar or ambient proxies on every
+workload) governs \emph{east-west} traffic: service-to-service mTLS,
+retries, circuit breaking, and telemetry \emph{inside} the platform. The
+common production shape is all three in sequence: CDN/WAF at the
+provider edge, gateway at the platform edge, mesh between services ---
+and the failure mode to avoid is enforcing the same concern in two tiers
+(e.g., rate limiting at gateway \emph{and} mesh with different budgets)
+so neither is the authoritative budget.
+
+\subsection{Kubernetes for APIs: The Semantics That Bite}
+\label{sec:ch17-k8s}
+
+\textbf{Anatomy in one paragraph.} A \emph{Deployment} declares desired
+state --- $N$ identical Pods from one Pod template --- and a controller
+continuously reconciles reality toward it. A \emph{Pod} is the scheduling
+unit: one or more containers sharing a network namespace (one IP) and
+volumes. A \emph{Service} is a stable virtual IP and DNS name that load
+balances across the Pods matching its selector, via an endpoints
+controller that tracks \emph{ready} Pods. Everything below is about the
+gaps between these declarations --- the gaps are where requests die.
+
+\textbf{Probes: three questions, three consequences.} The kubelet asks
+your container three distinct questions, and the failure consequence of
+each is different --- this is the most cargo-culted area of Kubernetes,
+so we state it as a table and then \emph{prove} it with the simulator in
+Section~\ref{sec:ch17-code}.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    & \textbf{Startup} & \textbf{Readiness} & \textbf{Liveness} \\
+    \midrule
+    Question & Has the app finished initializing? & Should this Pod receive traffic \emph{right now}? & Is the process unrecoverably stuck? \\
+    On failure & Retried within budget (\texttt{period} $\times$ \texttt{failureThreshold}); budget exhausted $\Rightarrow$ container \textbf{restarted} & Pod \textbf{removed from Service endpoints}; no restart, no reschedule; re-added on first success & Failure streak $\Rightarrow$ container \textbf{restarted in place} (same Pod, new container) \\
+    Gates & Disables liveness \& readiness until first success & Nothing; evaluated only after startup succeeds & Nothing; evaluated only after startup succeeds \\
+    Should fail when & Still booting & A \emph{recoverable}/external problem: dependency down, overloaded, draining & A \emph{process-local} death: deadlock, wedged event loop \\
+    Typical check & \texttt{/healthz/startup} (cheap, no deps) & \texttt{/healthz/ready} (may check critical deps, shallowly) & \texttt{/healthz/live} (no deps --- deadlocks must be the only failure) \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Probe semantics. The load-bearing row is the second:
+  readiness failure changes \emph{routing}, liveness failure changes
+  \emph{process state}. A readiness probe that also gates liveness
+  restarts Pods for other services' outages; a liveness probe that
+  checks dependencies turns a database blip into a fleet-wide restart
+  storm.}
+  \label{tab:ch17-probes}
+\end{table}
+
+The \textbf{startup probe} exists because boot time and liveness budget
+are unrelated quantities. Without it, a slow-starting application (JVM
+warmup, model load, cache prime) is indistinguishable from a deadlocked
+one, and the liveness budget becomes a boot deadline you never meant to
+set; the simulator's Scenario~B crashes exactly this way. The
+\textbf{readiness/liveness split} encodes a recovery theory: readiness
+says ``wait'' (the problem may be elsewhere --- restarting me cannot fix
+the database), liveness says ``kill me'' (the problem \emph{is} me).
+\textbf{Endpoint-removal lag} completes the picture: readiness and
+termination only update the endpoints object; kube-proxy programming,
+DNS caches, and gateway target lists converge seconds later, which is
+why Section~\ref{sec:ch17-process} insists on the preStop sleep and why
+clients still need retries (Chapter~\ref{ch:microservices}).
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small]
+  % timeline axis
+  \draw[->, thick] (0,0) -- (13.2,0) node[right, font=\footnotesize] {time};
+  % phase bands
+  \fill[packtorange!12] (0,0) rectangle (3.4,2.6);
+  \fill[blue!6] (3.4,0) rectangle (13.0,2.6);
+  \node[note] at (1.7,2.9) {startup phase};
+  \node[note] at (8.2,2.9) {steady state (startup probe retired)};
+  % probe rows
+  \node[flowstep, anchor=west] at (0.2,2.0) {startup probe};
+  \node[flowstep, anchor=west] at (0.2,1.1) {readiness probe};
+  \node[flowstep, anchor=west] at (0.2,0.35) {liveness probe};
+  % startup probe events
+  \foreach \x in {0.9,1.7,2.5} \draw[red!70,thick] (\x,1.85) -- (\x,2.15);
+  \draw[green!50!black,very thick] (3.3,1.85) -- (3.3,2.15) node[above, note, align=center, yshift=2pt] {first success};
+  % readiness events
+  \foreach \x in {4.2,5.0,7.4} \draw[green!50!black,thick] (\x,0.95) -- (\x,1.25);
+  \foreach \x in {5.8,6.6} \draw[red!70,thick] (\x,0.95) -- (\x,1.25);
+  \draw[green!50!black,very thick] (8.2,0.95) -- (8.2,1.25);
+  \node[note, align=left] at (9.6,1.1) {3 fails $\Rightarrow$ endpoint \emph{removed};\\1 success $\Rightarrow$ re-added};
+  % liveness events
+  \foreach \x in {4.2,6.6,8.2} \draw[green!50!black,thick] (\x,0.2) -- (\x,0.5);
+  \foreach \x in {9.8,10.8,11.8} \draw[red!70,thick] (\x,0.2) -- (\x,0.5);
+  \draw[->, thick, red!70] (12.1,0.35) -- (12.8,0.35) node[right, note, align=left] {3 fails $\Rightarrow$\\restart};
+  % annotations
+  \node[note, align=center] at (1.8,1.55) {fails while booting\\(budget: period$\times$threshold)};
+  \draw[dashed, packtgray] (3.4,0) -- (3.4,2.6);
+\end{tikzpicture}
+\caption{Probe lifecycle. The startup probe alone is evaluated during
+boot, protecting slow starts from the liveness budget. After its first
+success, readiness (routing consequence) and liveness (restart
+consequence) run on their own periods.}
+\label{fig:ch17-probes}
+\end{figure}
+
+\textbf{Resources: requests schedule, limits throttle.} Kubernetes uses
+\texttt{requests} for scheduling (bin-packing: a node must have the
+requested CPU/memory free) and as the QoS input, and \texttt{limits} as
+hard ceilings with two very different enforcement mechanisms. Exceed the
+memory limit and the kernel OOM-kills the container --- violent, visible,
+logged. Exceed the CPU \emph{limit} and nothing fails: the kernel's
+Completely Fair Scheduler \emph{throttles} the cgroup for the remainder
+of each 100~ms quota period. The pitfall is that throttling is quantized:
+a service with 8 worker threads and a 400m CPU limit can consume its
+40~ms-of-quota-per-period in the first 5~ms of a burst, then freeze every
+thread --- including the one holding a request --- for up to 95~ms. The
+symptom is p99 latency inflated by \emph{exactly} multiples of ~100~ms
+while average CPU sits far below the limit, which is why CPU-limit
+throttling is the classic cause of ``mystery tail latency'' in Go and
+Python services alike. Operational guidance: always set CPU
+\emph{requests} (they also weight CFS shares under contention), set
+memory requests~=~limits (memory cannot be throttled, so a limit without
+a matching request is pure risk), and either omit CPU limits on
+latency-sensitive services or set them generously above p99 usage and
+alert on \texttt{container\_cpu\_cfs\_throttled\_periods\_total}.
+
+\textbf{HPA: metrics, windows, and flapping.} The Horizontal Pod
+Autoscaler computes $\text{desired} = \lceil \text{current} \times
+\text{currentMetric} / \text{targetMetric} \rceil$ every sync period from
+resource metrics (CPU/memory utilization against \emph{requests}),
+custom metrics (requests per second per pod), or external metrics
+(queue depth). Two details separate operators from tourists: utilization
+is computed against \emph{requests}, so a service with inflated requests
+never autoscales no matter how hot it runs; and the default
+\texttt{scaleDown} stabilization window (300~s) exists because scaling
+down kills in-flight connections --- the window makes downscale
+decisions from the \emph{highest} recommendation in the window, trading
+money for connection stability. Downscale \emph{rate} limits
+(\texttt{policies}: e.g., remove at most 1 pod or 10\% per 60~s) are the
+second half of the same idea.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l l X}
+    \toprule
+    \textbf{\texttt{maxSurge}} & \textbf{\texttt{maxUnavailable}} & \textbf{Serving floor ($R{=}4$)} & \textbf{Cost / risk} \\
+    \midrule
+    1 & 0 & 4 & one surge pod's quota; zero capacity loss --- the default for user-facing APIs \\
+    0 & 1 & 3 & no extra quota; 25\% capacity dip per rollout wave \\
+    1 & 1 & 3 & fastest rollout; both costs at once \\
+    0 & 0 & --- & cannot roll at all; a copy-paste wedge, not a strategy \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Rolling-update arithmetic for a 4-replica Deployment.
+  Percentages are allowed for both fields (rounded: surge up,
+  unavailable down), which keeps the policy correct as HPA moves $R$.}
+  \label{tab:ch17-rollout}
+\end{table}
+
+\textbf{PDBs and rolling updates.} A PodDisruptionBudget states how many
+Pods of a Service may be \emph{voluntarily} unavailable
+(\texttt{minAvailable} or \texttt{maxUnavailable}); node drains and
+cluster upgrades respect it, crashes do not (they are involuntary).
+Without a PDB, \texttt{kubectl drain} will happily evict every replica
+of your API simultaneously. Rolling updates trade capacity for safety via
+two parameters: \texttt{maxSurge} (extra Pods above desired allowed
+during the rollout --- needs quota headroom) and
+\texttt{maxUnavailable} (desired Pods allowed to be down). With $R{=}4$
+replicas, \texttt{maxSurge: 1, maxUnavailable: 0} keeps serving capacity
+at $\ge 4$ throughout at the cost of one extra pod's resources; with
+\texttt{maxUnavailable: 1} you never exceed $R$ but serve a window at
+$R{-}1$. The interaction that bites: HPA plus a bad PDB
+(\texttt{minAvailable} equal to replicas) deadlocks drains, and a
+readiness gate that never passes (new version's probe path renamed)
+turns \texttt{maxUnavailable: 0} into a rollout that cannot proceed ---
+which is the safe failure, and why \texttt{progressDeadlineSeconds}
+exists to fail the rollout loudly instead of wedging it silently.
+
+\subsection{Progressive Delivery: Migrating Traffic, Not Versions}
+\label{sec:ch17-progressive}
+
+\textbf{Blue-green} keeps two full environments; the cutover is an atomic
+traffic switch (DNS, LB target group, or Service selector), and rollback
+is the same switch flipped back. Its virtues are instant rollback and a
+fully warm target; its costs are 2x infrastructure and the cold-start
+problem merely moved (the idle environment rots unless exercised).
+\textbf{Canary} releases the new version to a fraction of traffic and
+promotes through steps --- 1\%, 5\%, 25\%, 50\%, 100\% is a common
+ladder --- comparing SLIs at each step. The traffic-splitting math has
+two subtleties. First, error budgets are ratios, and ratios need volume:
+at a 0.4\% baseline error rate, a 1\% canary serving 100~requests shows
+zero errors with probability $\approx 67\%$ even if the canary is
+perfectly healthy --- small slices are statistically blind, so canary
+steps must be sized by \emph{requests}, not just percentages, which is
+why the analyzer in Section~\ref{sec:ch17-code} works in fixed-size
+batches. Second, weighted splitting must be \emph{stable} for
+stateful-feeling flows: session-affinity-aware hashing (on API key or
+tenant) prevents one client oscillating between versions mid-workflow,
+which matters whenever response shapes differ
+(Chapter~\ref{ch:versioning}).
+
+\begin{definition}[Metric-gated promotion]
+A \emph{metric-gated promotion} advances traffic to the next canary step
+only when a pre-registered analysis over a fixed window passes --- and
+rolls back automatically when regression evidence crosses a threshold.
+The gate is a statistical decision procedure (here: Wald's SPRT with
+error budgets $\alpha$ for false-promote and $\beta$ for false-rollback),
+not a human watching a dashboard; the human designed the procedure.
+\end{definition}
+
+\textbf{Automated rollback signals} worth wiring: error-rate delta
+versus baseline (the SPRT in Listing~\ref{lst:ch17-canary}), latency
+quantile guardrails (p95/p99 against a hard factor of baseline), and
+saturation signals (CPU throttling, connection-pool exhaustion). Signals
+that \emph{look} useful and are not: average latency (hides tails),
+absolute error counts (denominator-blind), and business metrics on short
+windows (too noisy to gate on minute timescales).
+
+\textbf{Feature flags vs.\ deployment strategies} are complements, not
+rivals: deployments change \emph{which binary} runs, flags change
+\emph{which code paths} execute inside one binary. Flags decouple release
+from deploy (ship dark, enable per-tenant, kill-switch instantly) at the
+price of combinatorial code paths and flag-debt; canaries decouple blast
+radius from deploy speed at the price of two contract versions in flight
+simultaneously. Both, therefore, rest on the same foundation:
+\textbf{database compatibility}. The expand-and-contract discipline of
+Chapter~\ref{ch:versioning} is what makes any of this safe: migrations
+run in the \emph{expand} step (add column/table, never rename or drop),
+both binary versions tolerate both shapes, and \emph{contract} (drop,
+rename) ships only after every old binary is gone. Deploying a
+destructive migration \emph{before} the compatible code is the one
+rollout error rollback cannot fix: the old binary comes back, the column
+it needs does not. We name this rule \emph{migrate-expand, code,
+migrate-contract} and treat violations as release blockers.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small]
+  % axes
+  \draw[->, thick] (0,0) -- (13.4,0) node[right, font=\footnotesize] {time};
+  \draw[->, thick] (0,0) -- (0,3.1) node[above, font=\footnotesize] {canary traffic \%};
+  \foreach \y/\p in {0.55/5, 1.35/25, 2.15/50, 2.85/100}
+    \draw[packtgray!40, dashed] (0,\y) -- (13.0,\y) node[pos=0, left, note] {\p\%};
+  % traffic staircase (canary share)
+  \draw[very thick, packtorange] (0.2,0.15) -- (1.2,0.15) -- (1.2,0.55) -- (3.0,0.55)
+    -- (3.0,1.35) -- (5.2,1.35) -- (5.2,2.15) -- (7.4,2.15) -- (7.4,2.85) -- (11.4,2.85);
+  \node[modcap, anchor=south west] at (0.2,3.0) {traffic staircase with metric gates};
+  % analysis windows
+  \foreach \x/\ok in {1.2/1, 3.0/1, 5.2/1, 7.4/1} {
+    \draw[<->, thick, blue!60] (\x-0.15,0.30) -- (\x+1.55,0.30);
+  }
+  \node[note, align=center] at (2.1,0.02) {gate 1: SPRT\\passes};
+  \node[note, align=center] at (4.1,0.02) {gate 2: p95 within\\1.25x baseline};
+  \node[note, align=center] at (6.3,0.02) {gate 3: error delta\\$< \delta$};
+  \node[note, align=center] at (9.4,0.02) {gate 4: full-window\\analysis, then 100\%};
+  % rollback example branch
+  \draw[very thick, red!70, dashed] (3.0,1.35) -- (3.0,0.15) -- (4.4,0.15);
+  \node[note, text=red!70, align=left] at (4.6,0.35) {if any gate fails: LLR $\ge \ln\frac{1-\beta}{\alpha}$\\$\Rightarrow$ automated rollback to 0\%};
+  % completion marker
+  \node[flowstep, fill=green!10] at (12.2,2.85) {promoted};
+\end{tikzpicture}
+\caption{Canary rollout timeline. Each step holds for a fixed analysis
+window while the gate (error-rate SPRT plus latency guardrails,
+Listing~\ref{lst:ch17-canary}) evaluates; evidence crossing the upper
+boundary rolls back automatically, the lower boundary promotes.}
+\label{fig:ch17-canary}
+\end{figure}
+
+\subsection{Edge \& TLS: Where Bytes Get Terminated}
+\label{sec:ch17-edge}
+
+\textbf{TLS termination placement} is a three-way decision with real
+consequences, not a default. \emph{Edge termination} (decrypt at
+CDN/LB/gateway, plaintext inside) minimizes certificate sprawl and
+enables L7 policy, but leaves the last hop plaintext --- acceptable only
+on networks you genuinely control and increasingly non-compliant.
+\emph{Re-encryption} (terminate at the edge, open a \emph{second} TLS
+session to the backend) keeps policy visibility \emph{and} encrypted
+transit at the price of two certificate lifecycles. \emph{Passthrough}
+(L4 forwarding of the encrypted stream to the service) gives end-to-end
+encryption with zero edge visibility --- no WAF, no L7 routing, no JWT
+offload. The common production answer for APIs: terminate at the edge
+with automated public certificates, re-encrypt to services with an
+internal CA (a mesh gives you this as mTLS ``for free''), and reserve
+passthrough for regulated payloads. \textbf{Certificate automation} is
+non-negotiable either way: ACME (Let's Encrypt) at the edge,
+cert-manager or mesh-issued certificates inside --- a manually renewed
+certificate is an outage with a calendar date
+(Chapter~\ref{ch:api_security}).
+
+\textbf{CDN behavior for APIs} is mostly about what \emph{not} to cache.
+Cacheable: truly anonymous, truly idempotent GETs with explicit
+\texttt{Cache-Control} (public reference data, OpenAPI documents, JWKS).
+Never cacheable: authenticated responses (unless the cache key includes
+the auth scope --- rarely worth it), anything with \texttt{Set-Cookie},
+and personalized content. The \textbf{cache key} discipline: default
+keys ignore query strings and headers, so filtered list endpoints
+(Chapter~\ref{ch:pagination}) must either opt out or list their
+query/header inputs in the key; \texttt{Vary} mishandling is the classic
+tenant-data-leak vector. \textbf{Purge} semantics matter more than TTLs
+for mutable resources: if you cannot purge by key or tag on write, keep
+TTLs in seconds and accept staleness as a documented contract
+(Chapter~\ref{ch:idempotency}'s caching half). \textbf{WAF essentials}:
+managed rule sets (OWASP core rules) in front of the gateway, tuned to
+block mode gradually (detect first --- API payloads trip SQLi rules on
+legitimate JSON), plus body-size limits and request-rate anomaly rules
+as the coarse outer net before the gateway's precise per-key limiting
+(Chapter~\ref{ch:rate_limiting}).
+
+\begin{definition}[North-south vs.\ east-west traffic]
+\emph{North-south} traffic crosses the platform boundary: client to
+edge, edge to gateway, gateway to first service. \emph{East-west}
+traffic stays inside: service to service, service to database. The
+distinction selects the control point: gateways, WAFs, and CDNs see only
+north-south; meshes, internal firewalls, and mTLS see east-west. A
+policy applied at the wrong tier (e.g., per-client rate limits enforced
+only east-west) protects nothing, because the abuse never reaches it.
+\end{definition}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[font=\small, node distance=4mm]
+  \node[flowstep, fill=packtgray!8] (client) {API consumer\\(mobile / partner)};
+  \node[flowstep, fill=packtorange!12, right=14mm of client] (cdn) {Provider edge\\CDN + WAF\\TLS terminate (public CA)};
+  \node[flowstep, fill=blue!8, right=12mm of cdn] (gw) {API gateway\\(Kong/Envoy)\\JWT check, rate limit, canary split};
+  \node[flowstep, fill=green!8, right=12mm of gw] (mesh) {mesh sidecar\\mTLS re-encrypt\\retries, telemetry};
+  \node[flowstep, fill=packtgray!8, right=12mm of mesh] (svc) {Orders API pod\\FastAPI/uvicorn\\non-root, read-only fs};
+  \node[flowstep, fill=green!8, below=10mm of svc] (peer) {Inventory API pod};
+  \draw[->, thick] (client) -- node[above, note]{HTTPS 443} (cdn);
+  \draw[->, thick] (cdn) -- node[above, note]{HTTPS, WAF-clean} (gw);
+  \draw[->, thick] (gw) -- node[above, note]{re-encrypted} (mesh);
+  \draw[->, thick] (mesh) -- node[above, note]{mTLS} (svc);
+  \draw[->, thick] (svc) -- node[right, note]{east-west} (peer);
+  % boundary boxes (drawn last; unfilled dashed borders only)
+  \node[draw=packtorange, dashed, fit=(cdn), inner sep=6pt, label={[note]south:provider edge}] {};
+  \node[draw=blue!60, dashed, fit=(gw)(mesh)(svc)(peer), inner sep=8pt, label={[note]south east:your platform}] {};
+  % north-south brace
+  \draw[decorate, decoration={brace, amplitude=5pt}, packtgray]
+    ([yshift=16mm]client.west) -- node[above=6pt, note]{north-south} ([yshift=16mm]gw.east);
+\end{tikzpicture}
+\caption{Request path through edge, gateway, and mesh. TLS terminates
+at the provider edge (public certificate, WAF inspection), is
+re-encrypted to the gateway, and becomes mTLS east-west; each box owns
+exactly the policies its position can see.}
+\label{fig:ch17-requestpath}
+\end{figure}
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch17-code}
+
+This section contains every artifact the chapter discusses: the
+Dockerfile and its build-context guard, the full Kubernetes manifest set
+(reviewed line by line, never applied), and the three runnable,
+offline, deterministic programs --- the graceful-shutdown proof, the
+probe-semantics simulator, and the canary analyzer.
+
+\subsection{Listing 17.1 --- Production Multi-Stage Dockerfile}
+\label{sec:ch17-dockerfile}
+\label{lst:ch17-dockerfile}
+
+\begin{minted}{text}
+# ---------- Stage 1: build (discarded) ----------
+FROM python:3.12-slim AS build
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# ---------- Stage 2: runtime (shipped) ----------
+# Pin by digest for real releases; resolve it with:
+#   docker buildx imagetools inspect python:3.12-slim
+FROM python:3.12-slim AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+RUN groupadd --system app \
+ && useradd --system --gid app --uid 10001 --no-create-home app
+WORKDIR /app
+COPY --from=build /opt/venv /opt/venv
+COPY app/ ./app/
+USER app
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+  CMD ["python", "-c", "import urllib.request,sys; \
+       sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).status == 200 else 1)"]
+ENTRYPOINT ["python", "-m", "uvicorn", "app.main:app", \
+            "--host", "0.0.0.0", "--port", "8080"]
+\end{minted}
+
+Line-by-line, with the reason each line earns its place:
+
+\begin{itemize}
+  \item \textbf{Stage split} (\texttt{AS build} / \texttt{AS runtime}):
+        the build stage owns \texttt{pip} and the resolver; only the
+        finished virtual environment crosses into the runtime stage via
+        \texttt{COPY --from=build}. Compilers, caches, and package
+        managers never ship.
+  \item \texttt{PIP\_NO\_CACHE\_DIR=1}: the pip cache is pure dead weight
+        in a layer --- every cached wheel doubles the cost of the layer
+        that installed it.
+  \item \textbf{venv at a fixed path} (\texttt{/opt/venv}): a virtual
+        environment is a relocatable, root-owned-by-build artifact; the
+        runtime stage sets \texttt{PATH} once and never invokes pip
+        again. \texttt{PYTHONDONTWRITEBYTECODE} plus a read-only root
+        filesystem agree: nothing writes \texttt{.pyc} at runtime.
+  \item \textbf{Cache ordering}: \texttt{COPY requirements.txt} and the
+        \texttt{pip install} precede \texttt{COPY app/} so that a
+        source-only change reuses the entire dependency layer; a
+        dependency change correctly invalidates from the manifest copy
+        downward.
+  \item \textbf{Digest pinning} (commented): tags are mutable registry
+        pointers; a digest is a content hash. Production pipelines
+        resolve the digest at build time (\texttt{imagetools inspect})
+        and record it, so ``what we tested'' and ``what is running'' are
+        the same manifest.
+  \item \textbf{Non-root}: a dedicated system user (fixed UID 10001 so
+        Kubernetes \texttt{runAsUser} can assert the same number) is the
+        last instruction before \texttt{ENTRYPOINT}; everything after
+        \texttt{USER app} runs unprivileged.
+  \item \textbf{\texttt{HEALTHCHECK}}: the image carries its own health
+        opinion --- stdlib \texttt{urllib} against \texttt{/healthz},
+        no \texttt{curl} dependency (slim images lack it; installing it
+        to run a health check would grow the attack surface to check the
+        attack surface). Kubernetes ignores \texttt{HEALTHCHECK} in favor
+        of probes; Docker and compose honor it.
+  \item \textbf{Exec-form \texttt{ENTRYPOINT}}: the JSON array form means
+        uvicorn \emph{is} PID~1 --- no shell wrapper to swallow
+        \texttt{SIGTERM} (Section~\ref{sec:ch17-process}). Binding
+        \texttt{0.0.0.0} is correct \emph{inside} a container: the
+        network namespace is already the isolation boundary.
+\end{itemize}
+
+The build-context guard, without which the cache ordering above is
+fiction (a stray log file changing would invalidate the source layer) and
+secrets can leak into layers:
+
+\begin{minted}{text}
+# .dockerignore
+.git
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+datasets/
+*.md
+.env
+.env.*
+Dockerfile
+.dockerignore
+\end{minted}
+
+Runtime hardening completes the artifact: \texttt{docker run --read-only
+--tmpfs /tmp:rw,noexec,nosuid,size=16m \ldots} gives the process a
+read-only root filesystem with a tiny, non-executable scratch space; the
+Kubernetes equivalent (\texttt{readOnlyRootFilesystem: true} plus an
+\texttt{emptyDir} mounted at \texttt{/tmp}) appears in
+Listing~\ref{lst:ch17-deployment}.
+
+\begin{examplebox}
+\textbf{Size as a report card.} The same Orders API built three ways on
+the authors' reference machine: full \texttt{python:3.12} base:
+$\sim$1.02~GB, 3 high-severity and 41 lower findings from a standard
+scanner. \texttt{python:3.12-slim} multi-stage (Listing 17.1):
+$\sim$165~MB, 0 high, 9 low. Distroless runtime: $\sim$78~MB, 0 high,
+2 low --- and no shell, which flips several scanner findings from
+``exploitable'' to ``unreachable.'' Image size is not vanity; it is
+transfer time, cold-start time, and vulnerability count in one number.
+\end{examplebox}
+
+\subsection{Listing 17.2 --- Kubernetes Manifest Set (Reviewed, Not Applied)}
+\label{sec:ch17-manifests}
+
+The set below deploys the Orders API with a stable track and a canary
+track. Read each block with the justifications; the design review in
+Section~\ref{sec:ch17-lab} walks the same fields as a meeting exercise.
+
+\subsubsection*{Deployment (stable track)}
+\label{lst:ch17-deployment}
+
+\begin{minted}{yaml}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+  labels: {app: orders-api, track: stable}
+spec:
+  replicas: 4
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: {app: orders-api, track: stable}
+  template:
+    metadata:
+      labels: {app: orders-api, track: stable, version: "2.4.1"}
+    spec:
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: api
+          image: registry.northwind-robotics.example/orders-api:2.4.1
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: UVICORN_WORKERS, value: "2"}
+            - {name: UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN, value: "30"}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: orders-api-secrets, key: database-url}
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {memory: 256Mi}     # no CPU limit: throttle pitfall
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          lifecycle:
+            preStop:
+              sleep: {seconds: 8}       # cover endpoint-removal lag
+          startupProbe:
+            httpGet: {path: /healthz/startup, port: http}
+            periodSeconds: 5
+            failureThreshold: 12        # budget: 60 s to boot
+          readinessProbe:
+            httpGet: {path: /healthz/ready, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /healthz/live, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir: {}
+\end{minted}
+
+Field by field: \texttt{replicas: 4} pairs with \texttt{maxSurge: 1,
+maxUnavailable: 0} --- capacity never dips below 4 during a rollout, at
+the price of one surplus pod; the arithmetic for other sizes is in
+Table~\ref{tab:ch17-rollout}. \texttt{progressDeadlineSeconds: 600} makes
+a wedged rollout (e.g., a readiness path renamed in the new version)
+\emph{fail loudly} after ten minutes instead of hanging silently.
+\texttt{revisionHistoryLimit: 5} keeps five old ReplicaSets for instant
+rollback without unbounded clutter. \texttt{terminationGracePeriodSeconds:
+45} is the shutdown budget: 8~s preStop sleep $+$ 30~s uvicorn graceful
+timeout $+$ margin; the two values must be set together --- a 30~s
+default grace against a 45~s drain need is a dropped-request generator.
+The pod-level \texttt{securityContext} pins the UID the image was built
+with (mutual assertion: Kubernetes refuses a container whose image tries
+to run as root). \texttt{resources}: memory request equals limit (memory
+cannot be throttled; a mismatch is pure OOM risk), CPU has a request
+(scheduling and CFS shares) but \emph{no limit} --- the throttling
+pitfall of Section~\ref{sec:ch17-k8s}. \texttt{DATABASE\_URL} comes from
+a Secret reference; nothing secret is ever a literal in a manifest
+(Chapter~\ref{ch:api_security}). \texttt{readOnlyRootFilesystem: true}
+plus the \texttt{emptyDir} at \texttt{/tmp} is the runtime-fleet version
+of the Dockerfile's discipline. The \texttt{preStop} \texttt{sleep} uses
+the native sleep action (Kubernetes $\ge$ 1.30); on older clusters the
+equivalent is \texttt{exec: \{command: ["sh", "-c", "sleep 8"]\}}, which
+requires a shell in the image --- one concrete reason to choose slim over
+distroless. The three probes implement Table~\ref{tab:ch17-probes}
+verbatim: startup gates the others with a 60-second boot budget;
+readiness is the only probe allowed to remove endpoints; liveness checks
+a dependency-free path so only process-local death can restart the pod.
+
+\subsubsection*{Service}
+\label{lst:ch17-service}
+
+\begin{minted}{yaml}
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-api
+spec:
+  selector:
+    app: orders-api        # no 'track' label: spans stable AND canary
+  ports:
+    - {name: http, port: 80, targetPort: http}
+\end{minted}
+
+The selector's omission is the canary mechanism: the Service load
+balances across both tracks in proportion to ready pod count, so one
+canary pod against four stable pods receives $\approx 20\%$ of traffic.
+Pod-count splitting is the coarse, zero-infrastructure option; arbitrary
+weights (and header/tenant-based pinning) require gateway weighted
+clusters --- Envoy's first-class feature in
+Table~\ref{tab:ch17-gateway-matrix}.
+
+\subsubsection*{HorizontalPodAutoscaler}
+\label{lst:ch17-hpa}
+
+\begin{minted}{yaml}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: orders-api
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: orders-api}
+  minReplicas: 4
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 60}
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - {type: Pods, value: 1, periodSeconds: 60}
+\end{minted}
+
+Utilization targets CPU \emph{request} (70\% of 250m), which is why the
+request must reflect reality. The asymmetric behavior is the point:
+scale up instantly (a flash crowd does not wait five minutes) but scale
+down through a 300-second stabilization window and at most one pod per
+minute, because every scale-down is a termination event with in-flight
+requests attached --- the HPA's politeness and the preStop hook are two
+halves of the same courtesy. \texttt{minReplicas: 4} interacts with the
+PDB below: voluntary disruptions always leave three.
+
+\subsubsection*{PodDisruptionBudget}
+\label{lst:ch17-pdb}
+
+\begin{minted}{yaml}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orders-api
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels: {app: orders-api}
+\end{minted}
+
+\texttt{minAvailable: 3} means node drains and cluster upgrades must
+leave three pods serving; an eviction that would violate the budget
+\emph{blocks} (the drain waits, it does not force). The classic
+misconfiguration is \texttt{minAvailable} equal to the replica count,
+which deadlocks every drain; the second classic is omitting the PDB
+entirely, which lets \texttt{kubectl drain} evict the whole fleet of a
+single-replica API during a kernel upgrade.
+
+\subsubsection*{Canary Deployment (variant)}
+\label{lst:ch17-canary-deploy}
+
+\begin{minted}{yaml}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api-canary
+spec:
+  replicas: 1                      # 1 canary vs 4 stable = ~20% traffic
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: orders-api, track: canary}
+  template:
+    metadata:
+      labels: {app: orders-api, track: canary, version: "2.5.0-rc.1"}
+    spec:
+      # identical pod spec to the stable Deployment except:
+      containers:
+        - name: api
+          image: registry.northwind-robotics.example/orders-api:2.5.0-rc.1
+          # ... probes, resources, securityContext, lifecycle unchanged ...
+\end{minted}
+
+The canary Deployment differs in exactly three places: name, replica
+count, and the \texttt{track}/\texttt{version} labels that keep the two
+ReplicaSets distinct and let observability slice metrics by version
+(Chapter~\ref{ch:observability}). Promotion is \texttt{kubectl scale}
+steps on the two Deployments (2/3, 3/2, 4/1) gated by
+Listing~\ref{lst:ch17-canary}'s analyzer; rollback is scaling the canary
+to zero --- fast precisely because the expand-and-contract schema
+discipline of Chapter~\ref{ch:versioning} guaranteed the old binary still
+understands the data.
+
+\subsection{Listing 17.3 --- The Server Under Test (\texttt{orders\_server.py})}
+\label{sec:ch17-server}
+\label{lst:ch17-server}
+
+The FastAPI Orders API in its deployment-relevant form: in-flight request
+tracking via middleware (the ledger that lets us \emph{prove} a drain),
+a fast write path, a deliberately slow five-second report endpoint to be
+caught mid-flight, and a probe endpoint~\cite{fastapidocs}.
+
+\begin{minted}{python}
+"""Northwind Robotics Orders API -- used to demonstrate graceful shutdown.
+
+Run standalone (``python orders_server.py``) or under the driver in
+``shutdown_demo.py``. Every response carries three diagnostic headers so an
+outside observer can prove what happened to in-flight work during a
+termination signal:
+
+* ``X-Request-Id`` -- monotonically increasing request identifier.
+* ``X-In-Flight-Remaining`` -- requests still in flight after this one.
+* ``X-Elapsed-Ms`` -- server-side wall time for the request.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import itertools
+import time
+
+from fastapi import FastAPI, Request, Response
+
+app = FastAPI(title="Northwind Robotics Orders API")
+
+IN_FLIGHT: dict[int, str] = {}
+_request_ids = itertools.count(1)
+
+
+@app.middleware("http")
+async def track_in_flight(request: Request, call_next) -> Response:
+    """Ledger middleware: register on entry, deregister on exit."""
+    rid = next(_request_ids)
+    IN_FLIGHT[rid] = f"{request.method} {request.url.path}"
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    finally:
+        IN_FLIGHT.pop(rid, None)
+    response.headers["X-Request-Id"] = str(rid)
+    response.headers["X-In-Flight-Remaining"] = str(len(IN_FLIGHT))
+    response.headers["X-Elapsed-Ms"] = f"{(time.perf_counter() - started) * 1000:.0f}"
+    return response
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, bool]:
+    """Cheap probe endpoint: process is alive and the event loop turns."""
+    return {"ok": True}
+
+
+@app.post("/orders", status_code=201)
+async def create_order() -> dict[str, str]:
+    """Fast path: a normal order write."""
+    await asyncio.sleep(0.05)  # simulated database round trip
+    return {"order_id": "ord-1042", "status": "accepted"}
+
+
+@app.get("/orders/export")
+async def export_orders() -> dict[str, object]:
+    """Slow path: a five-second report, one simulated chunk per second.
+
+    This endpoint exists to be *in flight* when the termination signal
+    arrives; whether it completes is the whole point of the demo.
+    """
+    chunks = 0
+    for _ in range(5):
+        await asyncio.sleep(1.0)  # one chunk of report work per second
+        chunks += 1
+    return {
+        "report": "orders",
+        "chunks_completed": chunks,
+        "in_flight_at_finish": len(IN_FLIGHT),
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8571, log_level="warning")
+\end{minted}
+
+\subsection{Listing 17.4 --- The Graceful-Shutdown Proof (\texttt{shutdown\_demo.py})}
+\label{sec:ch17-shutdown}
+\label{lst:ch17-shutdown}
+
+The driver starts the server as a child process, puts the five-second
+export in flight, sends the termination signal, and then verifies the
+four-act protocol of Section~\ref{sec:ch17-process} from the
+\emph{client's} side: a new request must be refused (stop accepting), the
+in-flight request must complete with HTTP~200 (drain), and the process
+must exit on its own. On Linux the signal is \texttt{SIGTERM}; Windows
+has no POSIX signal delivery between processes, so the driver sends
+\texttt{CTRL\_BREAK\_EVENT} to the child's console process group ---
+uvicorn installs a \texttt{SIGBREAK} handler on Windows that enters
+exactly the same graceful-exit path \texttt{SIGTERM} triggers on Linux,
+which is the path that matters, because the production artifact is a
+Linux container receiving \texttt{SIGTERM} from the kubelet.
+
+\begin{minted}{python}
+"""Prove uvicorn's drain semantics: terminate a server mid-request.
+
+Offline and deterministic in behavior: the driver starts
+``orders_server.py`` as a child process, launches a slow ``/orders/export``
+request (about five seconds), sends the termination signal roughly one
+second in, and then verifies the three properties a graceful shutdown must
+have, in order:
+
+1. STOP ACCEPTING -- a brand-new request after the signal is refused.
+2. DRAIN          -- the in-flight export finishes with HTTP 200.
+3. EXIT           -- the server process terminates on its own.
+
+Usage (PowerShell):  python shutdown_demo.py
+Exit code 0 means all three properties held; 1 means a drain violation.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HOST, PORT = "127.0.0.1", 8571
+BASE = f"http://{HOST}:{PORT}"
+SERVER_SCRIPT = Path(__file__).resolve().parent / "orders_server.py"
+
+_step = 0
+
+
+def log(message: str) -> None:
+    """Print a numbered timeline line; numbering makes ordering explicit."""
+    global _step
+    _step += 1
+    print(f"[{_step:02d}] {message}")
+
+
+def get(path: str) -> tuple[int, dict[str, str], dict]:
+    """Plain-stdlib GET returning (status, headers, parsed JSON body).
+
+    Header keys are normalized to lowercase because ASGI servers emit
+    lowercase field names on the wire.
+    """
+    with urllib.request.urlopen(f"{BASE}{path}", timeout=25.0) as resp:
+        headers = {k.lower(): v for k, v in resp.headers.items()}
+        return resp.status, headers, json.loads(resp.read())
+
+
+def wait_ready(server: subprocess.Popen, timeout: float = 15.0) -> None:
+    """Poll /healthz until the server answers or dies trying."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if server.poll() is not None:
+            raise RuntimeError(f"server exited early, code {server.returncode}")
+        try:
+            status, _, _ = get("/healthz")
+            if status == 200:
+                return
+        except (urllib.error.URLError, ConnectionError, OSError):
+            time.sleep(0.25)
+    raise TimeoutError("server did not become ready in time")
+
+
+def main() -> int:
+    creationflags = 0
+    if os.name == "nt":
+        # Give the child its own console process group so CTRL_BREAK_EVENT
+        # reaches it (and only it) on Windows.
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    server = subprocess.Popen(
+        [sys.executable, str(SERVER_SCRIPT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+    try:
+        wait_ready(server)
+        log("server ready; /healthz answers 200")
+
+        outcome: dict[str, object] = {}
+
+        def slow_call() -> None:
+            try:
+                status, headers, body = get("/orders/export")
+                outcome["status"] = status
+                outcome["elapsed_ms"] = headers.get("x-elapsed-ms", "?")
+                outcome["chunks"] = body.get("chunks_completed")
+            except (urllib.error.URLError, ConnectionError, OSError) as exc:
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+
+        worker = threading.Thread(target=slow_call, daemon=True)
+        worker.start()
+        time.sleep(1.2)  # the five-second export is now mid-flight
+
+        if os.name == "nt":
+            sig_name, sig = "CTRL_BREAK_EVENT", signal.CTRL_BREAK_EVENT
+        else:
+            sig_name, sig = "SIGTERM", signal.SIGTERM
+        log(f"sending {sig_name} while the export is in flight")
+        os.kill(server.pid, sig)
+
+        time.sleep(0.3)
+        log("attempting a NEW request after the signal")
+        try:
+            get("/healthz")
+            new_blocked = False
+            log("UNEXPECTED: a new request was accepted after the signal")
+        except (urllib.error.URLError, ConnectionError, OSError) as exc:
+            new_blocked = True
+            log(f"new request refused as expected ({type(exc).__name__})")
+
+        worker.join(timeout=25.0)
+        if "error" in outcome:
+            log(f"in-flight export FAILED: {outcome['error']}")
+        else:
+            log(
+                "in-flight export completed: "
+                f"HTTP {outcome.get('status')}, "
+                f"elapsed {outcome.get('elapsed_ms')} ms, "
+                f"chunks {outcome.get('chunks')}/5"
+            )
+
+        returncode = server.wait(timeout=25.0)
+        log(f"server process exited on its own (code {returncode})")
+
+        drained = outcome.get("status") == 200 and outcome.get("chunks") == 5
+        print()
+        print("VERDICT")
+        print(f"  1. stop accepting first : {'PASS' if new_blocked else 'FAIL'}")
+        print(f"  2. drain in-flight work : {'PASS' if drained else 'FAIL'}")
+        print(f"  3. clean process exit   : {'PASS' if returncode is not None else 'FAIL'}")
+        return 0 if (new_blocked and drained) else 1
+    finally:
+        if server.poll() is None:  # never leave an orphaned server behind
+            server.kill()
+            server.wait(timeout=10)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+Observed output (Windows 11, Python 3.13, uvicorn 0.49; on Linux the
+signal name reads \texttt{SIGTERM} and the exit code is 0):
+
+\begin{minted}{text}
+[01] server ready; /healthz answers 200
+[02] sending CTRL_BREAK_EVENT while the export is in flight
+[03] attempting a NEW request after the signal
+[04] new request refused as expected (URLError)
+[05] in-flight export completed: HTTP 200, elapsed 5036 ms, chunks 5/5
+[06] server process exited on its own (code 3)
+
+VERDICT
+  1. stop accepting first : PASS
+  2. drain in-flight work : PASS
+  3. clean process exit   : PASS
+\end{minted}
+
+Read line [05] carefully: the export was signaled at roughly 1.2~seconds
+into a five-second job and still reports all five chunks and an elapsed
+time of 5036~ms --- the drain completed \emph{after} the refusal of new
+work, which is the only ordering that is both safe and useful. The exit
+code (3 on Windows, 0 on Linux) is platform plumbing; the contract is
+that the process exits \emph{itself}, before the supervisor's patience
+(\texttt{terminationGracePeriodSeconds}) runs out.
+
+\subsection{Listing 17.5 --- Probe-Semantics Simulator (\texttt{probe\_simulator.py})}
+\label{sec:ch17-probesim}
+\label{lst:ch17-probesim}
+
+Table~\ref{tab:ch17-probes} stated the rules; this simulator enforces
+them. It models one Pod under the kubelet's probe logic over a virtual
+one-second-tick clock and a scripted fault timeline (slow boot, then a
+35-second dependency outage, then a transient deadlock), and prints the
+two things a caller can observe: endpoint membership (does this Pod get
+traffic?) and restarts. Scenario~B removes the startup probe --- the
+liveness-as-boot-check anti-pattern --- and demonstrates
+CrashLoopBackOff on the same world.
+
+\begin{minted}{python}
+"""Kubernetes probe-semantics simulator (offline, stdlib-only, deterministic).
+
+Two scenarios run over the same world:
+
+  A. WITH a startup probe: slow boots are tolerated; a deadlock is
+     detected by liveness and fixed by a restart; a dependency outage
+     only removes the Pod from Service endpoints (no restart).
+  B. WITHOUT a startup probe (the copy-paste anti-pattern where the
+     liveness probe doubles as the startup check): a 45-second cold boot
+     exceeds the liveness budget, so the kubelet kills the container
+     before it ever serves -- CrashLoopBackOff.
+
+The clock is virtual (one-second ticks), so every run prints byte-for-byte
+identical output.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
+SIM_SECONDS = 240
+MAX_RESTARTS = 2  # afterwards the kubelet backs off (CrashLoopBackOff)
+
+
+class Mode(Enum):
+    BOOTING = "booting"          # process alive, app still initializing
+    HEALTHY = "healthy"
+    DEP_DOWN = "dep_down"        # dependency down: /ready fails, /live fine
+    DEADLOCKED = "deadlocked"    # event loop stuck: every probe times out
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    name: str
+    period_seconds: int
+    failure_threshold: int
+    success_threshold: int = 1
+
+
+STARTUP = ProbeSpec("startup", period_seconds=5, failure_threshold=12)  # 60 s
+READINESS = ProbeSpec("readiness", period_seconds=5, failure_threshold=3)
+LIVENESS = ProbeSpec("liveness", period_seconds=10, failure_threshold=3)
+
+# The fault environment: (start_s, end_s, mode once booted).
+TIMELINE: list[tuple[int, int, Mode]] = [
+    (0, 60, Mode.HEALTHY),
+    (60, 95, Mode.DEP_DOWN),       # 35 s database outage
+    (95, 150, Mode.HEALTHY),
+    (150, 10_000, Mode.DEADLOCKED),  # transient deadlock; a restart cures it
+]
+
+
+def timeline_mode(t: int) -> Mode:
+    for start, end, mode in TIMELINE:
+        if start <= t < end:
+            return mode
+    return Mode.HEALTHY
+
+
+@dataclass
+class SimResult:
+    label: str
+    events: list[str] = field(default_factory=list)
+    restarts: int = 0
+    traffic_seconds: int = 0
+    ready_at_end: bool = False
+
+
+def run_scenario(label: str, use_startup_probe: bool, boot_seconds: int,
+                 reboot_seconds: int) -> SimResult:
+    """Simulate one Pod. Returns an event log plus routing statistics."""
+    result = SimResult(label=label)
+
+    boot_started = 0
+    boot_len = boot_seconds
+    booted = False          # startup check has passed at least once
+    ready = False           # Pod is a member of the Service endpoints
+    deadlock_cleared = False  # restarts cure process-local deadlocks
+    crashlooped = False
+
+    startup_fail = ready_fail = ready_ok = live_fail = 0
+
+    def mode_at(t: int) -> Mode:
+        if t - boot_started < boot_len:
+            return Mode.BOOTING
+        mode = timeline_mode(t)
+        if mode is Mode.DEADLOCKED and deadlock_cleared:
+            return Mode.HEALTHY
+        return mode
+
+    def restart(t: int, why: str) -> None:
+        nonlocal boot_started, boot_len, booted, ready
+        nonlocal startup_fail, ready_fail, ready_ok, live_fail
+        nonlocal deadlock_cleared, crashlooped
+        result.restarts += 1
+        if result.restarts > MAX_RESTARTS:
+            crashlooped = True
+            result.events.append(
+                f"t={t:3d}s  restart budget exhausted -> CrashLoopBackOff; "
+                "kubelet backs off, Pod never becomes ready"
+            )
+            return
+        result.events.append(f"t={t:3d}s  RESTART #{result.restarts} ({why})")
+        boot_started, boot_len = t, reboot_seconds
+        booted = ready = False
+        startup_fail = ready_fail = ready_ok = live_fail = 0
+        deadlock_cleared = True
+
+    def set_ready(t: int, value: bool, why: str) -> None:
+        nonlocal ready
+        if ready != value:
+            ready = value
+            action = "ADDED TO" if value else "REMOVED FROM"
+            result.events.append(
+                f"t={t:3d}s  endpoints: Pod {action} Service rotation ({why})"
+            )
+
+    for t in range(1, SIM_SECONDS + 1):
+        if crashlooped:
+            break
+        mode = mode_at(t)
+
+        # --- startup probe (gates the other two) -------------------------
+        if use_startup_probe and not booted and t % STARTUP.period_seconds == 0:
+            if mode is not Mode.BOOTING:
+                booted = True
+                startup_fail = 0
+                result.events.append(
+                    f"t={t:3d}s  startup probe: first success -> "
+                    "liveness/readiness probes begin"
+                )
+            else:
+                startup_fail += 1
+                if startup_fail >= STARTUP.failure_threshold:
+                    restart(t, "startup probe exhausted its budget")
+
+        probes_active = booted if use_startup_probe else True
+
+        # --- readiness probe: endpoint membership only --------------------
+        if probes_active and t % READINESS.period_seconds == 0:
+            if mode is Mode.HEALTHY:
+                ready_fail = 0
+                ready_ok += 1
+                if ready_ok >= READINESS.success_threshold:
+                    set_ready(t, True, "readiness success")
+            else:
+                ready_ok = 0
+                ready_fail += 1
+                if ready_fail >= READINESS.failure_threshold:
+                    set_ready(t, False, "readiness failing -- no restart!")
+
+        # --- liveness probe: restart authority ----------------------------
+        if probes_active and t % LIVENESS.period_seconds == 0:
+            if mode in (Mode.HEALTHY, Mode.DEP_DOWN):
+                live_fail = 0
+            else:  # BOOTING (no startup probe) or DEADLOCKED: timeout
+                live_fail += 1
+                result.events.append(
+                    f"t={t:3d}s  liveness probe: failure {live_fail}/"
+                    f"{LIVENESS.failure_threshold} (mode={mode.value})"
+                )
+                if live_fail >= LIVENESS.failure_threshold:
+                    why = ("deadlock detected" if mode is Mode.DEADLOCKED
+                           else "killed while still booting")
+                    restart(t, why)
+
+        if ready:
+            result.traffic_seconds += 1
+
+    result.ready_at_end = ready
+    return result
+
+
+def report(result: SimResult) -> None:
+    print("=" * 72)
+    print(f"SCENARIO {result.label}")
+    print("=" * 72)
+    for line in result.events:
+        print(" ", line)
+    print("-" * 72)
+    print(f"  restarts                    : {result.restarts}")
+    print(f"  seconds receiving traffic   : {result.traffic_seconds} / {SIM_SECONDS}")
+    print(f"  ready at end of simulation  : {result.ready_at_end}")
+    print()
+
+
+def main() -> None:
+    print("Kubernetes probe-semantics simulator")
+    print(f"probes: startup {STARTUP.period_seconds}s x{STARTUP.failure_threshold}, "
+          f"readiness {READINESS.period_seconds}s x{READINESS.failure_threshold}, "
+          f"liveness {LIVENESS.period_seconds}s x{LIVENESS.failure_threshold}")
+    print("faults: 18s boot | dep outage t=60..95 | deadlock at t=150 "
+          "(cured by restart)")
+    print()
+
+    with_startup = run_scenario(
+        "A -- WITH startup probe (boot 18s tolerated)",
+        use_startup_probe=True, boot_seconds=18, reboot_seconds=12,
+    )
+    report(with_startup)
+
+    without_startup = run_scenario(
+        "B -- WITHOUT startup probe (liveness doubles as boot check, boot 45s)",
+        use_startup_probe=False, boot_seconds=45, reboot_seconds=45,
+    )
+    report(without_startup)
+
+    print("LESSONS")
+    print("  * DEP_DOWN caused readiness removal but ZERO restarts --")
+    print("    restarting cannot fix someone else's outage.")
+    print("  * DEADLOCKED caused a restart after 3 consecutive liveness")
+    print("    failures -- liveness exists for process-local death.")
+    print("  * Without a startup probe, a slow boot is indistinguishable from")
+    print("    a deadlock, and the liveness budget becomes a boot deadline.")
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+Observed output (identical on every run --- the clock is virtual):
+
+\begin{minted}{text}
+========================================================================
+SCENARIO A -- WITH startup probe (boot 18s tolerated)
+========================================================================
+  t= 20s  startup probe: first success -> liveness/readiness probes begin
+  t= 20s  endpoints: Pod ADDED TO Service rotation (readiness success)
+  t= 70s  endpoints: Pod REMOVED FROM Service rotation (readiness failing -- no restart!)
+  t= 95s  endpoints: Pod ADDED TO Service rotation (readiness success)
+  t=150s  liveness probe: failure 1/3 (mode=deadlocked)
+  t=160s  endpoints: Pod REMOVED FROM Service rotation (readiness failing -- no restart!)
+  t=160s  liveness probe: failure 2/3 (mode=deadlocked)
+  t=170s  liveness probe: failure 3/3 (mode=deadlocked)
+  t=170s  RESTART #1 (deadlock detected)
+  t=185s  startup probe: first success -> liveness/readiness probes begin
+  t=185s  endpoints: Pod ADDED TO Service rotation (readiness success)
+------------------------------------------------------------------------
+  restarts                    : 1
+  seconds receiving traffic   : 171 / 240
+  ready at end of simulation  : True
+
+========================================================================
+SCENARIO B -- WITHOUT startup probe (liveness doubles as boot check, boot 45s)
+========================================================================
+  t= 10s  liveness probe: failure 1/3 (mode=booting)
+  t= 20s  liveness probe: failure 2/3 (mode=booting)
+  t= 30s  liveness probe: failure 3/3 (mode=booting)
+  t= 30s  RESTART #1 (killed while still booting)
+  t= 40s  liveness probe: failure 1/3 (mode=booting)
+  t= 50s  liveness probe: failure 2/3 (mode=booting)
+  t= 60s  liveness probe: failure 3/3 (mode=booting)
+  t= 60s  RESTART #2 (killed while still booting)
+  t= 70s  liveness probe: failure 1/3 (mode=booting)
+  t= 80s  liveness probe: failure 2/3 (mode=booting)
+  t= 90s  liveness probe: failure 3/3 (mode=booting)
+  t= 90s  restart budget exhausted -> CrashLoopBackOff; kubelet backs off,
+          Pod never becomes ready
+------------------------------------------------------------------------
+  restarts                    : 3
+  seconds receiving traffic   : 0 / 240
+  ready at end of simulation  : False
+\end{minted}
+
+Three readings. In Scenario~A the 35-second dependency outage produced a
+\emph{routing} change (endpoint removed at $t{=}70$~s, three readiness
+periods after the fault began) and \emph{zero} restarts --- correct,
+because restarting cannot fix the database; the readiness
+\texttt{failureThreshold: 3} is what keeps a single flaky probe from
+flapping the endpoint. The deadlock, a process-local fault, earned the
+only restart, at $t{=}170$~s --- three liveness periods after it began.
+In Scenario~B the \emph{identical} liveness configuration is fatal for a
+different reason: a 45-second boot exceeds the $10\,\text{s} \times 3$
+budget, so the kubelet kills the container at $t{=}30$~s, mid-boot,
+forever. The configuration did not change between scenarios; the
+\emph{meaning} of the liveness probe did. That is why probes are a
+design artifact and not boilerplate.
+
+\subsection{Listing 17.6 --- Canary Analyzer (\texttt{canary\_analysis.py})}
+\label{sec:ch17-canary}
+\label{lst:ch17-canary}
+
+The analyzer consumes two metric series --- a long baseline and a
+batched canary --- and makes the promote/rollback call with Wald's
+Sequential Probability Ratio Test. For Bernoulli error events with
+hypotheses $H_0: p = p_0$ (baseline error rate) and $H_1: p = p_1 = p_0 +
+\delta$ (an intolerable regression), the log-likelihood ratio accumulates
+per observation:
+\[
+\Lambda_n \;=\; \sum_{i=1}^{n} \Big[ x_i \ln\frac{p_1}{p_0} \;+\; (1 -
+x_i)\,\ln\frac{1-p_1}{1-p_0} \Big], \qquad
+\Lambda_n \ge \ln\tfrac{1-\beta}{\alpha} \Rightarrow \text{ROLLBACK},
+\quad
+\Lambda_n \le \ln\tfrac{\beta}{1-\alpha} \Rightarrow \text{PROMOTE},
+\]
+with $\alpha$ the false-promote budget and $\beta$ the false-rollback
+budget (both 0.05 here, so both boundaries sit at $\pm\ln 19 \approx
+\pm 2.944$). The SPRT's virtue for rollouts is that it is
+\emph{sequential}: it decides as soon as the evidence allows --- a badly
+regressed canary is caught in two or three batches instead of after the
+full window --- with controlled error rates, unlike repeated peeking at a
+fixed-horizon test. A hard latency gate (batch p95 $\le$ baseline p95
+$\times 1.25$) runs alongside, because some regressions are pure latency.
+
+\begin{minted}{python}
+"""Canary analysis: error-rate delta + Wald SPRT promote/rollback decision.
+
+Given a stable baseline metric series and a canary metric series (synthetic
+fixtures generated with fixed seeds), this script computes, per analysis
+batch:
+
+* the canary/baseline error-rate delta,
+* a Wald Sequential Probability Ratio Test (SPRT) on Bernoulli error
+  events, which decides PROMOTE (canary no worse) or ROLLBACK (canary
+  regressed by at least delta) as soon as the evidence crosses a boundary,
+* a hard latency gate: batch p95 must stay within 25% of baseline p95.
+
+Stdlib only, fully deterministic: every run prints identical output.
+"""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass
+
+# Configuration (the numbers an SRE would set in the rollout policy)
+BATCH_SIZE = 200           # canary requests analyzed per gate evaluation
+MAX_BATCHES = 10           # give up (hold) if still undecided after this many
+DELTA = 0.010              # H1: canary error rate worse by >= 1 percentage pt
+ALPHA = 0.05               # false-promote probability budget
+BETA = 0.05                # false-rollback probability budget
+LATENCY_P95_FACTOR = 1.25  # hard gate: canary p95 <= baseline p95 * 1.25
+
+
+@dataclass(frozen=True)
+class Event:
+    latency_ms: float
+    error: bool
+
+
+def synth_series(n: int, mean_latency: float, jitter: float,
+                 error_rate: float, seed: int) -> list[Event]:
+    """Deterministic synthetic request series (lognormal-ish latencies)."""
+    rng = random.Random(seed)
+    series: list[Event] = []
+    for _ in range(n):
+        latency = mean_latency + 10.0 * rng.lognormvariate(0.0, jitter)
+        series.append(Event(round(latency, 1), rng.random() < error_rate))
+    return series
+
+
+def percentile(sorted_values: list[float], pct: float) -> float:
+    """Nearest-rank percentile; input must already be sorted ascending."""
+    if not sorted_values:
+        raise ValueError("percentile of empty series")
+    rank = max(1, math.ceil(pct / 100.0 * len(sorted_values)))
+    return sorted_values[rank - 1]
+
+
+class BernoulliSPRT:
+    """Wald's sequential test: H0 (p = p0) vs H1 (p = p1 = p0 + delta)."""
+
+    def __init__(self, p0: float, p1: float, alpha: float, beta: float) -> None:
+        if not (0.0 < p0 < p1 < 1.0):
+            raise ValueError("require 0 < p0 < p1 < 1")
+        self.p0, self.p1 = p0, p1
+        self.upper = math.log((1.0 - beta) / alpha)   # rollback boundary
+        self.lower = math.log(beta / (1.0 - alpha))   # promote boundary
+        self.llr = 0.0
+        self.errors = 0
+        self.total = 0
+
+    def observe(self, error: bool) -> None:
+        self.total += 1
+        if error:
+            self.errors += 1
+            self.llr += math.log(self.p1 / self.p0)
+        else:
+            self.llr += math.log((1.0 - self.p1) / (1.0 - self.p0))
+
+    def verdict(self) -> str:
+        if self.llr >= self.upper:
+            return "ROLLBACK"
+        if self.llr <= self.lower:
+            return "PROMOTE"
+        return "CONTINUE"
+
+
+def analyze(label: str, baseline: list[Event], canary: list[Event]) -> str:
+    base_errors = sum(1 for e in baseline if e.error)
+    p0 = base_errors / len(baseline)
+    base_lat = sorted(e.latency_ms for e in baseline)
+    base_p95 = percentile(base_lat, 95)
+    p95_limit = base_p95 * LATENCY_P95_FACTOR
+
+    print("=" * 74)
+    print(f"FIXTURE: {label}")
+    print(f"baseline: {len(baseline)} reqs, {base_errors} errors "
+          f"({p0:.2%}), p50={percentile(base_lat, 50):.1f} ms, "
+          f"p95={base_p95:.1f} ms")
+    print(f"H0: p_canary = {p0:.2%}   H1: p_canary >= {p0 + DELTA:.2%}   "
+          f"alpha=beta={ALPHA}   latency gate: p95 <= {p95_limit:.1f} ms")
+    print("-" * 74)
+    print(f"{'batch':>5} {'reqs':>5} {'errors':>6} {'err-rate':>9} "
+          f"{'delta':>8} {'p95 ms':>8} {'lat-gate':>8} {'LLR':>8}  decision")
+    print("-" * 74)
+
+    sprt = BernoulliSPRT(p0, p0 + DELTA, ALPHA, BETA)
+    final = "HOLD (inconclusive after max batches)"
+    for batch_no in range(1, MAX_BATCHES + 1):
+        lo, hi = (batch_no - 1) * BATCH_SIZE, batch_no * BATCH_SIZE
+        batch = canary[lo:hi]
+        if not batch:
+            break
+        latency_breach = False
+        for event in batch:
+            sprt.observe(event.error)
+        batch_lat = sorted(e.latency_ms for e in batch)
+        batch_p95 = percentile(batch_lat, 95)
+        if batch_p95 > p95_limit:
+            latency_breach = True
+        err_rate = sprt.errors / sprt.total
+        delta = err_rate - p0
+        verdict = sprt.verdict()
+        print(f"{batch_no:>5} {sprt.total:>5} {sprt.errors:>6} "
+              f"{err_rate:>9.2%} {delta:>+8.2%} {batch_p95:>8.1f} "
+              f"{'BREACH' if latency_breach else 'ok':>8} "
+              f"{sprt.llr:>8.3f}  {verdict}")
+        if latency_breach:
+            final = f"ROLLBACK (latency gate breached at batch {batch_no})"
+            break
+        if verdict == "ROLLBACK":
+            final = (f"ROLLBACK (error regression detected at batch "
+                     f"{batch_no}, {sprt.total} canary requests)")
+            break
+        if verdict == "PROMOTE":
+            final = (f"PROMOTE (error parity proven at batch {batch_no}, "
+                     f"{sprt.total} canary requests)")
+            break
+    print("-" * 74)
+    print(f"FINAL DECISION: {final}")
+    print()
+    return final
+
+
+def main() -> None:
+    print("Canary analysis -- Northwind Robotics Orders API rollout")
+    print(f"policy: batches of {BATCH_SIZE}, error delta >= {DELTA:.1%} "
+          f"rolls back, p95 latency x{LATENCY_P95_FACTOR} rolls back")
+    print()
+
+    baseline = synth_series(4000, mean_latency=45.0, jitter=0.6,
+                            error_rate=0.004, seed=2026)
+
+    good = synth_series(MAX_BATCHES * BATCH_SIZE, mean_latency=47.0,
+                        jitter=0.6, error_rate=0.004, seed=1701)
+    analyze("canary v2.4.1 -- healthy (error parity, latency parity)",
+            baseline, good)
+
+    bad = synth_series(MAX_BATCHES * BATCH_SIZE, mean_latency=58.0,
+                       jitter=0.6, error_rate=0.014, seed=1702)
+    analyze("canary v2.4.2 -- regressed (error rate 3.5x baseline)",
+            baseline, bad)
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+Observed output:
+
+\begin{minted}{text}
+FIXTURE: canary v2.4.1 -- healthy (error parity, latency parity)
+baseline: 4000 reqs, 19 errors (0.47%), p50=54.9 ms, p95=71.2 ms
+H0: p_canary = 0.47%   H1: p_canary >= 1.47%   alpha=beta=0.05   latency gate: p95 <= 89.0 ms
+--------------------------------------------------------------------------
+batch  reqs errors  err-rate    delta   p95 ms lat-gate      LLR  decision
+--------------------------------------------------------------------------
+    1   200      1     0.50%   +0.03%     76.5       ok   -0.877  CONTINUE
+    2   400      1     0.25%   -0.22%     70.7       ok   -2.896  CONTINUE
+    3   600      2     0.33%   -0.14%     74.4       ok   -3.773  PROMOTE
+
+FINAL DECISION: PROMOTE (error parity proven at batch 3, 600 canary requests)
+
+FIXTURE: canary v2.4.2 -- regressed (error rate 3.5x baseline)
+(baseline and policy header lines identical to the first fixture)
+batch  reqs errors  err-rate    delta   p95 ms lat-gate      LLR  decision
+    1   200      2     1.00%   +0.53%     88.0       ok    0.267  CONTINUE
+    2   400      5     1.25%   +0.78%     88.7       ok    1.677  CONTINUE
+    3   600     11     1.83%   +1.36%     85.9       ok    6.516  ROLLBACK
+
+FINAL DECISION: ROLLBACK (error regression detected at batch 3, 600 canary requests)
+\end{minted}
+
+Both fixtures resolve in three batches --- 600 canary requests --- but in
+opposite directions, and the trace shows why the sequential test is the
+right tool: batch~1 of the regressed canary ($+0.53$ points of delta,
+LLR $0.267$) is exactly the evidence a dashboard-watcher would shrug at
+(``could be noise''), and batch~3 crosses the rollback boundary with the
+error budget still honored. Note also what the analyzer deliberately
+leaves to you: the latency gate never fired, because the regressed
+fixture's mean-latency rise lands just under the gate
+($88.0 \le 89.0$~ms) --- retune \texttt{LATENCY\_P95\_FACTOR} to
+\texttt{1.20} in Exercise~7.4 and the same fixture falls to the latency
+gate at the very first batch, two batches before the error SPRT speaks.
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch17-pitfalls}
+
+\subsection*{\texttt{:latest} tags in anything that matters}
+\texttt{latest} is not a version; it is a pointer that moves when the
+publisher rebuilds. Deployments referencing it are unreproducible (two
+clusters running ``the same'' manifest run different bytes), rollbacks
+are impossible (there is no previous pointer to return to), and
+Kubernetes' default \texttt{imagePullPolicy: IfNotPresent} means two
+nodes can run \emph{different} images under one tag after a republish.
+Pin tags to release versions; pin digests for anything you would have to
+defend in an incident review.
+
+\subsection*{Root containers and writable filesystems}
+``It needs root'' almost always means ``we never checked.'' A FastAPI
+service needs to bind a high port, read its own files, and write to one
+scratch directory --- none of which is UID~0. Running as root with a
+writable root filesystem converts every remote-code-execution bug into a
+full container takeover with persistence (dropped binaries, modified
+config). \texttt{USER} in the image, \texttt{runAsNonRoot} in the pod,
+\texttt{readOnlyRootFilesystem: true}, \texttt{drop: ["ALL"]}
+capabilities: four lines, most of a container-escape kill chain.
+
+\subsection*{Liveness = readiness copy-paste}
+Duplicating the readiness probe's path into the liveness probe is the
+single most common probe bug in the wild, and it inverts the recovery
+theory of Table~\ref{tab:ch17-probes}: a dependency outage (readiness
+correctly fails) now also restarts every pod simultaneously, which
+hammers the recovering dependency with reconnection storms and produces
+a fleet-wide outage from a partial one. Rule of thumb: the liveness
+handler should be \emph{cheaper} than the readiness handler and touch
+\emph{fewer} things --- ideally just ``event loop turns.''
+
+\subsection*{CPU limits causing throttle-induced latency}
+Section~\ref{sec:ch17-k8s} derived the mechanism; the anti-pattern is the
+cargo-culted \texttt{limits.cpu} copied from a tutorial. The signature:
+p99 latency glued to multiples of ~100~ms, average CPU well below the
+limit, \texttt{container\_cpu\_cfs\_throttled\_periods\_total} climbing.
+The fix is not ``raise the limit'' blindly; it is ``decide whether the
+limit's protection (noisy-neighbor containment) is worth its cost (tail
+latency) for \emph{this} service'' --- latency-sensitive APIs usually
+drop the CPU limit and rely on requests plus HPA.
+
+\subsection*{HPA without a PDB (and PDBs without thought)}
+An HPA will happily scale to \texttt{minReplicas} during a node drain,
+and without a PDB the drain evicts \emph{all} of them --- autoscaling
+governs desired count, drains govern eviction, and only the PDB sits
+between them. The symmetric bug: \texttt{minAvailable: <replicas>} or
+\texttt{maxUnavailable: 0} on a 1-replica deployment, which makes every
+cluster upgrade hang until a human notices. PDBs are arithmetic, not
+decoration: budget $=$ replicas you can lose \emph{and still serve the
+SLO}, minus one for the rollout window.
+
+\subsection*{Hardcoded secrets in manifests}
+\texttt{DATABASE\_URL: postgres://user:password@\ldots} in a committed
+YAML file is a credential in version control --- replicated to every
+clone, every CI log that echoes the apply, every \texttt{kubectl get -o
+yaml}. \texttt{secretKeyRef} is the floor; external-secrets operators or
+CSI secret stores are the grown-up version. Also: \texttt{kubectl
+create secret} values are base64, not encryption --- enable encryption at
+rest and RBAC accordingly (Chapter~\ref{ch:api_security}).
+
+\subsection*{TLS terminated once, plaintext to the pod}
+``The LB does TLS'' plus plaintext HTTP from LB to pod means every
+internal hop --- node network, mesh-less sidecar gap, packet mirror ---
+carries bearer tokens in the clear, and a single misconfigured security
+group exposes the service port directly. Defense in depth is cheap here:
+re-encrypt (edge cert outside, internal CA inside) or run a mesh and let
+mTLS cover east-west by default (Section~\ref{sec:ch17-edge}).
+
+\subsection*{Migration deployed before compatible code}
+The one rollout mistake rollback cannot fix: a destructive migration
+(drop/rename) applied while old binaries still run, followed by a failed
+rollout that restores old code against a schema it no longer
+understands. Expand-and-contract exists precisely to make schema and
+code independently deployable (Chapter~\ref{ch:versioning}): expand
+first, deploy code that tolerates both shapes, contract only after every
+old pod is gone. Pipeline-enforced, not remembered.
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch17-lab}
+
+\subsection{Lab: Signals, Probes, and a Manifest Design Review}
+Time: 90 minutes. Requirements: the venv from
+Section~\ref{sec:ch17-objectives}; no Docker or cluster needed for parts
+1--2.
+
+\textbf{Part 1 --- Prove the drain (30 min).} Save Listings 17.3 and 17.4
+side by side, then run \texttt{python shutdown\_demo.py}. Confirm all
+three PASS lines, then break things deliberately: (a)~edit
+\texttt{orders\_server.py} to add
+\texttt{timeout\_graceful\_shutdown=1} to the \texttt{uvicorn.run} call
+and re-run --- the export now fails mid-flight (act~3's timeout
+amputating act~2's drain); (b)~restore it, and note that no edit can
+make the drain work if the process never receives the signal --- on
+Linux, wrap the entrypoint in a shell (\texttt{sh -c "uvicorn \ldots"})
+and \texttt{SIGTERM} dies in the shell. Record both failure signatures.
+
+\textbf{Part 2 --- Replay the probes (25 min).} Run
+\texttt{python probe\_simulator.py}. Then edit the timeline: move the
+\texttt{DEP\_DOWN} window to overlap the deadlock, and predict ---
+before running --- the restart count and traffic seconds. Now set
+\texttt{READINESS.failure\_threshold = 1} and observe the endpoint
+flapping during the dependency outage (removed at the first failure,
+oscillating with the probe period). Explain, in one sentence each, why
+flapping hurts (connection churn, LB convergence cost) and why
+threshold~3 was the right default.
+
+\textbf{Part 3 --- Manifest design review (35 min).} Print
+Listing~\ref{lst:ch17-deployment}. Walk it as a design-review meeting,
+field by field, answering aloud: What happens to in-flight requests when
+this pod is evicted? When the node dies? When the database is down for
+a minute? What is the worst-case traffic loss during a rollout
+(\texttt{maxUnavailable: 0} $\Rightarrow$ none below 4 ready) and what
+does it cost (quota for one surge pod)? Why does CPU have no limit?
+Where does the database password live, and who can read it? If any
+answer is ``I don't know,'' the manifest has a bug you haven't found
+yet --- keep digging until every field has a failure story.
+
+\subsection{Case Study: The Rolling Deploy That Dropped In-Flight Requests}
+\label{sec:ch17-case}
+
+\textbf{Context.} Northwind Robotics' checkout-adjacent Orders API: 4
+replicas behind a cloud load balancer, Kubernetes rolling updates,
+\texttt{maxSurge: 1, maxUnavailable: 0} --- a configuration review had
+declared it ``zero-downtime safe.'' Every Friday deploy nonetheless
+produced a 30--60-second spike of HTTP~502s at exactly the rollout
+minutes, roughly 0.1\% of requests --- small enough to lose in the
+graphs, large enough to be a standing client complaint.
+
+\textbf{Diagnosis.} The 502s correlated with pod terminations, and the
+terminated pods' logs showed active requests severed mid-flight. The
+mechanism was the race of Section~\ref{sec:ch17-process}: the kubelet
+sent \texttt{SIGTERM} and \emph{concurrently} updated endpoints, but the
+cloud load balancer's target list converged seconds later --- during
+which it kept opening new connections to a process that had already
+stopped accepting. Worse, the app's longest endpoint (the order export)
+ran up to 40~s while \texttt{terminationGracePeriodSeconds} was the
+default 30~s: even requests that \emph{were} in flight at SIGTERM were
+SIGKILLed at the 30-second wall. Two gaps, one symptom. There was no
+\texttt{preStop} hook at all --- the missing line the whole outage hung
+on.
+
+\textbf{Fix.} Three manifest lines and one server flag:
+\texttt{preStop.sleep.seconds: 8} (the pod keeps serving while endpoint
+removal fans out), \texttt{terminationGracePeriodSeconds: 60}
+(slowest request 40~s $+$ preStop 8~s $+$ margin), uvicorn's graceful
+timeout raised to match, and an SLO alert on 502 rate so the class of
+bug could never again hide at 0.1\%. The next deploy's 502 count was
+zero, and has been since.
+
+\textbf{Lessons.} (1)~``Zero downtime'' is a property of the
+\emph{termination path}, not the update strategy --- maxSurge arithmetic
+protects capacity, not connections. (2)~Grace periods are budgets to be
+engineered from measured request durations, not defaults to be
+inherited. (3)~The correct test is exactly Listing~\ref{lst:ch17-shutdown}:
+signal the server mid-request and watch from the client side; had that
+test existed, the config review's ``safe'' stamp would have died in CI
+instead of in production.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch17-exercises}
+
+\begin{enumerate}[label=\textbf{Exercise 7.\arabic*}, leftmargin=2.9cm]
+  \item \textbf{Layer forensics.} Rewrite Listing 17.1's Dockerfile so
+        the source \texttt{COPY} precedes the dependency install.
+        Explain exactly which layers rebuild on a one-line source edit
+        now, and quantify the cost for a 200~MB dependency layer.
+  \item \textbf{Break the drain.} In \texttt{orders\_server.py}, set
+        \texttt{timeout\_graceful\_shutdown=1} and capture the demo's new
+        failure signature. Which of the three verdict lines flips, and
+        which act of the four-act shutdown did you just amputate?
+  \item \textbf{Probe arithmetic.} A service boots in 75 seconds. Using
+        \texttt{periodSeconds: 5}, what is the minimum
+        \texttt{failureThreshold} for a startup probe that tolerates this
+        with 25\% headroom? What goes wrong if you instead raise the
+        liveness \texttt{failureThreshold} to accommodate it?
+  \item \textbf{Retune the gate.} Run \texttt{canary\_analysis.py} with
+        \texttt{LATENCY\_P95\_FACTOR = 1.20} and confirm the regressed
+        fixture is rolled back at batch~1 by the latency gate. Then set
+        \texttt{DELTA = 0.02}: what happens to the regressed fixture's
+        detection latency, and what does that teach about choosing
+        $\delta$ relative to your error budget?
+  \item \textbf{CrashLoop replay.} In \texttt{probe\_simulator.py},
+        give Scenario~B an 18-second boot (same as A). Does it still
+        crash-loop? Now 35 seconds. Derive the exact boot-time boundary
+        between the two outcomes from the probe parameters alone.
+  \item \textbf{Endpoint lag budget.} Your cloud LB converges target
+        removals in up to 12~s and your p99.9 request duration is 9~s.
+        Choose \texttt{preStop} sleep, uvicorn graceful timeout, and
+        \texttt{terminationGracePeriodSeconds}, and defend each number.
+  \item \textbf{Design review script.} Take Listing
+        \ref{lst:ch17-deployment} and remove the PDB. Write the exact
+        sequence of events (drain, evict, HPA response) that takes the
+        API fully offline during a routine node upgrade.
+  \item \textbf{Canary slice sizing.} Baseline error rate 0.4\%,
+        $\delta = 1$ point, $\alpha = \beta = 0.05$. Using the expected
+        per-request LLR drift, estimate the expected number of canary
+        requests to rollback when the true canary rate is 1.4\%, and to
+        promote when it equals baseline. Verify with the simulator.
+\end{enumerate}
+
+\textbf{Deep-dive questions for further study:} How does
+\texttt{containerd}'s image pull interact with digest pinning across a
+node pool with heterogeneous pull times during a surge? What changes in
+every section of this chapter when the mesh moves from sidecars to
+ambient mode? How would you express Listing~\ref{lst:ch17-canary}'s gate
+in PromQL-based analysis instead of batch files? What does the
+\texttt{PodLifecycleSleepAction} feature gate's graduation history tell
+you about depending on alpha features in lifecycle hooks?
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch17-interview}
+
+\subsection*{Junior (Q1--Q10)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{What is a container image, in one paragraph?}
+        A content-addressed stack of filesystem layers plus a manifest:
+        each layer is a diff addressed by its hash, the image is
+        addressed by the manifest's digest, and a running container adds
+        one thin writable layer on top. The properties that matter are
+        immutability (bytes never change after build) and traceability
+        (the digest names exactly one build forever).
+  \item \textbf{What problem does a multi-stage Dockerfile solve?}
+        The runtime image inherits everything the build needed ---
+        compilers, package managers, caches --- unless you build in one
+        stage and copy only artifacts into a fresh final stage. The win
+        is triple: smaller images (faster pulls, faster cold starts),
+        smaller attack surface (fewer binaries for an attacker to reuse),
+        and cleaner caching (dependency layers invalidate only when
+        manifests change).
+  \item \textbf{Why should containers not run as root?}
+        Container root is a UID on the host separated only by namespace
+        configuration; a container-escape or a misconfigured mount turns
+        application-root into something dangerously close to host-root.
+        Running as a fixed unprivileged UID forces an attacker to win
+        twice: exploit the app, \emph{then} escalate. It is also a
+        deploy-time assertion: \texttt{runAsNonRoot: true} makes
+        Kubernetes refuse an image that regresses.
+  \item \textbf{What does \texttt{.dockerignore} protect?}
+        Two things: build correctness (junk churn like \texttt{.git} or
+        local logs would otherwise bust the cache on every build) and
+        secrets (a stray \texttt{.env} copied by \texttt{COPY . .}
+        persists in the layer history even if a later layer deletes it).
+  \item \textbf{What is the difference between a tag and a digest?}
+        A tag (\texttt{:3.12-slim}) is a mutable registry pointer that
+        can be retargeted at any time; a digest
+        (\texttt{@sha256:\ldots}) is the content hash of one manifest and
+        can never name anything else. Tags are for humans; digests are
+        for deployments you may have to defend in an incident review.
+  \item \textbf{What happens, in order, when Kubernetes terminates a
+        Pod?}
+        The Pod is marked terminating and removed from endpoints
+        (asynchronously); the \texttt{preStop} hook runs; then
+        \texttt{SIGTERM} to PID~1; the grace period
+        (\texttt{terminationGracePeriodSeconds}, default 30~s) counts
+        down; then \texttt{SIGKILL}. Note the trap: endpoint removal is
+        concurrent, not first --- traffic can still arrive after
+        \texttt{SIGTERM}.
+  \item \textbf{What is a liveness probe?}
+        A periodic check (HTTP, TCP, or exec) whose consecutive failures
+        --- \texttt{failureThreshold} of them --- make the kubelet
+        \emph{restart the container in place}. It answers one question:
+        is this process unrecoverably stuck? It should therefore check
+        only process-local health and never a dependency.
+  \item \textbf{What is an API gateway?}
+        A reverse proxy at the platform edge that owns cross-cutting
+        north-south policy --- routing, JWT validation offload, rate
+        limiting, transformation, canary splitting --- so those concerns
+        are configured once instead of reimplemented per service.
+  \item \textbf{What is blue-green deployment?}
+        Two complete environments; traffic switches atomically from one
+        to the other (selector, LB target, or DNS), and rollback is the
+        switch flipped back. Instant rollback and a warm target, at the
+        price of double infrastructure and an idle environment that rots
+        unless exercised.
+  \item \textbf{What is a PodDisruptionBudget?}
+        A policy object stating how many pods of a service may be
+        \emph{voluntarily} unavailable (\texttt{minAvailable} or
+        \texttt{maxUnavailable}); drains and cluster upgrades respect it
+        by blocking, while crashes (involuntary) ignore it. Without one,
+        a routine node drain can evict your entire fleet at once.
+\end{enumerate}
+
+\subsection*{Mid (Q11--Q20)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{Liveness vs.\ readiness vs.\ startup probes --- failure
+        behavior of each?}
+        Startup: only probe evaluated during boot; exhausting
+        \texttt{periodSeconds} $\times$ \texttt{failureThreshold}
+        restarts the container \emph{before} it ever served --- it exists
+        to give slow starters a budget liveness never sees. Readiness:
+        failure removes the Pod from Service endpoints --- a routing
+        consequence, no restart --- and the first success re-adds it; it
+        answers ``should I get traffic \emph{now}?'' Liveness:
+        \texttt{failureThreshold} consecutive failures restart the
+        container in place; it answers ``am I dead in a way only a
+        restart can fix?'' The simulator in
+        Section~\ref{sec:ch17-probesim} demonstrates all three
+        consequences over one fault timeline.
+  \item \textbf{Why is copying the readiness probe into liveness
+        dangerous?}
+        Readiness legitimately fails for external reasons (dependency
+        down); making liveness fail for the same reason converts a
+        partial outage into a fleet-wide restart storm --- every pod
+        restarts simultaneously and then reconnection-storms the
+        dependency that was trying to recover. Readiness says
+        ``wait''; liveness says ``kill me''; merging them deletes the
+        distinction that recovery depends on.
+  \item \textbf{Why can CPU limits \emph{hurt} latency?}
+        CPU limits are enforced by CFS quota throttling in (default)
+        100~ms periods: consume the quota in the first few milliseconds
+        of a burst and every thread in the container freezes until the
+        next period. The signature is p99 latency quantized to ~100~ms
+        multiples while average CPU sits far below the limit. Memory
+        limits OOM-kill instead --- violent but honest. Mitigation:
+        requests always (scheduling and CFS shares), CPU limits omitted
+        or generous on latency-sensitive services, and an alert on the
+        throttled-periods metric.
+  \item \textbf{Explain \texttt{maxSurge} and \texttt{maxUnavailable}.}
+        Rolling-update trade-off knobs. \texttt{maxSurge}: extra pods
+        above the replica count allowed during rollout (needs quota).
+        \texttt{maxUnavailable}: replicas allowed to be down. With
+        $R{=}4$: \texttt{surge 1 / unavailable 0} never serves below 4
+        and costs one extra pod; \texttt{surge 0 / unavailable 1} costs
+        nothing but serves a window at 3. \texttt{0/0} cannot roll at
+        all --- a common copy-paste wedge.
+  \item \textbf{What is endpoint-removal lag during scale-down?}
+        ``Pod terminating'' and ``endpoints object updated'' are
+        concurrent, and downstream convergence --- kube-proxy iptables
+        programming, DNS TTLs, cloud LB target lists, gateway discovery
+        --- takes seconds more. So a pod can stop accepting (post-SIGTERM)
+        while the LB still opens new connections to it: instant 502s.
+        Mitigation: \texttt{preStop} sleep so the process keeps serving
+        through the lag, plus client retries for the residue
+        (Chapter~\ref{ch:microservices}).
+  \item \textbf{How does an HPA compute replicas, and what is the
+        stabilization window?}
+        Every sync period:
+        $\lceil \text{current} \times \text{currentMetric} /
+        \text{targetMetric} \rceil$, where resource utilization is
+        measured against \emph{requests} (inflated requests silently
+        disable autoscaling). The scale-down stabilization window
+        (default 300~s) takes the \emph{highest} recommendation in the
+        window, because every scale-down terminates connections; scale-up
+        is typically immediate. Downscale policies cap pods removed per
+        period.
+  \item \textbf{Design a canary release with automated rollback --- the
+        sketch?}
+        Small traffic steps (1/5/25/50/100\% or request-budget batches),
+        stable splitting (hash on API key/tenant so a client doesn't
+        oscillate between versions), a pre-registered gate per step ---
+        error-rate SPRT with budgets $\alpha$/$\beta$ plus a hard
+        latency-quantile guardrail, as in
+        Listing~\ref{lst:ch17-canary} --- and rollback defined as the
+        same weight change in reverse. Prerequisites: expand-and-contract
+        schema so old code still reads new data, and per-version metric
+        labels so the gate can see the canary at all.
+  \item \textbf{Gateway vs.\ ingress vs.\ service mesh?}
+        Ingress is the Kubernetes-standard vocabulary for north-south
+        HTTP routing plus TLS termination --- a gateway subset. An API
+        gateway is the product tier at the platform edge: auth offload,
+        rate limiting, transformation, analytics --- the policy
+        enforcement point for north-south traffic. A mesh puts proxies on
+        every workload to govern \emph{east-west}: mTLS, retries,
+        telemetry between services. Production commonly runs all three in
+        sequence; the failure mode is enforcing one concern in two tiers
+        with different budgets.
+  \item \textbf{Where should TLS terminate for a public API?}
+        At the provider edge with automated public certificates (ACME),
+        then \emph{re-encrypt} to backends with an internal CA --- or let
+        a mesh's mTLS cover it. Edge-only termination leaves the last hop
+        plaintext (bearer tokens on the wire inside your VPC);
+        passthrough gives end-to-end encryption but blinds the WAF and
+        L7 routing entirely. The decision is: which tiers need to
+        \emph{see} the traffic versus merely \emph{carry} it.
+  \item \textbf{Why does a container need to care about PID~1?}
+        The kernel delivers signals to PID~1 only if a handler is
+        installed, and orphans re-parent to PID~1 for reaping. A shell
+        wrapper as PID~1 swallows \texttt{SIGTERM} (the shell has no
+        handler); Kubernetes then waits the grace period and SIGKILLs,
+        severing in-flight work. Fix: exec-form \texttt{ENTRYPOINT} so
+        the server \emph{is} PID~1, and a server (uvicorn) that installs
+        real handlers.
+\end{enumerate}
+
+\subsection*{Senior (Q21--Q28)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=21]
+  \item \textbf{Walk me through every system that must cooperate for a
+        request to survive a rolling deploy.}
+        Endpoint controller removes the pod (async); preStop sleeps
+        through LB convergence; SIGTERM; uvicorn stops accepting, drains
+        within its graceful timeout; \texttt{terminationGracePeriodSeconds}
+        exceeds preStop $+$ slowest request; LB draining stops new
+        connections; clients retry the residue with backoff and
+        idempotency keys (Chapter~\ref{ch:idempotency}); the new pod's
+        startup probe tolerates cold boot; readiness gates its traffic.
+        Any link missing and some fraction of requests dies.
+  \item \textbf{Why is the SPRT better than ``watch the error rate for
+        ten minutes''?}
+        A fixed-horizon eyeball has uncontrolled error rates and no
+        early stopping: a catastrophically bad canary burns ten minutes
+        of damage, a healthy one waits ten minutes for nothing. The SPRT
+        pre-registers hypotheses ($p_0$, $p_0{+}\delta$) and error
+        budgets ($\alpha$, $\beta$), then decides the moment cumulative
+        evidence crosses a boundary --- typically a few hundred requests
+        either way --- with the false-promote and false-rollback rates
+        \emph{guaranteed} by construction. It also forces the honest
+        conversation upfront: what regression size $\delta$ do we
+        actually care about?
+  \item \textbf{Your p99 spiked after you ``hardened'' resources. No
+        deploy. Diagnose.}
+        The fingerprint: p99 quantized near 100~ms multiples, mean CPU
+        far below limit, throttle counters climbing --- you added a CPU
+        limit and CFS throttling is freezing all threads mid-request for
+        the remainder of each quota period. Verify with
+        \texttt{container\_cpu\_cfs\_throttled\_periods\_total}. Fix:
+        drop the CPU limit (keep requests) or raise it well above p99
+        burst usage; consider fewer worker processes so per-period quota
+        lasts longer. Memory ``hardening'' would have shown OOMKills
+        instead --- different graph, same meeting.
+  \item \textbf{How do you size a canary's traffic steps?}
+        By \emph{requests}, not percentages: the gate needs enough canary
+        volume to detect the regression you care about. At baseline
+        $p_0$ and intolerance $\delta$, expected requests-to-decide scale
+        roughly with $1/\delta^2$; at $p_0{=}0.4\%$ and
+        $\delta{=}1$~pt that is a few hundred requests per step
+        (Listing~\ref{lst:ch17-canary} resolves in 600), while a 1\%
+        slice of a low-traffic API might take hours --- so either accept
+        coarser $\delta$, lengthen windows, or synthesize load. Step
+        count trades blast radius against total rollout time.
+  \item \textbf{Feature flags or canary deploys?}
+        Different axes. Deployments change binaries; flags change code
+        paths within one binary. Flags give per-tenant targeting and
+        instant kill-switches but accrue combinatorial debt and live in
+        the release path forever; canaries bound blast radius with zero
+        code changes but run two contract versions simultaneously.
+        Mature orgs compose them: canary the binary rollout, flag the
+        risky feature \emph{within} the new binary, and never let a flag
+        outlive its rollout.
+  \item \textbf{The migration must ship with the code. Order them.}
+        Expand-and-contract, never destructive-first: (1)~expand
+        migration (add the new column/table; nothing renamed or dropped);
+        (2)~deploy code that writes both shapes and reads tolerantly;
+        (3)~backfill if needed; (4)~after \emph{every} old binary is
+        gone, contract migration (drop the old shape). Violating the
+        order makes rollback impossible: restored old code meets a schema
+        it cannot read. This is Chapter~\ref{ch:versioning}'s discipline
+        enforced by the deployment pipeline, not by memory.
+  \item \textbf{Why does the Service selector in
+        Listing~\ref{lst:ch17-service} omit the \texttt{track} label, and
+        what does that buy and cost?}
+        Omitting \texttt{track} makes one Service span stable and canary
+        pods, splitting traffic by ready-pod ratio --- free canary
+        weights with zero infrastructure. Cost: weights are quantized to
+        pod counts (1/5, 2/6, \ldots), there is no session stability
+        (one client can oscillate between versions), and autoscaling the
+        stable track silently moves the split. Gateway weighted clusters
+        (Envoy) fix all three at the price of a control plane.
+  \item \textbf{What belongs in a readiness check --- and what must
+        never be in a liveness check?}
+        Readiness may shallowly check \emph{critical} dependencies
+        (can I reach the database with a sub-100-ms probe?) because its
+        consequence is only traffic removal. Liveness must check nothing
+        external: its consequence is restart, and restarting cannot fix
+        someone else's outage --- it only multiplies it. Deepest-check
+        discipline: liveness $<$ readiness $<$ nothing at request time;
+        a dependency-deep liveness probe is a cascading-failure machine
+        (Chapter~\ref{ch:microservices}).
+\end{enumerate}
+
+\subsection*{Staff (Q29--Q36)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=29]
+  \item \textbf{Design the deployment safety system for a platform with
+        200 API services.}
+        Paved road, not gate: one blessed base image (distroless,
+        digest-pinned, rebuilt on CVE), one manifest template with the
+        probe/preStop/PDB/resource decisions pre-made and parameterized,
+        progressive delivery as the \emph{only} rollout mechanism with
+        platform-wide gates (error SPRT, latency guardrails, SLO burn
+        rate), schema-change pipelines that physically cannot run
+        contract before code, and automatic rollback as default with
+        humans paged on gate \emph{failure to decide}, not on every
+        rollout. Measure: change-failure rate, time-to-rollback, and
+        percentage of services off-template.
+  \item \textbf{When is a service mesh \emph{not} worth it?}
+        When the east-west concerns it buys (mTLS, L7 retry policy,
+        traffic telemetry, fine-grained splits) are already solved or not
+        needed: few services, one team, flat compliance requirements, or
+        a gateway already owning the splits you need. Costs are real: a
+        proxy on every hop's latency budget, a control plane to operate,
+        and a debugging story that now includes someone else's iptables.
+        The 5-service monorepo does not need Istio; the 200-service
+        regulated platform probably cannot live without it.
+  \item \textbf{How do you make rollbacks boring?}
+        Every property that makes rollbacks rare makes them safe:
+        immutable digest-pinned artifacts (rollback is a pointer move,
+        never a rebuild); expand-and-contract schemas (old code always
+        reads current data); forward-compatible APIs
+        (Chapter~\ref{ch:versioning}) so consumers tolerate either
+        version; automated rollback triggers rehearsed on every deploy
+        rather than saved for emergencies; and fast rollbacks measured
+        and SLO'd like any other operation. The SRE framing: release
+        engineering is risk management, and rollback is the cheapest
+        risk control you own~\cite{beyer2016sre}.
+  \item \textbf{A vendor gateway, NGINX, or Envoy-as-gateway for a new
+        platform --- how do you decide?}
+        Score on the matrix of Table~\ref{tab:ch17-gateway-matrix} plus
+        two columns the table can't hold: operational ownership (who
+        pages for it at 3~a.m.\ --- a vendor SLA or your team) and
+        extensibility trajectory (plugin ecosystems and Wasm beat
+        config-file reloads the moment policy gets bespoke). Default
+        heuristic: if you will run a mesh within two years, standardize
+        on Envoy-flavored everything now; if you need a developer portal
+        and monetization, that's gateway-product territory (Kong class);
+        if the traffic profile is simple and the team's depth is NGINX,
+        boring wins.
+  \item \textbf{How do you set error budgets $\alpha$, $\beta$, and
+        $\delta$ for an automated canary gate?}
+        From the SLO, backwards: $\delta$ is the regression size that
+        would burn meaningful error budget if it reached 100\% for one
+        detection window; $\alpha$ (false promote) is priced against
+        rollback cost --- cheap rollback buys aggressive $\alpha$;
+        $\beta$ (false rollback) is priced against developer velocity ---
+        flaky gates train teams to bypass gates, which is how gates die.
+        Then verify with the simulator: replay historical incident metric
+        series through the gate and confirm it catches every real
+        regression \emph{and} passes the last twenty healthy deploys.
+        A gate that fails the replay is a gate you have not designed.
+  \item \textbf{What is the blast-radius math behind progressive
+        delivery?}
+        Expected harm of a bad deploy $\approx$ (probability of
+        regression) $\times$ (affected fraction) $\times$ (time to
+        detect $+$ time to mitigate). Progressive delivery attacks all
+        three factors: canary slices shrink the fraction, sequential
+        gates shrink detection time from SLO-burn to seconds-of-evidence,
+        and weight-based rollback shrinks mitigation to a pointer change.
+        The complementary lever is shrink-the-unit: smaller, more
+        frequent releases reduce the probability term, which is why
+        release cadence and deployment safety are the same
+        investment~\cite{nygard2018releaseit}.
+  \item \textbf{How do you handle stateful connections (WebSockets,
+        gRPC streams) under everything in this chapter?}
+        Long-lived connections break every assumption above: draining is
+        hours not seconds, L7 load balancing pins streams to pods, and
+        HPA-on-CPU misses connection-count imbalance. The playbook:
+        advertise \emph{max connection age} and make clients honor it
+        (gRPC \texttt{MAX\_CONNECTION\_AGE}, WS renegotiation), so drains
+        complete in bounded time; rebalance deliberately on scale events;
+        size \texttt{terminationGracePeriodSeconds} to connection
+        lifetime, not request latency; and consider a dedicated
+        connection-tier deployment with its own, gentler rollout policy
+        (Chapter~\ref{ch:async_apis}, Chapter~\ref{ch:grpc}).
+  \item \textbf{Regulated industry: what changes in this chapter?}
+        Everything gets evidence. Images: signed (cosign) and admitted
+        by policy, digests everywhere, SBOMs per release. Probes and
+        rollout params: change-controlled, reviewed like code. TLS:
+        passthrough or re-encrypt with an internal CA --- plaintext
+        last-hops stop being a judgment call. Secrets: external vault
+        with rotation and audit, never cluster Secrets alone. Canary
+        gates: thresholds become compliance artifacts, and the analyzer's
+        decision log is a record you produce in audits. The engineering
+        is the same; the difference is that ``why'' must be written down
+        \emph{before} the deploy, not reconstructed after the incident.
+  \item \textbf{What would you instrument to know, a year from now, that
+        this chapter's discipline is working?}
+        Leading indicators: percentage of deploys that are progressive
+        with gates (target 100\%), rollback mean-time and rollback
+        \emph{frequency} (both should be boring), gate false-positive
+        rate (drives bypass behavior), probe-related incidents (flapping
+        endpoints, boot-deadline crash loops --- target zero),
+        CFS-throttling alerts on latency-critical services, deploy-time
+        5xx rate (the case study's metric), and drift of running digests
+        from declared releases. The meta-metric: whether the on-call
+        can explain any of these numbers without opening a dashboard
+        first.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch17-bibliography}
+
+\begin{itemize}
+  \item \textbf{Kubernetes documentation --- Pod lifecycle and probes:}
+        \emph{Container Probes} and \emph{Pod Lifecycle}
+        (\url{https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/}).
+        The authoritative semantics for startup/readiness/liveness
+        behavior, termination ordering, and
+        \texttt{terminationGracePeriodSeconds} that
+        Section~\ref{sec:ch17-k8s} compresses.
+  \item \textbf{Kubernetes documentation --- Horizontal Pod Autoscaler:}
+        \url{https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/}.
+        The scaling algorithm, metric types, and the \texttt{behavior}
+        stabilization windows and policies used in
+        Listing~\ref{lst:ch17-hpa}.
+  \item \textbf{Kubernetes documentation --- Disruptions:}
+        \url{https://kubernetes.io/docs/concepts/workloads/pods/disruptions/}.
+        Voluntary vs.\ involuntary disruption and PDB arithmetic ---
+        required reading before your first node-pool upgrade.
+  \item \textbf{Docker --- best practices for writing Dockerfiles:}
+        \url{https://docs.docker.com/develop/develop-images/dockerfile_best-practices/}.
+        Layer caching, instruction ordering, and multi-stage builds;
+        pair with the \emph{Overview of best practices for building
+        images} page for the attack-surface framing of
+        Section~\ref{sec:ch17-image}.
+  \item \textbf{Envoy proxy documentation:}
+        \url{https://www.envoyproxy.io/docs/envoy/latest/}. Weighted
+        clusters, the JWT authentication filter, local/global rate
+        limiting, and the xDS APIs that make Envoy the substrate of
+        modern gateways and meshes.
+  \item \textbf{Kong Gateway documentation:}
+        \url{https://docs.konghq.com/gateway/}. Plugin reference (JWT,
+        rate-limiting, request-transformer, canary) and the declarative
+        \texttt{deck} configuration model.
+  \item \textbf{Google SRE book, chapter 8 --- \emph{Release
+        Engineering}:} Betsy Beyer et al.\ (\cite{beyer2016sre}, also at
+        \url{https://sre.google/sre-book/release-engineering/}). The
+        canonical argument that releases are a risk-management
+        discipline, not an afterthought.
+  \item \textbf{Bilgin Ibryam \& Roland Hu\ss, \emph{Kubernetes
+        Patterns} (O'Reilly, 2nd ed.):} the pattern vocabulary behind
+        this chapter's manifests --- \emph{Predictable Demands}
+        (requests/limits), \emph{Self Awareness}, health probes, and the
+        lifecycle patterns that justify preStop and termination budgets.
+  \item \textbf{The Twelve-Factor App}~\cite{twelvefactor}: factors III
+        (config in the environment), IV (backing services as attached
+        resources), and IX (disposability: fast startup, graceful
+        shutdown) are this chapter's process discipline in manifesto
+        form.
+  \item \textbf{OWASP Cheat Sheet Series --- Docker Security and
+        Kubernetes Security:}
+        \url{https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html}
+        and the Kubernetes Security cheat sheet. The checklist form of
+        Section~\ref{sec:ch17-pitfalls}'s container and manifest
+        anti-patterns.
+  \item \textbf{Michael Nygard, \emph{Release It!} (2nd
+        ed.)}~\cite{nygard2018releaseit}: stability patterns and
+        antipatterns whose production war stories motivate the
+        connection-draining and rollout-safety sections.
+  \item \textbf{Mark Richards \& Neal Ford's deployment chapters in
+        \emph{Fundamentals of Software Architecture}} and Sam Newman's
+        deployment discussion in \emph{Building
+        Microservices}~\cite{newman2021microservices}: progressive
+        delivery placed in its architectural context.
+  \item \textbf{Wald, \emph{Sequential Analysis} (1947)} --- for the
+        mathematically inclined, the original SPRT construction behind
+        Listing~\ref{lst:ch17-canary}; a gentler modern treatment is any
+        mathematical-statistics text's chapter on sequential testing.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch17-capstones}
+
+\subsection*{Capstone 17.1 --- Harden the Image \hfill [junior]}
+\textbf{Objective:} Take a naive single-stage Dockerfile for the Orders
+API and rebuild it to this chapter's standard.
+
+\textbf{Inputs/Datasets:} Listing 17.1; a ``naive'' Dockerfile you write
+first (full base image, root, \texttt{COPY . .}, shell entrypoint); no
+datasets.
+
+\textbf{Steps:} (1)~Write the naive version and record its image size
+and layer count. (2)~Apply, one commit at a time: multi-stage split,
+slim or distroless runtime, non-root \texttt{USER} with fixed UID,
+\texttt{.dockerignore}, cache-ordered \texttt{COPY}, \texttt{HEALTHCHECK},
+exec-form \texttt{ENTRYPOINT}. (3)~Record size and (if a scanner is
+available) finding count after each step. (4)~Produce a table of the
+deltas with one sentence of justification per step.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Final image is $\leq$ 20\% of the naive image's size
+        (or you document precisely why not).
+  \item[$\square$] \texttt{docker inspect} shows a non-root user and an
+        exec-form entrypoint.
+  \item[$\square$] A one-line source edit rebuilds only the source layer
+        (build log evidence).
+  \item[$\square$] No \texttt{.env}, \texttt{.git}, or test artifacts in
+        any layer (\texttt{docker history} / \texttt{dive} evidence).
+\end{itemize}
+
+\textbf{Stretch Goals:} Produce both slim and distroless variants and
+document the one operational capability (preStop \texttt{exec} sleep,
+in-container debugging) you traded away with distroless.
+
+\subsection*{Capstone 17.2 --- Prove the Drain Under Load \hfill [mid]}
+\textbf{Objective:} Extend the graceful-shutdown demo from one in-flight
+request to a realistic mix, and make the demo CI-grade.
+
+\textbf{Inputs/Datasets:} Listings 17.3--17.4; synthetic traffic mix:
+70\% fast \texttt{POST /orders}, 25\% \texttt{/healthz}, 5\% slow
+\texttt{/orders/export}.
+
+\textbf{Steps:} (1)~Rewrite the driver to run $N$ concurrent workers
+generating the mix at a fixed request rate while the signal arrives at
+a random-but-seeded moment. (2)~Count and classify outcomes: completed,
+refused-after-signal (expected), and \emph{severed} (the failure class).
+(3)~Sweep \texttt{timeout\_graceful\_shutdown} $\in \{0, 1, 10\}$~s and
+tabulate severed counts. (4)~Wrap the whole experiment as a pytest that
+asserts zero severed requests at the production timeout.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Three verdict classes reported per run; totals
+        reconcile exactly with requests attempted.
+  \item[$\square$] Zero severed requests at the production timeout;
+        nonzero at \texttt{timeout=0}; you can explain both numbers.
+  \item[$\square$] Seeded and offline: two runs produce identical
+        classification counts.
+  \item[$\square$] pytest integration exits nonzero on any severed
+        request.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a preStop-equivalent delay to the driver
+(keep serving $k$ seconds post-signal) and show the refused-after-signal
+count drop to zero.
+
+\subsection*{Capstone 17.3 --- Manifest Review Board \hfill [mid]}
+\textbf{Objective:} Run Listing 17.2's manifest set through a formal
+design review and fix what you find.
+
+\textbf{Inputs/Datasets:} Listing~\ref{lst:ch17-deployment} and its
+companions, saved as YAML files; \texttt{pyyaml} for the linting script;
+a seeded list of injected faults (you create: remove the PDB, set
+\texttt{minAvailable: 4}, add \texttt{limits.cpu: 100m}, delete the
+preStop hook, hardcode \texttt{DATABASE\_URL}, set
+\texttt{terminationGracePeriodSeconds: 5}, copy readiness into liveness).
+
+\textbf{Steps:} (1)~Write \texttt{manifest\_lint.py}: parse each YAML
+document and assert this chapter's rules (probes distinct paths; memory
+request $=$ limit; no CPU limit or a justified one; PDB present and
+arithmetic consistent with replicas; no literal secret-looking strings;
+preStop present; grace period $>$ slowest endpoint budget).
+(2)~Verify the linter passes the clean set and catches every injected
+fault, naming the rule violated. (3)~Write the review minutes: for each
+caught fault, the failure story it prevents.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Linter catches all seven injected faults with
+        rule-specific messages.
+  \item[$\square$] Linter passes the clean manifest set.
+  \item[$\square$] Every lint rule cites its chapter section.
+  \item[$\square$] Review minutes contain a failure story per fault, not
+        restatements of the rule.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a second reviewer mode that diffs two
+manifest revisions and flags only \emph{safety-relevant} changes
+(probes, resources, lifecycle, grace periods).
+
+\subsection*{Capstone 17.4 --- Gate Tuner \hfill [senior]}
+\textbf{Objective:} Turn Listing~\ref{lst:ch17-canary} from a demo into
+a defensible rollout policy.
+
+\textbf{Inputs/Datasets:} \texttt{canary\_analysis.py}; a seeded fixture
+generator you extend with a third case: a canary whose regression is
+exactly $0.5\delta$ (below the intolerance line --- the gate
+\emph{should} promote it, eventually).
+
+\textbf{Steps:} (1)~Sweep $\delta \in \{0.5, 1.0, 2.0\}$ points and
+$\alpha = \beta \in \{0.01, 0.05, 0.10\}$ over the three fixtures;
+record requests-to-decision and verdict for each cell. (2)~Add a
+latency SPRT (Gaussian approximation on per-batch means) alongside the
+hard p95 gate and compare detection times. (3)~Derive, on paper, the
+expected LLR drift per request as a function of the true canary rate,
+and verify the simulator's detection latencies match within a batch.
+(4)~Write the one-page rollout policy the numbers justify.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Sweep table shows the $\delta$/$\alpha$/$\beta$
+        trade-off: tighter intolerance costs more requests per decision.
+  \item[$\square$] The $0.5\delta$ canary is promoted (never rolled
+        back) in every cell.
+  \item[$\square$] Measured detection latency matches the drift
+        derivation within one batch size.
+  \item[$\square$] The policy page names $\delta$, $\alpha$, $\beta$,
+        batch size, and the rollback action --- and cites the evidence
+        for each.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a seasonal-baseline mode: compare the canary
+against a time-shifted baseline (same hour last week) and quantify what
+seasonality does to the SPRT's assumptions.
+
+\subsection*{Capstone 17.5 --- Zero-Downtime Reference Architecture
+\hfill [staff]}
+\textbf{Objective:} Design and document the complete deployment
+architecture for Northwind Robotics' public API platform --- the chapter,
+applied end to end.
+
+\textbf{Inputs/Datasets:} All chapter listings; the platform brief: 12
+services (3 latency-critical), mixed REST and gRPC, one WebSocket
+telemetry service, PCI-adjacent payments path, two regions.
+
+\textbf{Steps:} (1)~Choose and justify the edge stack (CDN, WAF mode,
+TLS posture per traffic class) and the gateway/mesh split; draw the
+request-path diagram for the payments path. (2)~Define the manifest
+template (probes, resources policy, preStop, grace periods) with
+per-service-class parameters. (3)~Define the progressive-delivery
+standard: steps, gates ($\delta$, $\alpha$, $\beta$ per SLO tier),
+rollback semantics, and the expand-and-contract pipeline stage that
+blocks destructive migrations. (4)~Specify the long-lived-connection
+strategy for WebSocket/gRPC (max connection age, rebalancing, drain
+budgets). (5)~Write the incident runbook for ``canary gate refuses to
+decide.'' (6)~Deliver as an architecture decision record set: one ADR
+per load-bearing choice, each with the rejected alternatives.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Every ADR names the rejected alternatives and the
+        reversal cost.
+  \item[$\square$] The payments path has an explicit TLS-termination
+        decision with a compliance rationale (no plaintext last hop).
+  \item[$\square$] The rollout standard includes per-tier gate
+        parameters \emph{and} the evidence (simulator runs) that they
+        detect the stated regression sizes.
+  \item[$\square$] The WebSocket service's drain budget is derived from
+        measured connection lifetimes, not defaults.
+  \item[$\square$] A peer can run Capstone 17.3's linter against your
+        template and find zero violations.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add the multi-region failover half: health-based
+DNS shifting, what ``rollback'' means when the failure is a region, and
+where the canary gates live when traffic itself moves.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch17-deps}
+
+All runnable code is offline and localhost-only after a one-time install.
+From PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\noindent\textbf{requirements.txt:}
+\begin{minted}{text}
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27
+pytest>=8
+pyyaml>=6.0
+\end{minted}
+
+\subsection{fastapi ($\geq$ 0.110)}
+\textbf{Description:} The ASGI framework the Orders API is written in.
+\textbf{Why included:} Listings 17.3--17.4 containerize and terminate a
+FastAPI service; its middleware is the in-flight ledger the drain proof
+relies on~\cite{fastapidocs}. \textbf{Alternatives:} Starlette directly
+(the middleware pattern is raw ASGI and ports unchanged); Flask (WSGI ---
+no async lifespan semantics, weaker fit for graceful-shutdown teaching).
+\textbf{Installation:} \texttt{pip install "fastapi>=0.110"} in the
+activated venv (PowerShell: keep the quotes so \texttt{>=} is not parsed
+as redirection).
+
+\subsection{uvicorn ($\geq$ 0.29)}
+\textbf{Description:} The ASGI server whose signal handling is the
+subject of Listing~\ref{lst:ch17-shutdown}: on \texttt{SIGTERM} (or
+\texttt{SIGBREAK} via \texttt{CTRL\_BREAK\_EVENT} on Windows) it stops
+accepting, waits for in-flight requests up to
+\texttt{timeout\_graceful\_shutdown}, runs lifespan shutdown, and exits.
+\textbf{Why included:} graceful shutdown cannot be taught as folklore ---
+this chapter proves it against the real server. \textbf{Alternatives:}
+hypercorn (comparable lifespan semantics); gunicorn with uvicorn workers
+(the classic production shape whose own signal choreography --- master
+vs.\ worker --- is an interview topic in itself).
+\textbf{Installation:} \texttt{pip install "uvicorn>=0.29"}.
+
+\subsection{httpx ($\geq$ 0.27)}
+\textbf{Description:} Sync/async HTTP client. \textbf{Why included:} it
+backs FastAPI's \texttt{TestClient} for any tests you write around the
+listings, and is the natural client for extending the lab's load mix.
+(The driver itself deliberately uses stdlib \texttt{urllib} so the proof
+depends on nothing but Python.) \textbf{Alternatives:} \texttt{requests}
+(synchronous only); raw \texttt{urllib} (what the driver uses --- proof
+that you can, not that you should). \textbf{Installation:}
+\texttt{pip install "httpx>=0.27"}.
+
+\subsection{pytest ($\geq$ 8)}
+\textbf{Description:} Test framework. \textbf{Why included:} the lab and
+capstones wrap the demos as executable assertions (e.g., ``zero severed
+requests''); exit codes from the demo driver map cleanly onto pytest
+outcomes. \textbf{Alternatives:} \texttt{unittest} (stdlib; serviceable,
+more ceremony). \textbf{Installation:} \texttt{pip install "pytest>=8"}.
+
+\subsection{pyyaml ($\geq$ 6.0)}
+\textbf{Description:} YAML parser. \textbf{Why included:} Capstone 17.3's
+manifest linter parses Listing 17.2's YAML documents; parsing is the
+honest way to review manifests --- grepping YAML for
+\texttt{readOnlyRootFilesystem} misses indentation-level semantics that
+\texttt{yaml.safe\_load} gets right. \textbf{Alternatives:}
+\texttt{ruamel.yaml} (round-trips comments; heavier); \texttt{kubeconform}
+/ \texttt{conftest} (real schema/policy validation when you graduate from
+teaching lint rules). \textbf{Installation:}
+\texttt{pip install "pyyaml>=6.0"}.
+
+\subsection*{Toolchain (not pip --- install with winget)}
+The chapter's reviewed-not-applied artifacts come alive with three tools,
+all optional here: \textbf{Docker Desktop}
+(\texttt{winget install Docker.DockerDesktop}) to build Listing 17.1 and
+feel the layer cache; \textbf{kubectl}
+(\texttt{winget install Kubernetes.kubectl}) plus a local cluster
+(\texttt{kind} --- \texttt{winget install Kubernetes.kind} --- or Docker
+Desktop's bundled Kubernetes) to actually apply Listing 17.2 and watch
+probes and rollouts in \texttt{kubectl get pods -w}; and \textbf{k6}
+(\texttt{winget install k6.k6}) to put real load on the canary endpoints
+instead of synthetic fixtures. None is required: every behavior this
+chapter claims is either proven by the runnable listings or stated as
+platform semantics you will verify on first contact with a cluster.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch17-summary}
+
+\begin{itemize}
+  \item A container image is a content-addressed layer stack: pin digests,
+        split build from runtime, drop root, make the filesystem
+        read-only, and treat image size as attack-surface accounting ---
+        every line of Listing 17.1 is a security decision.
+  \item Inside the container you are PID~1: exec-form entrypoints and
+        real signal handlers are what make \texttt{SIGTERM} mean
+        ``drain'' instead of ``die.'' The four-act sequence --- stop
+        accepting, drain, timeout, exit --- is provable offline
+        (Listings 17.3--17.4), and each act has a platform knob
+        (readiness, graceful timeout, \texttt{terminationGracePeriodSeconds})
+        that must agree with the others.
+  \item The gateway is the policy enforcement point for north-south
+        traffic: JWT offload, rate limiting, transformation, and canary
+        routing configured once (Table~\ref{tab:ch17-gateway-matrix});
+        ingress is its portable subset; the mesh owns east-west. Enforce
+        each concern in exactly one tier.
+  \item Probes are a recovery theory, not boilerplate: startup budgets
+        boot time, readiness moves traffic without restarts, liveness
+        restarts only process-local death --- and Scenario~B of the
+        simulator shows the CrashLoopBackOff that results from conflating
+        them.
+  \item Requests schedule, limits throttle: CPU limits quantize latency
+        into 100~ms stalls; memory limits OOM-kill. Set memory request
+        $=$ limit, CPU request always, CPU limit deliberately.
+  \item HPA scales on metrics against requests; stabilization windows and
+        downscale policies are connection-protection, and PDBs are the
+        arithmetic that keeps voluntary disruptions inside the SLO.
+  \item Progressive delivery migrates traffic, not versions: size canary
+        steps by requests, gate them with a sequential test with
+        pre-registered $\delta$, $\alpha$, $\beta$
+        (Listing~\ref{lst:ch17-canary}), and make rollback a pointer
+        move --- which requires expand-and-contract schemas
+        (Chapter~\ref{ch:versioning}).
+  \item TLS placement is a visibility-versus-encryption decision per
+        hop: terminate at the edge, re-encrypt inside, reserve
+        passthrough for regulated payloads; automate every certificate;
+        let the CDN cache only what is anonymous and keyed correctly.
+  \item Termination is a concurrent race among SIGTERM, endpoint removal,
+        and LB draining; the preStop sleep exists to rig it, and the
+        missing preStop in Section~\ref{sec:ch17-case} is what 0.1\%
+        dropped requests looks like from the inside.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch17-quickref}
+
+\subsection*{Probe Behavior Table}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Probe} & \textbf{Failure consequence} & \textbf{Checks} \\
+    \midrule
+    Startup & container restarted after period $\times$ threshold budget & boot complete (cheap, no deps) \\
+    Readiness & endpoint removed; re-added on first success; no restart & may touch critical deps, shallowly \\
+    Liveness & container restarted in place after threshold streak & process-local only; never dependencies \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Gating: startup runs alone until first success; readiness and liveness
+begin only afterwards. Endpoint removal lags by seconds (kube-proxy, DNS,
+LB convergence) --- rig the race with \texttt{preStop} sleep.
+
+\subsection*{Rollout \& Autoscaling Cheat-Sheet}
+\texttt{maxSurge: 1, maxUnavailable: 0} $\Rightarrow$ capacity never dips,
+costs one surge pod $\bullet$ \texttt{maxUnavailable: 1, maxSurge: 0}
+$\Rightarrow$ no extra quota, serves at $R{-}1$ windows $\bullet$
+\texttt{progressDeadlineSeconds} fails wedged rollouts loudly $\bullet$
+\texttt{revisionHistoryLimit: 5} keeps rollbacks instant $\bullet$
+\texttt{terminationGracePeriodSeconds} $=$ preStop $+$ slowest request
+$+$ margin $\bullet$ HPA: $\lceil \text{current} \times
+\text{metric}/\text{target} \rceil$ against \emph{requests} $\bullet$
+scaleDown window 300~s $+$ $\le$1 pod/60~s; scaleUp immediate $\bullet$
+PDB: \texttt{minAvailable} $= R - 1$ for rollouts to proceed; never
+${=}R$ (deadlocks drains); canary weights by pod ratio: canary pods $/$
+total pods.
+
+\subsection*{TLS Termination Matrix}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    \textbf{Mode} & \textbf{Edge sees} & \textbf{Last hop} & \textbf{Use when} \\
+    \midrule
+    Terminate at edge & full L7 (WAF, JWT, routing) & plaintext & private network you truly control; legacy \\
+    Re-encrypt & full L7 & TLS to backend (internal CA / mesh mTLS) & default for production APIs \\
+    Passthrough & L4 only (no WAF, no L7 route) & end-to-end encrypted & regulated payloads; L7 policy unnecessary \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Certificates: ACME (Let's Encrypt) at the edge; cert-manager or mesh
+issuance inside; a manually renewed certificate is an outage with a
+calendar date.
+
+\input{chapters/_standard_addendum}

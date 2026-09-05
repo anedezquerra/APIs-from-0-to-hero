@@ -1,0 +1,2971 @@
+%% ============================================================================
+%% Chapter 18: Observability & SRE for APIs
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Observability \& SRE for APIs}
+\label{ch:observability}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Every chapter until now has asked a design-time question: how should the
+API be shaped, secured, versioned, and deployed? This chapter asks the
+runtime question that decides whether all of that work matters: \emph{when
+the API misbehaves in production --- and it will --- can you see it,
+measure it, and respond before your error budget is gone?} An API without
+observability is a system whose failures are reported by customers, whose
+latency regressions are discovered in quarterly reviews, and whose
+outages are debugged by intuition. An API without SLOs has observability
+data but no judgment: dashboards nobody pages on, alerts everybody ignores,
+and no principled answer to ``is this bad enough to stop the release?''
+
+We build the answer in three layers. First, the \textbf{three pillars}
+applied concretely to APIs: structured JSON logs with levels, sampling,
+and a hard rule against PII and secrets; metrics organized as RED (rate,
+errors, duration) for services and USE (utilization, saturation, errors)
+for resources; and distributed traces with spans and context propagation.
+Second, the \textbf{machinery}: OpenTelemetry's API/SDK/exporter/collector
+architecture~\cite{opentelemetrydocs}, the W3C \texttt{traceparent} header
+parsed byte by byte (version, trace-id, span-id, flags), \texttt{tracestate}
+and baggage, span kinds and HTTP semantic conventions, and the head-versus-tail
+sampling decision. Third, the \textbf{engineering of numbers}: histogram
+buckets and why percentiles must come from histograms (including a proof
+by example of the p99-of-averages fallacy), cardinality discipline with
+cost arithmetic, exemplars, SLI formulas, error budgets (43.2 minutes per
+month at 99.9\%), and multi-window multi-burn-rate alerting with the full
+window-pair mathematics~\cite{beyer2016sre}.
+
+The operational half closes the loop: correlation IDs end to end
+(connecting the problem-details work of Chapter~\ref{ch:problem_details}),
+per-endpoint dashboards anchored to SLOs rather than vibes, a systematic
+timeline-decomposition method for debugging production latency, and the
+incident-response apparatus --- severity levels, roles, runbooks, and
+blameless postmortems with a template. All code is typed Python~3.11,
+offline-first (the OTLP exporter is replaced by a file exporter; the
+collector is simulated), deterministic (seeded ID generators and
+timelines), and set in the Northwind Robotics fleet-telemetry universe.
+The war story is the invisible retry storm: a latency regression that
+multiplied traffic fivefold while every individual log line looked
+perfectly healthy --- found through trace fan-out metrics, invisible in
+logs.
+
+\begin{keyconceptbox}
+Observability answers \emph{``what is the system doing?''}; SRE answers
+\emph{``is that good enough, and what do we do when it is not?''} The two
+are useless apart: telemetry without SLOs is data hoarding, and SLOs
+without telemetry are wishes. The contract that binds them is the error
+budget --- the only number in this chapter that is allowed to page a human
+being --- and the mechanism that makes telemetry coherent across service
+boundaries is context propagation via the W3C \texttt{traceparent} header.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch18-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able
+to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Apply the three pillars to API services concretely: emit structured
+        JSON logs with levels and sampling and no PII or secrets; define RED
+        metrics for services and USE metrics for resources; construct traces
+        with correct span kinds and context propagation.
+  \item Explain the OpenTelemetry architecture --- API, SDK, exporter,
+        collector --- and justify the collector as the boundary between
+        application code and vendor backends~\cite{opentelemetrydocs}.
+  \item Parse and emit the W3C \texttt{traceparent} header by hand
+        (version--trace-id--span-id--flags), explain \texttt{tracestate}
+        and baggage, and state exactly why context does \emph{not} propagate
+        itself through queues.
+  \item Engineer latency metrics correctly: choose histogram buckets,
+        compute percentiles from histograms, refute the p99-of-averages
+        fallacy, budget label cardinality with explicit arithmetic, and use
+        exemplars to jump from a metric to a trace.
+  \item Design SLIs for availability, latency, and freshness; derive error
+        budgets (43.2 minutes per month at 99.9\%); and implement
+        multi-window multi-burn-rate alerting with the fast/slow window-pair
+        mathematics of the SRE Workbook~\cite{beyer2016sre}.
+  \item Run operational practice end to end: correlation IDs propagated to
+        problem-details responses, SLO-anchored per-endpoint dashboards,
+        timeline decomposition of a slow request, and incident response with
+        severities, roles, runbooks, and blameless postmortems.
+  \item Instrument a FastAPI service with traces, metrics, and correlated
+        logs offline, and verify propagation with executable
+        tests~\cite{fastapidocs}.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes Chapters~0--17, especially: building and testing
+FastAPI services (Chapter~\ref{ch:fastapi}), structured errors and
+correlation-friendly problem details (Chapter~\ref{ch:problem_details}),
+retries and resilience patterns (Chapter~\ref{ch:microservices}), API
+security boundaries --- you cannot judge what may be logged without them
+(Chapter~\ref{ch:api_security}), and deployment mechanics
+(Chapter~\ref{ch:deployment}). Elementary probability (quantiles, ratios)
+and algebra are assumed; every formula is derived in place.
+
+\subsection*{Setup}
+All listings run offline on Windows with Python~3.11+. One-time setup from
+PowerShell in a scratch directory:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install "opentelemetry-sdk>=1.25" `
+            "opentelemetry-instrumentation-fastapi>=0.46b0" `
+            "fastapi>=0.110" "pytest>=8"
+\end{minted}
+
+No collector, no network, no credentials: spans are exported to a local
+JSON-lines file, metrics are read back from an in-memory reader, and every
+timeline is seeded. Section~\ref{sec:ch18-deps} notes what changes when you
+point the same code at a real OpenTelemetry Collector.
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch18-mechanics}
+
+\subsection{The Three Pillars, Applied to APIs}
+\label{subsec:ch18-pillars}
+
+``Logs, metrics, traces'' is a slogan; the engineering content is in what
+each pillar is \emph{for}, what it \emph{costs}, and how they \emph{join}.
+
+\paragraph{Structured logs: events with a schema.} A log line is a
+timestamped record of something that happened once. The moment an API
+serves real traffic, free-text logs stop being searchable and start being
+forensics-resistant, so the discipline is: emit JSON, one object per line,
+with a fixed schema --- timestamp, level, logger, message, and
+\emph{correlation fields} (trace id, span id). Levels are a contract with
+the reader: \texttt{ERROR} means a human should care, \texttt{WARN} means a
+human should eventually care, \texttt{INFO} means normal operation worth
+keeping, \texttt{DEBUG} means sampled or off in production. Volume control
+is part of the design: a hot endpoint logging every request at
+\texttt{INFO} is a denial-of-wallet attack on yourself, so high-frequency
+paths are sampled (keep 1 in $N$) while errors are always kept. And the
+hard rule, discussed again in Section~\ref{sec:ch18-pitfalls}: \textbf{no
+PII, no credentials, no tokens, no request bodies} --- logs outlive their
+retention assumptions, leak into support tickets and vendor UIs, and are
+readable by people who should not see user data.
+
+\paragraph{Metrics: aggregatable numbers.} A metric is a number observed
+repeatedly and aggregated cheaply: counters (requests served), histograms
+(durations in buckets), gauges (queue depth). For API services the working
+vocabulary is \textbf{RED}: \emph{Rate} (requests per second),
+\emph{Errors} (failures per second, or error ratio), \emph{Duration}
+(latency distribution). For the resources under the service, the
+complementary vocabulary is \textbf{USE}: \emph{Utilization} (how busy),
+\emph{Saturation} (how queued), \emph{Errors} (how broken) --- connection
+pools, worker processes, disk. RED tells you your users are hurting; USE
+usually tells you why.
+
+\paragraph{Traces: causality with timestamps.} A trace records one request's
+journey as a tree of \emph{spans} --- named, timed intervals with a parent
+pointer. Where logs answer ``what happened here?'' and metrics answer ``how
+often, how fast?'', traces answer the question microservices make urgent:
+``\emph{where} did the time go, across the three services this request
+touched?'' The trace/span model and its wire format get their own
+subsections below.
+
+\begin{definition}[Span, Trace, and Context Propagation]
+A \emph{span} is a named, timed operation with attributes, a status, a
+span id, and an optional parent span id. A \emph{trace} is the set of spans
+sharing one trace id, forming a tree. \emph{Context propagation} is the
+mechanism by which a caller transmits the trace id, its own span id, and
+sampling flags to a callee --- for HTTP, via the W3C \texttt{traceparent}
+header --- so the callee's spans attach to the same tree.
+\end{definition}
+
+\begin{keyconceptbox}
+The pillars join on \textbf{exemplars and correlation ids}: a metric
+histogram bucket carries an exemplar pointing at one trace; every log line
+emitted inside a span carries that span's trace id; every problem-details
+response (Chapter~\ref{ch:problem_details}) carries the same id for the
+client to quote back. One identifier, three pillars, zero archaeology.
+\end{keyconceptbox}
+
+\subsection{OpenTelemetry Architecture: API, SDK, Exporter, Collector}
+\label{subsec:ch18-otel}
+
+OpenTelemetry (OTel) is the industry-converged instrumentation standard,
+and its layering is the first architecture decision to get
+right~\cite{opentelemetrydocs}:
+
+\begin{itemize}
+  \item \textbf{API} --- the instrumentation surface your code calls:
+        \texttt{tracer.start\_as\_current\_span(...)},
+        \texttt{meter.create\_counter(...)}. Depending on the API is free;
+        it does nothing until an SDK is installed.
+  \item \textbf{SDK} --- the implementation: span processors, samplers,
+        metric aggregations, resource attribution (\texttt{service.name}).
+        Applications configure the SDK; libraries must never.
+  \item \textbf{Exporter} --- the egress adapter: OTLP over gRPC/HTTP to a
+        collector in production; in this chapter, a deliberately offline
+        JSON-lines file exporter implementing the same interface, so the
+        telemetry pipeline is testable with zero infrastructure.
+  \item \textbf{Collector} --- a standalone process receiving OTLP,
+        processing (batching, redaction, tail sampling), and re-exporting
+        to backends (Prometheus, Jaeger/Tempo, Loki/Elasticsearch, or a
+        vendor). Putting the collector between app and backend is what lets
+        you switch vendors by editing one YAML file instead of a fleet
+        redeploy.
+\end{itemize}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=stealth,
+  flowstep/.append style={minimum height=9mm}
+]
+  % ---- app tier ----
+  \node[flowstep, fill=blue!8] (appcode) {Application code\\[-2pt]\footnotesize OTel API calls};
+  \node[flowstep, fill=blue!8, right=6mm of appcode] (sdk) {OTel SDK\\[-2pt]\footnotesize processors, sampler};
+  \node[flowstep, fill=blue!8, right=6mm of sdk] (exporter) {Exporter\\[-2pt]\footnotesize OTLP (or file)};
+  \node[draw, rounded corners, dashed, inner sep=5pt, fit=(appcode)(sdk)(exporter),
+        label={[modcap]above:Application process}] (app) {};
+  % ---- collector ----
+  \node[flowstep, fill=packtorange!12, right=14mm of exporter] (recv) {Receivers\\[-2pt]\footnotesize OTLP gRPC/HTTP};
+  \node[flowstep, fill=packtorange!12, right=6mm of recv] (proc) {Processors\\[-2pt]\footnotesize batch, redact, tail-sample};
+  \node[flowstep, fill=packtorange!12, right=6mm of proc] (colexp) {Exporters\\[-2pt]\footnotesize per-backend};
+  \node[draw, rounded corners, dashed, inner sep=5pt, fit=(recv)(proc)(colexp),
+        label={[modcap]above:OpenTelemetry Collector}] (coll) {};
+  % ---- backends ----
+  \node[flowstep, fill=green!10, right=14mm of colexp, yshift=10mm] (prom) {Prometheus\\[-2pt]\footnotesize metrics};
+  \node[flowstep, fill=green!10, right=14mm of colexp] (jaeger) {Jaeger / Tempo\\[-2pt]\footnotesize traces};
+  \node[flowstep, fill=green!10, right=14mm of colexp, yshift=-10mm] (loki) {Loki / ES\\[-2pt]\footnotesize logs};
+  \node[draw, rounded corners, dashed, inner sep=5pt, fit=(prom)(loki),
+        label={[modcap]right:Backends}] {};
+  % ---- edges ----
+  \draw[->, thick] (appcode) -- (sdk);
+  \draw[->, thick] (sdk) -- (exporter);
+  \draw[->, thick] (exporter) -- (recv);
+  \draw[->, thick] (recv) -- (proc);
+  \draw[->, thick] (proc) -- (colexp);
+  \draw[->, thick] (colexp.east) -- (prom.west);
+  \draw[->, thick] (colexp.east) -- (jaeger.west);
+  \draw[->, thick] (colexp.east) -- (loki.west);
+  \node[note, below=2mm of app] {library + app instrumentation};
+  \node[note, below=2mm of coll] {vendor-neutral boundary};
+\end{tikzpicture}
+\caption{The observability pipeline. Application code depends only on the
+OTel API; the SDK assembles spans and metric aggregations; the exporter
+ships OTLP to the collector, which batches, redacts, optionally
+tail-samples, and fans out to one backend per signal. Vendor changes happen
+at the collector, never in application code.}
+\label{fig:ch18-pipeline}
+\end{figure}
+
+Two SDK details matter for API services. First, \textbf{span processors}:
+the production default is the \emph{batch} processor (queue and flush every
+few seconds; the hot path only enqueues); this chapter's offline listings
+use the \emph{simple} processor (export synchronously on span end) because
+deterministic tests beat throughput here. Second, \textbf{metric views}:
+the SDK lets you re-shape an instrument's aggregation --- we use a view to
+pin the latency histogram to explicit millisecond buckets, which is what
+makes percentile math and backend cost predictable
+(Section~\ref{subsec:ch18-metrics-engineering}).
+
+\subsection{The W3C Trace Context: \texttt{traceparent}, Byte by Byte}
+\label{subsec:ch18-traceparent}
+
+Context propagation across HTTP services is standardized by the W3C Trace
+Context recommendation. The \texttt{traceparent} header is exactly four
+dash-separated lowercase-hex fields:
+
+\begin{examplebox}
+\textbf{Decoding a live header.}
+\texttt{00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01} means:
+version \texttt{00}; trace id \texttt{4bf92f3577b34da6a3ce929d0e0e4736}
+(128 bits); parent span id \texttt{00f067aa0ba902b7} (64 bits); flags
+\texttt{01} --- bit~0 set, so this trace is \emph{sampled}. Listing~18.1
+parses this format strictly and Listing~18.2 proves the round trip.
+\end{examplebox}
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l l X}
+    \toprule
+    \textbf{Field} & \textbf{Width} & \textbf{Example} & \textbf{Rules} \\
+    \midrule
+    \texttt{version}   & 2 hex  & \texttt{00} & \texttt{ff} is forbidden; version \texttt{00} forbids trailing fields; future versions may append fields, which parsers must tolerate. \\
+    \texttt{trace-id}  & 32 hex & \texttt{4bf9\ldots4736} & All-zero is invalid. Identifies the whole trace; constant across every hop. \\
+    \texttt{span-id}   & 16 hex & \texttt{00f067aa0ba902b7} & All-zero is invalid. Identifies the caller's span; the callee records it as its \emph{parent}. \\
+    \texttt{flags}     & 2 hex  & \texttt{01} & Only bit 0 (\texttt{0x01}, \emph{sampled}) is defined; other bits are reserved and must not be echoed as set. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{\texttt{traceparent} field reference (W3C Trace Context).}
+  \label{tab:ch18-traceparent}
+\end{table}
+
+Three companion mechanisms complete the picture. \textbf{\texttt{tracestate}}
+is a comma-separated list of at most 32 vendor \texttt{key=value} members
+carrying vendor-specific sampling or routing state; it is mutable hop by
+hop under strict size and syntax rules. \textbf{Baggage} is a separate W3C
+header carrying user-defined key/value pairs (e.g.\ tenant or plan tier)
+that propagate with the trace --- powerful, dangerous (it travels
+\emph{everywhere}, so never put PII in it), and intentionally not part of
+the span identity. And \textbf{queues}: nothing about an HTTP header helps
+you across a message broker. Propagation through a queue requires
+\emph{explicitly} writing the trace context into the message metadata on
+publish and extracting it on consume (the same inject/extract pair,
+different carrier) --- the async patterns of Chapter~\ref{ch:async_apis}
+do not do this for you. Section~\ref{sec:ch18-pitfalls} lists the broken
+trace tree as a first-class anti-pattern.
+
+\subsection{Span Kinds and Semantic Conventions for HTTP}
+\label{subsec:ch18-semconv}
+
+OTel assigns every span a \emph{kind} that states its relationship to its
+parent, and getting kinds right is what makes waterfall views and
+service-graph aggregations correct~\cite{opentelemetrydocs}:
+
+\begin{itemize}
+  \item \textbf{SERVER} --- entry point of a remote call handled by this
+        process (an inbound HTTP request). Parent came from headers.
+  \item \textbf{CLIENT} --- an outgoing remote call (an HTTP request this
+        process makes). Its span id becomes the child's parent via the
+        injected \texttt{traceparent}.
+  \item \textbf{INTERNAL} --- work inside the process (a cache lookup, a
+        pricing calculation).
+  \item \textbf{PRODUCER} / \textbf{CONSUMER} --- asynchronous messaging;
+        the consumer's parent may not be on the critical path of the
+        producer's latency, which is why they are distinct kinds.
+\end{itemize}
+
+Semantic conventions then standardize attribute names so dashboards and
+backends are portable: \texttt{http.request.method},
+\texttt{url.path} (templated route, never the raw path with ids),
+\texttt{http.response.status\_code}, \texttt{server.address},
+\texttt{http.route}. The single most consequential rule for APIs:
+\textbf{attributes use route templates} (\texttt{/fleet/\{id\}}), never
+concrete paths --- a concrete path per request is a cardinality bomb, the
+subject of Section~\ref{subsec:ch18-metrics-engineering}.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % ---- service swimlanes ----
+  \node[modcap] at (0,0) {gateway};
+  \node[modcap] at (5.2,0) {orders};
+  \node[modcap] at (10.4,0) {inventory};
+  \draw[gray!50, dashed] (0,-0.4) -- (0,-4.1);
+  \draw[gray!50, dashed] (5.2,-0.4) -- (5.2,-4.1);
+  \draw[gray!50, dashed] (10.4,-0.4) -- (10.4,-4.1);
+  \node[note] at (0,-4.35) {time $\rightarrow$};
+  % ---- spans as horizontal bars ----
+  % gateway server span: t=0..48
+  \fill[darkblue!75] (-0.06,-0.8) rectangle (4.86,-1.05);
+  \node[note, anchor=west, text=darkblue] at (5.0,-0.92)
+    {\texttt{gateway POST /fleet/telemetry} (SERVER, 48\,ms)};
+  % orders server span: t=2..40
+  \fill[packtorange!80] (5.14,-1.7) rectangle (8.96,-1.95);
+  \node[note, anchor=west, text=packtorange] at (9.1,-1.82)
+    {\texttt{orders.create} (SERVER, 38\,ms)};
+  % inventory server span: t=8..30
+  \fill[green!55!black] (10.34,-2.6) rectangle (12.54,-2.85);
+  \node[note, anchor=west, text=green!50!black] at (8.6,-3.35)
+    {\texttt{inventory.reserve} (SERVER, 22\,ms)};
+  % ---- parent arrows ----
+  \draw[->, thick, gray] (4.9,-0.92) .. controls (5.05,-1.2) .. (5.2,-1.7)
+    node[midway, left, note] {parent};
+  \draw[->, thick, gray] (9.0,-1.82) .. controls (9.9,-2.1) .. (10.3,-2.6)
+    node[midway, below right=-2pt, note] {parent};
+  % ---- traceparent hops ----
+  \node[note, align=left] at (2.4,-3.9)
+    {hop 1 inject: \texttt{traceparent: 00-4bf9\ldots4736-\emph{s1}-01}};
+  \node[note, align=left] at (7.6,-3.9)
+    {hop 2 inject: \texttt{00-4bf9\ldots4736-\emph{s2}-01}};
+  \draw[->, thick, darkblue!60] (2.2,-3.55) -- (4.6,-2.1);
+  \draw[->, thick, darkblue!60] (9.4,-3.55) -- (10.2,-3.0);
+\end{tikzpicture}
+\caption{One trace across three services. Bars are spans on a shared time
+axis; every span carries trace id \texttt{4bf9\ldots4736}; each hop injects
+a fresh span id into the outgoing \texttt{traceparent}, which the next
+service records as its parent. This is exactly the tree Listing~18.3
+exports and asserts.}
+\label{fig:ch18-trace-tree}
+\end{figure}
+
+\subsection{Sampling: Head, Tail, and the Errors You Cannot Afford to Lose}
+\label{subsec:ch18-sampling}
+
+At 10{,}000 requests per second, keeping every trace is a storage and
+egress decision most platforms lose. Sampling reduces volume; where the
+decision happens determines what you keep.
+
+\textbf{Head sampling} decides at the trace's first span: flip a weighted
+coin (keep $p$\%), record the verdict in the \texttt{sampled} flag, and
+propagate it so every downstream hop agrees. It is cheap, deterministic per
+trace, and statistically unbiased --- and it throws away almost all of the
+rare, interesting traces: at $p = 1\%$, you keep roughly 1\% of your
+\emph{error} traces too. \textbf{Tail sampling} decides at the collector
+after the whole trace is buffered: keep every trace containing an error or
+a p99-plus latency, sample the healthy rest. It keeps exactly the traces
+you debug with, at the price of collector memory, decision latency, and
+the operational burden of buffering entire traces. The pragmatic hybrid:
+head-sample at a few percent for unbiased statistics, tail-sample at the
+collector to guarantee error and slow traces survive, and always record
+counters \emph{before} sampling so metrics stay exact regardless.
+
+\begin{warningbox}
+Sampling happens \emph{after} metrics, never before. If your request
+counters and latency histograms are derived from sampled spans, your RED
+metrics are wrong by the sampling factor --- silently. Metrics must be
+aggregated from every request; traces may be sampled.
+\end{warningbox}
+\subsection{Metrics Engineering: Histograms, Percentiles, Cardinality}
+\label{subsec:ch18-metrics-engineering}
+
+\paragraph{Why latency is a histogram, never an average.} API latency is
+long-tailed: most requests are fast, a few are catastrophically slow, and
+the slow ones are your most valuable users doing the largest operations.
+The average hides exactly that. The fix is to record durations into
+\emph{histo\-gram buckets} --- counters for $(0,5]$, $(5,10]$, $(10,25]$,
+$(25,50]$, $(50,100]$, $(100,250]$, $(250,500]$, $(500,1000]$,
+$(1000,2500]$, $(2500,\infty)$ milliseconds --- from which percentiles can
+be estimated at query time.
+
+\begin{definition}[Histogram percentile]
+Given cumulative bucket counts $C_0 \le C_1 \le \dots \le C_k = N$ with
+upper bounds $u_0 < u_1 < \dots < u_k$, the $q$-th percentile estimate is
+the value interpolated within the first bucket where $C_j \ge
+\lceil q N \rceil$:
+\begin{equation}
+\hat{p}_q \;=\; u_{j-1} + (u_j - u_{j-1})\,
+\frac{\lceil qN \rceil - C_{j-1}}{C_j - C_{j-1}} .
+\label{eq:ch18-histpct}
+\end{equation}
+Accuracy is bounded by bucket width: fine buckets where your SLO lives,
+coarse buckets in the tail. Percentiles are \emph{estimated from counts},
+never averaged from other percentiles.
+\end{definition}
+
+\begin{proposition}[The p99-of-averages fallacy, by counterexample]
+\label{prop:ch18-p99avg}
+Per-minute averages of a latency distribution can lie arbitrarily far below
+the true p99. Take one minute with 1{,}000 requests: 999 at 10\,ms and one
+at 10{,}000\,ms. The minute's average is
+$\frac{999 \cdot 10 + 10000}{1000} \approx 20$\,ms. If every minute looks
+like this, the ``p99 latency'' computed from per-minute averages is
+$\approx 20$\,ms, while the true per-request p99 is $10{,}000$\,ms ---
+a $500\times$ error, in the reassuring direction. Averaging first destroys
+the tail; percentiles must be computed from per-request data (histograms),
+and percentiles of percentiles or of averages are statistically void.
+\end{proposition}
+
+The same argument forbids averaging precomputed per-instance p99s across a
+fleet: quantiles do not compose under averaging. Merging is legal only at
+the histogram level (add the bucket counts, then apply
+Equation~\eqref{eq:ch18-histpct}) --- which is precisely why the histogram
+is the exportable unit.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+        width=0.92\textwidth,
+        height=7.2cm,
+        ybar,
+        bar width=10pt,
+        xlabel={Latency bucket (ms)},
+        ylabel={Requests},
+        symbolic x coords={0--5, 5--10, 10--25, 25--50, 50--100,
+                           100--250, 250--500, 500--1000, 1000--2500, 2500+},
+        xtick=data,
+        x tick label style={rotate=35, anchor=east, font=\footnotesize},
+        ymin=0, ymax=4200,
+        grid=major, grid style={gray!20},
+        legend style={font=\footnotesize, at={(0.97,0.95)}, anchor=north east},
+      ]
+      \addplot[fill=darkblue!70, draw=darkblue] coordinates {
+        (0--5, 320) (5--10, 1420) (10--25, 3980) (25--50, 2480)
+        (50--100, 840) (100--250, 310) (250--500, 96)
+        (500--1000, 210) (1000--2500, 190) (2500+, 154)
+      };
+      \addlegendentry{requests per bucket (seeded sample, $N=10{,}000$)}
+      % mean ~761 ms, p50 ~25 ms, p99 ~23680 ms (Listing 18.4 demo output)
+      \draw[thick, packtorange, dashed] (axis cs:50--100,0) -- (axis cs:50--100,4100)
+        node[pos=0.97, anchor=south east, rotate=90, font=\footnotesize\bfseries, color=packtorange]
+        {p50 $\approx$ 25 ms};
+      \draw[thick, red!75!black, dashed] (axis cs:250--500,0) -- (axis cs:250--500,4100)
+        node[pos=0.99, anchor=south east, rotate=90, font=\footnotesize\bfseries, color=red!75!black]
+        {mean $\approx$ 761 ms};
+      \draw[thick, purple, dashed] (axis cs:2500+,0) -- (axis cs:2500+,4100)
+        node[pos=0.95, anchor=south west, rotate=90, font=\footnotesize\bfseries, color=purple]
+        {p99 $\approx$ 23.7 s};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{The long tail, plotted from Listing~18.4's seeded distribution.
+  Half of all requests finish in 25\,ms, yet the \emph{average} is
+  761\,ms --- pulled 30$\times$ above the median by a tail the naked eye
+  almost misses --- and p99 is three buckets past the average. Any
+  dashboard or SLO keyed on the mean is measuring a user nobody has.}
+  \label{fig:ch18-longtail}
+\end{figure}
+
+\paragraph{Cardinality discipline, with the cost math.} Every distinct
+combination of label values is a new \emph{time series} that must be
+stored, indexed, and scanned. Series count is multiplicative:
+
+\begin{equation}
+\text{series} \;=\; \prod_{\text{label } \ell} |\text{values}(\ell)| .
+\label{eq:ch18-cardinality}
+\end{equation}
+
+A request counter labeled by route, status class, and region with
+$5 \times 6 \times 3 = 90$ series is free. Add \texttt{user\_id} with
+50{,}000 tenants and you have $90 \times 50{,}000 = 4.5$ million series;
+at a few KB of index and chunk overhead per series, that is tens of GB of
+memory and a query planner that hates you --- before counting ingestion
+cost per active series per scrape interval. The rule: labels may only be
+dimensions you would group by on a dashboard; anything unbounded
+(user ids, request ids, full URLs, error messages) belongs in logs and
+trace attributes, never in metric labels.
+
+\begin{definition}[Exemplar]
+An \emph{exemplar} is a trace id pinned onto a specific histogram bucket
+observation. It is the bridge from ``p99 spiked'' (a metric) to ``here is
+one concrete slow trace'' (a waterfall) --- the cheapest debugging
+accelerator in the entire stack, and the reason metrics and traces must
+share an ID space.
+\end{definition}
+
+\subsection{SLO Engineering: SLIs, Error Budgets, Burn Rates}
+\label{subsec:ch18-slo}
+
+\begin{definition}[SLI, SLO, error budget]
+A \emph{service level indicator} (SLI) is a quantitative measure of service
+behavior, expressed as a ratio of good events to total events. A
+\emph{service level objective} (SLO) is a target on an SLI over a rolling
+window (typically 30 days). The \emph{error budget} is the tolerated
+shortfall: budget $= 1 - \text{SLO}$. For a 99.9\% availability SLO over a
+30-day month, the budget is $0.001 \times 43{,}200\,\text{min} =
+43.2$\,minutes of equivalent full outage per month~\cite{beyer2016sre}.
+\end{definition}
+
+Choosing SLIs for APIs is choosing a proxy for user pain. The three that
+cover nearly every API:
+
+\begin{itemize}
+  \item \textbf{Availability:}
+        $\text{SLI}_{\text{avail}} = \dfrac{\#\,\text{requests with status} < 500}
+        {\#\,\text{requests}}$ per route. Count 5xx as failure; 4xx is the
+        client's budget problem, not yours (Chapter~\ref{ch:problem_details}
+        responses excluded).
+  \item \textbf{Latency:}
+        $\text{SLI}_{\text{lat}} = \dfrac{\#\,\text{requests faster than } T}
+        {\#\,\text{requests}}$, computed from histogram buckets against the
+        SLO threshold $T$ --- e.g.\ ``99\% of \texttt{GET /fleet/status}
+        under 300\,ms.'' This is a threshold-count ratio, which is exactly
+        what Equation~\eqref{eq:ch18-histpct}'s histogram answers.
+  \item \textbf{Freshness} (data-serving APIs):
+        $\text{SLI}_{\text{fresh}} = \dfrac{\#\,\text{reads served with data newer than } D}
+        {\#\,\text{reads}}$ --- the right SLI when the API's job is
+        recency (fleet positions, prices), where ``fast but stale'' is a
+        silent failure mode.
+\end{itemize}
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{SLO} & \textbf{Budget / 30 days} & \textbf{What it permits} \\
+    \midrule
+    99\%    & 7 h 12 min  & A bad deploy \emph{and} a slow rollback, monthly. \\
+    99.9\%  & 43.2 min    & One memorable incident; change freezes near zero. \\
+    99.95\% & 21.6 min    & Pages must be rare and mitigation rehearsed. \\
+    99.99\% & 4.32 min    & Automation mitigates; humans mostly supervise. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Error budgets by SLO target. The budget is a \emph{spending
+  allowance} shared by outages, risky deploys, and experiments --- when it
+  is spent, the roadmap tilts to reliability~\cite{beyer2016sre}.}
+  \label{tab:ch18-budgets}
+\end{table}
+
+\paragraph{Burn-rate alerting: the math.} Alerting on raw error counts
+pages for trivia and sleeps through budget catastrophes. The SRE
+Workbook's answer is to alert on \emph{burn rate} --- how fast the budget
+is being consumed relative to its allotted pace~\cite{beyer2016sre}:
+
+\begin{equation}
+\text{burn rate} \;=\; \frac{\text{observed error rate}}{\text{budget rate}}
+\;=\; \frac{e_w}{1 - \text{SLO}} ,
+\qquad
+\text{budget consumed} \;=\; \text{burn rate} \times \frac{w}{43{,}200\ \text{min}} .
+\label{eq:ch18-burnrate}
+\end{equation}
+
+A burn rate of 1 exhausts the budget exactly as the period ends; 14.4
+exhausts it in $720 / 14.4 = 50$ hours --- i.e.\ 2\% of the monthly budget
+gone in one hour. Alerting on a single window forces a bad trade: a long
+window is precise but slow, a short window is fast but noisy. The
+\emph{multi-window multi-burn-rate} pattern fires only when \textbf{both}
+a long window and a short window exceed the same burn-rate threshold:
+
+\begin{equation}
+\text{alert} \iff
+\bigl(\text{burn}_{\text{long}}(t) \ge b\bigr)
+\;\land\;
+\bigl(\text{burn}_{\text{short}}(t) \ge b\bigr) .
+\label{eq:ch18-mwmb}
+\end{equation}
+
+The long window certifies the burn is sustained; the short window
+certifies it is happening \emph{now} (so the alert auto-resolves and does
+not page on stale history). The canonical table:
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c c X}
+    \toprule
+    \textbf{Policy} & \textbf{Burn} & \textbf{Long} & \textbf{Short} & \textbf{Meaning} \\
+    \midrule
+    Fast page & 14.4$\times$ & 1 h  & 5 m  & 2\% of budget in an hour: page now. \\
+    Slow page & 6$\times$    & 6 h  & 30 m & 5\% of budget in six hours: page soon. \\
+    Ticket    & 1$\times$    & 3 d  & 6 h  & 10\% of budget in three days: work-queue. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Multi-window multi-burn-rate alerting for a 99.9\% SLO (SRE
+  Workbook parameters)~\cite{beyer2016sre}. Listing~18.5 implements and
+  tests exactly this table.}
+  \label{tab:ch18-burnrate}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth]
+  % time axis
+  \draw[->, thick] (0,0) -- (12.6,0) node[below left] {\footnotesize $t$};
+  \foreach \x/\lab in {0/now$-6$h, 5/now$-1$h, 11/now$-5$m, 12.2/now}{
+    \draw[gray!60] (\x,0.08) -- (\x,-0.08);
+    \node[note, below] at (\x,-0.08) {\footnotesize \lab};
+  }
+  % long window bracket
+  \draw[decorate, decoration={brace, amplitude=5pt}, thick, darkblue]
+    (5,1.7) -- (12.2,1.7) node[midway, above=6pt, darkblue]
+    {long window (1 h): sustained?};
+  % short window bracket
+  \draw[decorate, decoration={brace, amplitude=5pt}, thick, packtorange]
+    (11,0.9) -- (12.2,0.9) node[midway, above=5pt, packtorange]
+    {short window (5 m): happening now?};
+  % error-rate trace
+  \draw[very thick, red!70!black] (0,0.25) -- (8.5,0.25) -- (8.6,1.25)
+    -- (11.6,1.25) -- (11.7,0.35) -- (12.2,0.35);
+  \node[note, text=red!70!black, anchor=south west] at (8.7,1.3)
+    {\footnotesize error rate spike};
+  % threshold line
+  \draw[dashed, thick, purple] (0,0.62) -- (12.2,0.62)
+    node[pos=0.02, above, font=\footnotesize, color=purple]
+    {$b \times$ budget rate};
+  % AND gate annotation
+  \node[draw, rounded corners, fill=yellow!15, align=center] at (4.2,3.3)
+    {\footnotesize page $\iff$ burn$_{1\text{h}} \ge 14.4\ \land\ $burn$_{5\text{m}} \ge 14.4$};
+  \draw[->, gray] (4.2,3.0) -- (7.8,1.95);
+\end{tikzpicture}
+\caption{Burn-rate alert logic. The long window (blue brace) filters noise
+by requiring a sustained burn; the short window (orange brace) requires the
+burn to be active \emph{at this instant}, so alerts clear promptly after
+mitigation instead of paging on history. Both must hold
+(Equation~\eqref{eq:ch18-mwmb}).}
+\label{fig:ch18-burnrate}
+\end{figure}
+
+\paragraph{Alert fatigue is a system property, not a personality flaw.}
+Every page that does not require immediate human action teaches the on-call
+to ignore pages; enough false positives and a real page gets snoozed. The
+discipline: page only on user-facing symptoms measured as budget burn
+(fast/slow policies above); route everything else to tickets or dashboards;
+delete or demote any alert that fired three times without action;
+and review the page budget monthly like any other budget. An alert that
+cannot name the SLO it protects is a dashboard panel wearing a pager
+costume.
+
+\subsection{Operational Practice: From Telemetry to Response}
+\label{subsec:ch18-ops}
+
+\paragraph{Correlation IDs end to end.} Chapter~\ref{ch:problem_details}
+gave errors a \texttt{traceId}; this chapter gives it a source. The
+discipline: accept or mint a \texttt{traceparent} at the edge, propagate it
+through every internal call (headers for HTTP, message metadata for
+queues), stamp it on every log line, echo it in every problem-details body
+and support-facing error. The debugging loop becomes: client quotes id
+$\to$ one log query returns the whole request's story $\to$ one trace
+lookup returns the cross-service waterfall.
+
+\paragraph{Dashboards per endpoint, anchored to SLOs.} A service dashboard
+that cannot answer ``are we burning budget, and which endpoint is burning
+it?'' is decoration. The layout that survives contact: row one is the SLO
+(28-day SLI, budget remaining, burn-rate sparkline); row two is RED per
+endpoint (rate, error ratio, duration percentiles from histograms); row
+three is USE for the resources (pool utilization, queue depth); row four is
+dependency health. Every panel cites the query; every query aggregates
+only low-cardinality labels.
+
+\paragraph{Debugging production latency systematically.} When p99 for
+\texttt{POST /fleet/telemetry} jumps from 180\,ms to 900\,ms, resist the
+log dive. Decompose the timeline with the trace waterfall: total span
+(900\,ms) minus child spans ($\approx$ time in gateway code) $\to$ which
+child dominates? If \texttt{orders.create} grew, recurse; if children are
+unchanged but \emph{gaps} between them grew, the time went to queuing,
+connection acquisition, TLS, or scheduling --- none of which appear as
+spans unless you instrument them. The sequence is always: exemplar from
+the violated bucket $\to$ waterfall $\to$ dominant span or gap $\to$
+USE metrics for that span's resources $\to$ only then, correlated logs.
+
+\paragraph{Incident response.} Severity is declared in user-impact units,
+roles are assigned before diagnosis, and the postmortem is blameless or it
+is fiction~\cite{beyer2016sre}. Northwind Robotics' table:
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X l}
+    \toprule
+    \textbf{Severity} & \textbf{Definition} & \textbf{Response} \\
+    \midrule
+    SEV1 & Total outage or data loss; SLO budget incinerating. & All-hands page; incident commander appointed in minutes. \\
+    SEV2 & Major degradation of a core SLO; sustained fast burn. & Page owning team; commander + comms lead. \\
+    SEV3 & Minor degradation or single-tenant impact. & Ticket; next business day. \\
+    SEV4 & Cosmetic or internal-only. & Backlog. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Severity levels. The response column is part of the definition:
+  a severity without a response contract is a label, not a level.}
+  \label{tab:ch18-severity}
+\end{table}
+
+The roles that matter at 3\,a.m.: the \emph{incident commander} owns
+coordination and decisions (and does not debug); the \emph{operations lead}
+debugs and mitigates; the \emph{communications lead} updates stakeholders
+on a cadence. Runbooks --- per service, with SLOs, triage steps, rollback
+commands, and escalation paths --- turn the first ten minutes from
+improvisation into checklist. And the blameless postmortem: timeline,
+mechanism-level root cause (``the deploy changed the connection-pool
+default,'' never ``Alex broke the pool''), what went well, what went
+poorly, action items with owners, and an explicit lesson for the SLO
+itself --- did the alerts fire at the right time? Listing~18.6 generates
+both skeletons from metadata, because structure enforced by code survives
+stress better than structure enforced by memory.
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch18-code}
+
+Everything below is typed Python~3.11, offline-first, and deterministic:
+the OTLP exporter is replaced by a JSON-lines file exporter, metrics are
+read back from an in-memory reader, trace ids come from a seeded generator,
+and every timeline is seeded. The universe is Northwind Robotics fleet
+telemetry. Save the listings under the indicated filenames and the printed
+commands reproduce every claim in this chapter.
+
+\subsection{Listing 18.1 --- The W3C Trace Context, by Hand}
+\label{subsec:ch18-listing-traceparent}
+
+\texttt{trace\_context.py} is a stdlib-only parser and injector for
+\texttt{traceparent}, \texttt{tracestate}, and baggage. The design rule is
+strictness: a malformed header raises \texttt{ValueError} naming the
+offending field --- silently repairing a broken header would fork the
+trace, and silently dropping it would hide a producer bug.
+
+\noindent\textbf{Listing 18.1 --- \texttt{trace\_context.py}: W3C header
+mechanics, stdlib only.}
+\label{lst:ch18-trace-context}
+\begin{minted}{python}
+"""Hand-rolled W3C Trace Context: parse and inject ``traceparent``.
+
+Stdlib-only reference implementation of the wire format every API engineer
+should be able to read cold:
+
+    traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+                 |  |-------------------------------| |--------------| |-|
+                 |  trace-id (32 hex, != 0)           parent/span-id   flags
+                 version (2 hex, never "ff")          (16 hex, != 0)   bit 0 = sampled
+
+Design notes:
+  * Parsing is strict: malformed headers raise ``ValueError`` with the
+    offending field named. Silently "fixing" a broken header would fork
+    the trace; dropping it (returning ``None``) hides producer bugs.
+  * Version "00" headers must be exactly 55 characters / 4 fields. Future
+    versions may append fields, so for version != "00" we accept extra
+    trailing fields and ignore them (forward compatibility).
+  * ``tracestate`` and ``baggage`` parsers are included because the three
+    headers travel together in production.
+
+No network, no dependencies, no randomness: deterministic by construction.
+"""
+
+from __future__ import annotations
+
+import secrets
+from dataclasses import dataclass
+
+HEX = frozenset("0123456789abcdef")
+MAX_TRACESTATE_MEMBERS = 32  # per the W3C Trace Context spec
+
+
+@dataclass(frozen=True)
+class TraceParent:
+    """An immutable, validated ``traceparent`` value."""
+
+    version: str
+    trace_id: str
+    span_id: str
+    sampled: bool
+
+    def __post_init__(self) -> None:
+        if len(self.version) != 2 or not set(self.version) <= HEX:
+            raise ValueError(f"version must be 2 lowercase hex chars, got {self.version!r}")
+        if self.version == "ff":
+            raise ValueError("version 'ff' is reserved (invalid) by the spec")
+        _check_hex_field("trace_id", self.trace_id, 32)
+        _check_hex_field("span_id", self.span_id, 16)
+        if self.trace_id == "0" * 32:
+            raise ValueError("trace_id of all zeros is invalid")
+        if self.span_id == "0" * 16:
+            raise ValueError("span_id of all zeros is invalid")
+
+    @property
+    def flags(self) -> str:
+        return "01" if self.sampled else "00"
+
+    def header(self) -> str:
+        """Render the canonical ``traceparent`` header value."""
+        return f"{self.version}-{self.trace_id}-{self.span_id}-{self.flags}"
+
+
+def _check_hex_field(name: str, value: str, length: int) -> None:
+    if len(value) != length or not set(value) <= HEX:
+        raise ValueError(
+            f"{name} must be exactly {length} lowercase hex chars, got {value!r}"
+        )
+
+
+def parse_traceparent(header: str) -> TraceParent:
+    """Parse a ``traceparent`` header value, raising ``ValueError`` if bad."""
+    if not isinstance(header, str) or not header:
+        raise ValueError("traceparent header must be a non-empty string")
+    if header != header.strip():
+        raise ValueError("traceparent must not carry surrounding whitespace")
+    parts = header.split("-")
+    if len(parts) < 4:
+        raise ValueError(
+            f"traceparent needs at least 4 dash-separated fields, got {len(parts)}"
+        )
+    version, trace_id, span_id, flags = parts[0], parts[1], parts[2], parts[3]
+    if len(flags) != 2 or not set(flags) <= HEX:
+        raise ValueError(f"flags must be 2 lowercase hex chars, got {flags!r}")
+    if version == "00" and len(parts) != 4:
+        raise ValueError("version '00' forbids extra fields")
+    sampled = bool(int(flags, 16) & 0b0000_0001)  # only bit 0 is defined
+    return TraceParent(version=version, trace_id=trace_id,
+                       span_id=span_id, sampled=sampled)
+
+
+def new_traceparent(*, sampled: bool = True) -> TraceParent:
+    """Mint a fresh root context (16-byte trace id, 8-byte span id)."""
+    return TraceParent(
+        version="00",
+        trace_id=secrets.token_hex(16),
+        span_id=secrets.token_hex(8),
+        sampled=sampled,
+    )
+
+
+def child_of(parent: TraceParent, *, sampled: bool | None = None) -> TraceParent:
+    """Derive the outgoing context for a child hop: same trace, new span id."""
+    return TraceParent(
+        version=parent.version,
+        trace_id=parent.trace_id,
+        span_id=secrets.token_hex(8),
+        sampled=parent.sampled if sampled is None else sampled,
+    )
+
+
+def parse_tracestate(header: str) -> dict[str, str]:
+    """Parse a ``tracestate`` list-member header into an ordered dict.
+
+    Raises ``ValueError`` on more than 32 members or malformed entries.
+    """
+    if not header.strip():
+        return {}
+    members = [m.strip() for m in header.split(",")]
+    if len(members) > MAX_TRACESTATE_MEMBERS:
+        raise ValueError(f"tracestate allows at most {MAX_TRACESTATE_MEMBERS} members")
+    out: dict[str, str] = {}
+    for member in members:
+        if "=" not in member:
+            raise ValueError(f"tracestate member lacks '=': {member!r}")
+        key, _, value = member.partition("=")
+        if not key or key in out:
+            raise ValueError(f"tracestate duplicate/empty key: {key!r}")
+        out[key] = value
+    return out
+
+
+def parse_baggage(header: str) -> dict[str, str]:
+    """Parse a W3C ``baggage`` header; unknown per-entry properties dropped."""
+    out: dict[str, str] = {}
+    for member in header.split(","):
+        member = member.strip()
+        if not member:
+            continue
+        pair = member.split(";")[0].strip()  # drop ;property annotations
+        if "=" not in pair:
+            raise ValueError(f"baggage member lacks '=': {member!r}")
+        key, _, value = pair.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _demo() -> None:
+    """Round-trip one trace through three synthetic hops (deterministic)."""
+    print("== W3C Trace Context round-trip demo (Northwind Robotics) ==")
+    root = parse_traceparent(
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    )
+    print(f"incoming  : {root.header()}  sampled={root.sampled}")
+    hop1 = child_of(root)
+    print(f"gateway -> orders      : {hop1.header()}")
+    hop2 = child_of(hop1)
+    print(f"orders  -> inventory   : {hop2.header()}")
+    echoed = parse_traceparent(hop2.header())
+    assert echoed.trace_id == root.trace_id, "trace id must survive every hop"
+    assert echoed.span_id == hop2.span_id, "round-trip must preserve span id"
+    print("trace id stable across hops:", echoed.trace_id == root.trace_id)
+    print(parse_tracestate("nr=region:eu-1,congo=t61rcWkgMzE"))
+    print(parse_baggage("tenant=northwind-robotics,plan=fleet-pro;property=x"))
+
+
+if __name__ == "__main__":
+    _demo()
+\end{minted}
+
+\subsection{Listing 18.2 --- The Header Mechanics, Proven}
+\label{subsec:ch18-listing-traceparent-tests}
+
+Round-trip, rejection, forward-compatibility, and propagation tests --- the
+wire format as an executable specification.
+
+\noindent\textbf{Listing 18.2 --- \texttt{test\_trace\_context.py}: 19
+tests for the trace-context contract.}
+\label{lst:ch18-trace-context-tests}
+\begin{minted}{python}
+"""Executable proof sheet for trace_context.py (run: pytest -q)."""
+
+from __future__ import annotations
+
+import pytest
+
+from trace_context import (
+    TraceParent,
+    child_of,
+    new_traceparent,
+    parse_baggage,
+    parse_traceparent,
+    parse_tracestate,
+)
+
+VALID = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+
+def test_round_trip_preserves_every_field() -> None:
+    tp = parse_traceparent(VALID)
+    assert tp.header() == VALID
+    assert tp.version == "00"
+    assert tp.trace_id == "4bf92f3577b34da6a3ce929d0e0e4736"
+    assert tp.span_id == "00f067aa0ba902b7"
+    assert tp.sampled is True
+
+
+def test_not_sampled_flag() -> None:
+    tp = parse_traceparent(VALID[:-2] + "00")
+    assert tp.sampled is False
+    assert tp.header().endswith("-00")
+
+
+def test_flags_bitmask_ignores_undefined_bits() -> None:
+    # only bit 0 (0x01) is the sampled flag; other bits must not leak in
+    tp = parse_traceparent(VALID[:-2] + "03")
+    assert tp.sampled is True
+    assert tp.flags == "01"  # canonical rendering keeps only defined bits
+
+
+def test_child_keeps_trace_id_and_gets_fresh_span_id() -> None:
+    root = parse_traceparent(VALID)
+    child = child_of(root)
+    assert child.trace_id == root.trace_id
+    assert child.span_id != root.span_id
+    assert len(child.span_id) == 16
+    assert child.sampled == root.sampled
+
+
+def test_new_contexts_are_well_formed() -> None:
+    tp = new_traceparent()
+    again = parse_traceparent(tp.header())
+    assert again == tp
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",                                   # empty
+        VALID.upper(),                        # uppercase hex forbidden
+        "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",  # ff version
+        "00-00000000000000000000000000000000-00f067aa0ba902b7-01",  # zero trace id
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",  # zero span id
+        "00-4bf92f3577b34da6a3ce929d0e0e473-00f067aa0ba902b7-01",   # short trace id
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",     # missing flags
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0g",  # bad hex flag
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",  # v00 extra field
+        " 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",  # whitespace
+    ],
+)
+def test_rejects_malformed_headers(bad: str) -> None:
+    with pytest.raises(ValueError):
+        parse_traceparent(bad)
+
+
+def test_future_version_may_append_fields() -> None:
+    # forward compatibility: version 01 with a trailing field parses fine
+    tp = parse_traceparent("01-" + VALID[3:] + "-congo")
+    assert tp.version == "01"
+
+
+def test_tracestate_round_trip_and_limits() -> None:
+    state = parse_tracestate("nr=region:eu-1,congo=t61rcWkgMzE")
+    assert state == {"nr": "region:eu-1", "congo": "t61rcWkgMzE"}
+    with pytest.raises(ValueError):
+        parse_tracestate(",".join(f"k{i}=v" for i in range(33)))
+    with pytest.raises(ValueError):
+        parse_tracestate("nr=one,nr=two")  # duplicate key
+
+
+def test_baggage_drops_properties() -> None:
+    bag = parse_baggage("tenant=northwind-robotics;ttl=30,plan=fleet-pro")
+    assert bag == {"tenant": "northwind-robotics", "plan": "fleet-pro"}
+    with pytest.raises(ValueError):
+        parse_baggage("no-equals-sign")
+
+
+def test_immutability() -> None:
+    tp = parse_traceparent(VALID)
+    with pytest.raises(AttributeError):
+        tp.trace_id = "0" * 32  # type: ignore[misc]
+\end{minted}
+
+\subsection{Listing 18.3 --- An Instrumented FastAPI Service, Offline}
+\label{subsec:ch18-listing-app}
+
+\texttt{instrumented\_app.py} wires all three pillars into one service. A
+seeded ID generator makes span ids reproducible; \texttt{JsonlSpanExporter}
+implements the real \texttt{SpanExporter} interface but writes spans to a
+local file (the offline OTLP replacement); an \texttt{InMemoryMetricReader}
+holds RED metrics (counter plus explicit-bucket latency histogram); and a
+logging filter stamps the active span's ids onto every record. The
+three-hop chain --- gateway $\to$ orders $\to$ inventory --- propagates
+context by injecting and extracting real \texttt{traceparent} strings
+between hops, and the demo \emph{asserts} the exported span tree: one trace
+id, correct parent chain, correct span kinds. The FastAPI app itself is
+fully wired (instrumentor plus correlation middleware); the demo drives the
+service layer directly so the whole thing runs with no server and no
+network.
+
+\noindent\textbf{Listing 18.3 --- \texttt{instrumented\_app.py}: traces,
+metrics, and correlated logs with propagation proof.}
+\label{lst:ch18-instrumented-app}
+\begin{minted}{python}
+"""Instrumented FastAPI service: traces, metrics, and correlated logs.
+
+Northwind Robotics fleet-telemetry platform, offline edition. The OTLP
+exporter you would point at a real collector is replaced by
+``JsonlSpanExporter`` (spans to a local JSON-lines file) and an
+``InMemoryMetricReader`` (metrics read back from the SDK), so the whole
+demo runs with no collector, no network, and no credentials.
+
+Telemetry wiring:
+  * one ``TracerProvider`` with a seeded ID generator (deterministic tests)
+  * one ``MeterProvider`` with explicit-bucket histogram views (RED metrics)
+  * a ``logging.Formatter`` that stamps every record with trace_id/span_id
+    of the *active* span, so a log line and a trace never drift apart
+
+Propagation demo: a synthetic incoming ``traceparent`` header is extracted
+at the gateway, and each internal hop injects the current context into a
+fresh carrier dict --- the exact bytes that would ride the wire in
+production. The exported span tree proves all three hops share one
+trace_id and nest parent -> child correctly.
+
+Run:  python instrumented_app.py
+Serve (optional, needs uvicorn):  uvicorn instrumented_app:app
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Mapping, Sequence
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import (
+    SimpleSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
+from opentelemetry.sdk.trace.id_generator import IdGenerator
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+from opentelemetry.trace.propagation.tracecontext import (
+    TraceContextTextMapPropagator,
+)
+from opentelemetry.trace import SpanKind
+
+LATENCY_BUCKETS_MS = [5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]
+PROPAGATOR = TraceContextTextMapPropagator()
+
+
+# --------------------------------------------------------------------------
+# Telemetry plumbing
+# --------------------------------------------------------------------------
+class SeededIdGenerator(IdGenerator):
+    """Deterministic trace/span IDs so tests assert exact span trees."""
+
+    def __init__(self, seed: int) -> None:
+        self._rng = random.Random(seed)
+
+    def generate_trace_id(self) -> int:
+        return max(1, self._rng.getrandbits(128))  # all-zero id is invalid
+
+    def generate_span_id(self) -> int:
+        return max(1, self._rng.getrandbits(64))
+
+
+class JsonlSpanExporter(SpanExporter):
+    """Offline OTLP replacement: append finished spans to a JSONL file."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._path.write_text("", encoding="utf-8")
+
+    def export(self, spans: Sequence[trace.Span]) -> SpanExportResult:
+        with self._path.open("a", encoding="utf-8") as fh:
+            for span in spans:
+                fh.write(json.dumps(_span_to_dict(span)) + "\n")
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:  # nothing buffered; file handles are scoped
+        return None
+
+
+def _span_to_dict(span: trace.Span) -> dict[str, object]:
+    ctx = span.get_span_context()
+    parent = span.parent
+    return {
+        "name": span.name,
+        "kind": span.kind.name if span.kind else "INTERNAL",
+        "trace_id": f"{ctx.trace_id:032x}",
+        "span_id": f"{ctx.span_id:016x}",
+        "parent_span_id": f"{parent.span_id:016x}" if parent else None,
+        "duration_ms": round((span.end_time - span.start_time) / 1e6, 3),
+        "attributes": {k: v for k, v in (span.attributes or {}).items()},
+        "status": span.status.status_code.name,
+    }
+
+
+class TraceContextFilter(logging.Filter):
+    """Stamps trace_id/span_id of the active span onto every record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        ctx = trace.get_current_span().get_span_context()
+        record.trace_id = f"{ctx.trace_id:032x}" if ctx.trace_id else "-"
+        record.span_id = f"{ctx.span_id:016x}" if ctx.span_id else "-"
+        return True
+
+
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line; never log headers, tokens, or payloads."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return json.dumps({
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "trace_id": getattr(record, "trace_id", "-"),
+            "span_id": getattr(record, "span_id", "-"),
+        })
+
+
+@dataclass
+class Telemetry:
+    """Everything an instrumented service needs, wired offline."""
+
+    provider: TracerProvider
+    tracer: trace.Tracer
+    exporter_path: Path
+    meter_reader: InMemoryMetricReader
+    request_counter: object
+    request_duration: object
+    logger: logging.Logger
+    log_lines: list[str] = field(default_factory=list)
+
+
+def build_telemetry(seed: int = 18, spans_path: Path = Path("spans.jsonl")) -> Telemetry:
+    resource = Resource.create({"service.name": "nr-fleet-telemetry"})
+    provider = TracerProvider(
+        sampler=ALWAYS_ON,
+        id_generator=SeededIdGenerator(seed),
+        resource=resource,
+    )
+    provider.add_span_processor(SimpleSpanProcessor(JsonlSpanExporter(spans_path)))
+
+    reader = InMemoryMetricReader()
+    view = View(
+        instrument_name="http.server.request.duration",
+        aggregation=ExplicitBucketHistogramAggregation(boundaries=LATENCY_BUCKETS_MS),
+    )
+    meter_provider = MeterProvider(
+        metric_readers=[reader], views=[view], resource=resource
+    )
+    meter = meter_provider.get_meter("nr.fleet")
+
+    logger = logging.getLogger("nr.fleet")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    telemetry = Telemetry(
+        provider=provider,
+        tracer=provider.get_tracer("nr.fleet"),
+        exporter_path=spans_path,
+        meter_reader=reader,
+        request_counter=meter.create_counter(
+            "http.server.request.count",
+            description="Total HTTP requests (RED: rate, errors)",
+        ),
+        request_duration=meter.create_histogram(
+            "http.server.request.duration",
+            unit="ms",
+            description="Request latency histogram (RED: duration)",
+        ),
+        logger=logger,
+    )
+    return telemetry
+
+
+# --------------------------------------------------------------------------
+# Service layer: a three-hop internal call chain
+# --------------------------------------------------------------------------
+def inventory_reserve(telemetry: Telemetry, carrier: dict[str, str]) -> dict[str, object]:
+    """Hop 3 (deepest): check stock. Extracts context from its carrier."""
+    ctx = PROPAGATOR.extract(carrier=carrier)
+    with telemetry.tracer.start_as_current_span(
+        "inventory.reserve", context=ctx, kind=SpanKind.SERVER
+    ) as span:
+        span.set_attribute("peer.service", "inventory")
+        span.set_attribute("warehouse", "eu-1")
+        time.sleep(0.004)  # deterministic-ish work stand-in; tests don't time it
+        telemetry.logger.info("stock reserved sku=NR-GRIP-4 qty=2")
+        return {"sku": "NR-GRIP-4", "reserved": 2}
+
+
+def orders_create(telemetry: Telemetry, carrier: dict[str, str]) -> dict[str, object]:
+    """Hop 2: create the resupply order; injects context for hop 3."""
+    ctx = PROPAGATOR.extract(carrier=carrier)
+    with telemetry.tracer.start_as_current_span(
+        "orders.create", context=ctx, kind=SpanKind.SERVER
+    ) as span:
+        span.set_attribute("peer.service", "orders")
+        span.set_attribute("order.kind", "resupply")
+        outbound: dict[str, str] = {}
+        PROPAGATOR.inject(outbound)  # traceparent bytes for the next hop
+        reservation = inventory_reserve(telemetry, outbound)
+        telemetry.logger.info("order created id=NR-2026-0917")
+        return {"order_id": "NR-2026-0917", "reservation": reservation}
+
+
+def gateway_handle(telemetry: Telemetry, headers: Mapping[str, str]) -> dict[str, object]:
+    """Hop 1 (edge): extract the client-supplied traceparent, record RED."""
+    started = time.perf_counter()
+    status = 200
+    ctx = PROPAGATOR.extract(carrier=dict(headers))
+    with telemetry.tracer.start_as_current_span(
+        "gateway POST /fleet/telemetry", context=ctx, kind=SpanKind.SERVER
+    ) as span:
+        span.set_attribute("http.request.method", "POST")
+        span.set_attribute("url.path", "/fleet/telemetry")
+        span.set_attribute("http.response.status_code", status)
+        outbound: dict[str, str] = {}
+        PROPAGATOR.inject(outbound)
+        try:
+            result = orders_create(telemetry, outbound)
+        except Exception:
+            status = 500
+            span.set_attribute("http.response.status_code", status)
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            attrs = {"route": "/fleet/telemetry", "status": status}
+            telemetry.request_counter.add(1, attrs)
+            telemetry.request_duration.record(elapsed_ms, attrs)
+        telemetry.logger.info("request complete status=200")
+        return result
+
+
+# --------------------------------------------------------------------------
+# FastAPI wiring (thin adapters over the instrumented service layer)
+# --------------------------------------------------------------------------
+telemetry = build_telemetry()
+app = FastAPI(title="Northwind Robotics Fleet Telemetry")
+FastAPIInstrumentor.instrument_app(
+    app, tracer_provider=telemetry.provider, excluded_urls="/health"
+)
+
+
+@app.middleware("http")
+async def correlate_logs(request: Request, call_next):  # noqa: ANN001
+    # The instrumentor's server span is active here, so logs pick up its ids.
+    response: JSONResponse = await call_next(request)
+    telemetry.logger.info(
+        "http request method=%s path=%s status=%s",
+        request.method, request.url.path, response.status_code,
+    )
+    return response
+
+
+@app.post("/fleet/telemetry")
+async def ingest(request: Request) -> dict[str, object]:
+    return gateway_handle(telemetry, dict(request.headers))
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+# --------------------------------------------------------------------------
+# Offline demo: drive the service layer with a synthetic traceparent
+# --------------------------------------------------------------------------
+def _demo() -> None:
+    telemetry = build_telemetry(seed=18, spans_path=Path("spans.jsonl"))
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    handler.addFilter(TraceContextFilter())
+    telemetry.logger.addHandler(handler)
+
+    incoming = {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "tracestate": "nr=region:eu-1",
+    }
+    print("== three-hop trace, one synthetic incoming traceparent ==")
+    result = gateway_handle(telemetry, incoming)
+    telemetry.provider.force_flush()
+
+    lines = telemetry.exporter_path.read_text(encoding="utf-8").splitlines()
+    spans = [json.loads(line) for line in lines if line.strip()]
+    print(f"exported {len(spans)} spans:")
+    for s in sorted(spans, key=lambda s: s["parent_span_id"] is not None):
+        print(
+            f"  {s['name']:<32} kind={s['kind']:<8} "
+            f"trace={s['trace_id'][:12]}... span={s['span_id']} "
+            f"parent={s['parent_span_id']}"
+        )
+    trace_ids = {s["trace_id"] for s in spans}
+    by_name = {s["name"]: s for s in spans}
+    assert len(trace_ids) == 1, "all hops must share one trace_id"
+    assert trace_ids == {"4bf92f3577b34da6a3ce929d0e0e4736"}, (
+        "incoming trace_id must survive every hop"
+    )
+    assert by_name["orders.create"]["parent_span_id"] == by_name[
+        "gateway POST /fleet/telemetry"]["span_id"]
+    assert by_name["inventory.reserve"]["parent_span_id"] == by_name[
+        "orders.create"]["span_id"]
+    print("propagation verified: one trace_id, correct parent chain")
+
+    data = telemetry.meter_reader.get_metrics_data()
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                pts = list(m.data.data_points)
+                print(f"metric {m.name}: points={len(pts)}")
+    print(f"result: {json.dumps(result)}")
+
+
+if __name__ == "__main__":
+    _demo()
+\end{minted}
+
+\noindent Running it prints the proof of propagation (ids are seeded and
+reproduce exactly):
+
+\begin{minted}{text}
+exported 3 spans:
+  inventory.reserve                kind=SERVER   trace=4bf92f3577b3... parent=72e63ac7a9538322
+  orders.create                    kind=SERVER   trace=4bf92f3577b3... parent=1f70d5dc2e675fc7
+  gateway POST /fleet/telemetry    kind=SERVER   trace=4bf92f3577b3... parent=00f067aa0ba902b7
+propagation verified: one trace_id, correct parent chain
+\end{minted}
+
+Note the gateway's parent: \texttt{00f067aa0ba902b7} --- the span id from
+the synthetic incoming \texttt{traceparent} of Listing~18.1's example. The
+client's trace context survived the whole chain.
+
+\subsection{Listing 18.4 --- Histograms: Percentiles That Survive the Tail}
+\label{subsec:ch18-listing-histogram}
+
+\texttt{latency\_histograms.py} re-implements the HdrHistogram layout in
+stdlib: power-of-two buckets with linear sub-buckets give bounded relative
+error (two significant figures $\Rightarrow$ bucket width under 1\% of the
+value) at $O(1)$ memory per recording. The embedded pytest suite proves the
+two properties that matter: percentiles match exact rank-based quantiles
+where resolution permits, and larger values stay within the resolution
+bound. The demo prints the long-tail comparison behind
+Figure~\ref{fig:ch18-longtail}: mean 761\,ms, p50 25\,ms, p99 23{,}680\,ms
+--- the average lying about a 31$\times$ gap.
+
+\noindent\textbf{Listing 18.4 --- \texttt{latency\_histograms.py}: log-bucket
+histogram with embedded proof suite.}
+\label{lst:ch18-histograms}
+\begin{minted}{python}
+"""Log-bucket latency histograms: percentiles that survive the long tail.
+
+A stdlib-only re-implementation of the HdrHistogram layout (power-of-two
+buckets with linear sub-buckets), because "compute p99" is a sentence every
+API engineer says and few can defend. Properties:
+
+  * O(1) memory per recording, fixed-size counts array
+  * bounded relative error: 2 significant figures => every recorded value
+    lands in a bucket whose width is at most ~0.8% of the value
+  * percentiles are read from cumulative bucket counts, never from a
+    sample list, so cost is O(buckets), not O(samples)
+
+The demo generates a seeded long-tail distribution (typical API latency:
+fast median, brutal tail) and prints the comparison that motivates this
+whole chapter: the naive average sits comfortably below p99 --- the average
+is lying to you about your users' pain.
+
+Run:  python latency_histograms.py        (demo)
+      pytest latency_histograms.py -q     (embedded test suite)
+"""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass, field
+
+
+@dataclass
+class LogHistogram:
+    """HdrHistogram-style integer histogram (values in milliseconds)."""
+
+    lowest: int = 1
+    highest: int = 3_600_000  # one hour in ms
+    significant_figures: int = 2
+    total: int = 0
+    sum_ms: float = 0.0
+    counts: list[int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.significant_figures <= 5:
+            raise ValueError("significant_figures must be in 1..5")
+        if self.lowest < 1 or self.highest < 2 * self.lowest:
+            raise ValueError("need 1 <= lowest <= highest/2")
+        # sub_bucket_count: smallest power of two >= 2 * 10^sig
+        self._sub_mag = math.ceil(math.log2(2 * 10 ** self.significant_figures))
+        self._sub_count = 1 << self._sub_mag
+        self._half = self._sub_count // 2
+        self._unit_mag = (self.lowest).bit_length() - 1
+        # bucket_count: enough doublings to reach `highest`
+        self._bucket_count = 1
+        trackable = self._sub_count << self._unit_mag
+        while trackable < self.highest:
+            trackable <<= 1
+            self._bucket_count += 1
+        self.counts = [0] * ((self._bucket_count + 1) * self._half)
+
+    # -- recording ---------------------------------------------------------
+    def _counts_index(self, value: int) -> int:
+        if value < 0 or value > self.highest:
+            raise ValueError(f"value {value} outside [0, {self.highest}]")
+        v = max(value >> self._unit_mag, 1)
+        bucket = max(0, v.bit_length() - self._sub_mag)
+        sub_bucket = v >> bucket
+        return (bucket + 1) * self._half + (sub_bucket - self._half)
+
+    def record(self, value: int) -> None:
+        self.counts[self._counts_index(value)] += 1
+        self.total += 1
+        self.sum_ms += value
+
+    # -- reading -----------------------------------------------------------
+    def _value_at(self, counts_index: int) -> int:
+        bucket = (counts_index >> (self._sub_mag - 1)) - 1
+        sub_bucket = (counts_index & (self._half - 1)) + self._half
+        if bucket < 0:
+            bucket = 0
+            sub_bucket -= self._half
+        return sub_bucket << (bucket + self._unit_mag)
+
+    def percentile(self, q: float) -> int:
+        """Smallest recorded-bucket value at which q% of samples fall."""
+        if not 0 < q <= 100:
+            raise ValueError("q must be in (0, 100]")
+        if self.total == 0:
+            raise ValueError("no samples recorded")
+        rank = max(1, math.ceil(q / 100.0 * self.total))
+        cumulative = 0
+        for idx, count in enumerate(self.counts):
+            cumulative += count
+            if cumulative >= rank:
+                return self._value_at(idx)
+        raise AssertionError("unreachable: rank <= total")
+
+    def mean(self) -> float:
+        if self.total == 0:
+            raise ValueError("no samples recorded")
+        return self.sum_ms / self.total
+
+
+def exact_quantile(data: list[int], q: float) -> int:
+    """Ground truth on small data: the rank-based quantile of a sorted list."""
+    if not data:
+        raise ValueError("empty data")
+    ordered = sorted(data)
+    rank = max(1, math.ceil(q / 100.0 * len(ordered)))
+    return ordered[rank - 1]
+
+
+def synthetic_latencies(seed: int = 18, n: int = 10_000) -> list[int]:
+    """Seeded long-tail: 95% of requests are healthy, 5% hit the tail."""
+    rng = random.Random(seed)
+    out: list[int] = []
+    for _ in range(n):
+        if rng.random() < 0.95:  # healthy path: tight lognormal around ~25 ms
+            out.append(max(1, int(rng.lognormvariate(math.log(25), 0.35))))
+        else:                    # tail path: GC pauses, retries, cold caches
+            out.append(rng.randint(800, 30_000))
+    return out
+
+
+def _demo() -> None:
+    data = synthetic_latencies()
+    hist = LogHistogram()
+    for ms in data:
+        hist.record(ms)
+    print(f"samples={hist.total}  (seeded, long-tail)")
+    print(f"  naive average : {hist.mean():9.1f} ms   <-- the lie")
+    for q in (50, 95, 99, 99.9):
+        print(f"  p{q:<5}        : {hist.percentile(q):9} ms")
+    ratio = hist.percentile(99) / hist.mean()
+    print(f"  p99 / average : {ratio:9.1f}x  <-- what the average was hiding")
+
+
+# ---------------------------------------------------------------------------
+# Embedded test suite: pytest latency_histograms.py -q
+# ---------------------------------------------------------------------------
+def test_percentiles_match_exact_quantiles_on_small_data() -> None:
+    # values below sub_bucket_count (256) each get their own bucket,
+    # so histogram percentiles must equal exact rank-based quantiles
+    data = list(range(1, 256))
+    hist = LogHistogram()
+    for v in data:
+        hist.record(v)
+    for q in (1, 25, 50, 75, 90, 95, 99, 99.9, 100):
+        assert hist.percentile(q) == exact_quantile(data, q)
+
+
+def test_larger_values_stay_within_resolution_bound() -> None:
+    data = list(range(1, 5001))
+    hist = LogHistogram()
+    for v in data:
+        hist.record(v)
+    for q in (25, 50, 75, 90, 99):
+        approx, exact = hist.percentile(q), exact_quantile(data, q)
+        assert abs(approx - exact) / exact < 0.01  # 2 significant figures
+
+
+def test_mean_is_exact() -> None:
+    hist = LogHistogram()
+    for v in [10, 20, 30]:
+        hist.record(v)
+    assert hist.mean() == 20.0
+
+
+def test_rank_rounding_uses_ceiling() -> None:
+    data = [5] * 9 + [900]  # p90 rank = ceil(9.0) = 9 -> 5; p95 -> 900
+    hist = LogHistogram()
+    for v in data:
+        hist.record(v)
+    assert hist.percentile(90) == 5
+    assert hist.percentile(95) == 900
+
+
+def test_relative_error_is_bounded_by_resolution() -> None:
+    hist = LogHistogram(significant_figures=2)
+    hist.record(12_345)  # bucket width at this magnitude is 128 ms
+    approx = hist.percentile(50)
+    assert abs(approx - 12_345) / 12_345 < 0.01
+
+
+def test_out_of_range_and_empty_rejected() -> None:
+    hist = LogHistogram()
+    import pytest
+
+    with pytest.raises(ValueError):
+        hist.record(hist.highest + 1)
+    with pytest.raises(ValueError):
+        hist.percentile(99)
+    with pytest.raises(ValueError):
+        hist.percentile(0)
+
+
+def test_long_tail_demo_is_deterministic() -> None:
+    assert synthetic_latencies() == synthetic_latencies()
+    hist = LogHistogram()
+    for ms in synthetic_latencies():
+        hist.record(ms)
+    assert hist.percentile(99) > 10 * hist.mean()  # the tail really is long
+
+
+if __name__ == "__main__":
+    _demo()
+\end{minted}
+
+\subsection{Listing 18.5 --- The Burn-Rate Simulator}
+\label{subsec:ch18-listing-burnrate}
+
+\texttt{burn\_rate\_sim.py} implements Equations~\eqref{eq:ch18-burnrate}
+and~\eqref{eq:ch18-mwmb} against a seeded three-day timeline with a
+scripted incident (50 minutes at an 80$\times$ burn --- a wedged
+dependency). Window queries run over prefix sums, so evaluation is $O(n)$.
+The demo prints the policy table and the alert timeline; the tests prove
+the budget arithmetic (43.2 minutes; 2\%/5\%/10\% consumption), that
+healthy traffic never pages, that the incident pages fast then slow but
+never tickets, and that a sustained 3$\times$ burn tickets without paging.
+
+\noindent\textbf{Listing 18.5 --- \texttt{burn\_rate\_sim.py}: multi-window
+multi-burn-rate alerting, simulated offline.}
+\label{lst:ch18-burnrate}
+\begin{minted}{python}
+"""Multi-window, multi-burn-rate SLO alerting simulator (offline, seeded).
+
+Feeds a synthetic minute-by-minute traffic timeline for the Northwind
+Robotics fleet API into the alerting logic from the Google SRE Workbook's
+"Alerting on SLOs" chapter: an alert fires only when BOTH a long window
+and a short window show a burn rate above the policy threshold.
+
+    burn_rate(t, w)   = error_rate(t, w) / budget_rate
+    budget_rate       = 1 - SLO                (0.001 for a 99.9% SLO)
+    budget_consumed   = burn_rate * w / period (% of the 30-day budget)
+
+Policy table (budget consumed if the burn persists for the long window):
+    fast page  : burn 14.4  long 1h   short 5m   -> 2%  of budget
+    slow page  : burn  6.0  long 6h   short 30m  -> 5%  of budget
+    ticket     : burn  1.0  long 3d   short 6h   -> 10% of budget
+
+Run:  python burn_rate_sim.py        (scripted incident demo)
+      pytest burn_rate_sim.py -q     (embedded test suite)
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+
+SLO = 0.999
+BUDGET_RATE = 1.0 - SLO              # 0.001
+PERIOD_MINUTES = 30 * 24 * 60        # 30-day rolling window: 43,200 min
+BUDGET_MINUTES_EQUIVALENT = BUDGET_RATE * PERIOD_MINUTES  # 43.2 min
+
+
+@dataclass(frozen=True)
+class MinuteSample:
+    minute: int
+    requests: int
+    errors: int
+
+
+@dataclass(frozen=True)
+class BurnRatePolicy:
+    name: str
+    burn_rate: float
+    long_window_min: int
+    short_window_min: int
+
+    @property
+    def budget_consumed_pct(self) -> float:
+        """% of the period budget burned if this rate lasts the long window."""
+        return 100.0 * self.burn_rate * self.long_window_min / PERIOD_MINUTES
+
+
+POLICIES = [
+    BurnRatePolicy("fast-page", 14.4, 60, 5),
+    BurnRatePolicy("slow-page", 6.0, 360, 30),
+    BurnRatePolicy("ticket", 1.0, 3 * 24 * 60, 360),
+]
+
+
+@dataclass(frozen=True)
+class Alert:
+    policy: str
+    fired_at: int
+    long_burn: float
+    short_burn: float
+
+
+def window_rate(samples: list[MinuteSample], t: int, window: int) -> float:
+    """Error rate over samples in (t - window, t]; 0.0 when no traffic."""
+    total = errors = 0
+    for s in samples:
+        if t - window < s.minute <= t:
+            total += s.requests
+            errors += s.errors
+    return errors / total if total else 0.0
+
+
+def burn_rate(samples: list[MinuteSample], t: int, window: int) -> float:
+    return window_rate(samples, t, window) / BUDGET_RATE
+
+
+def _prefix_sums(samples: list[MinuteSample]) -> tuple[list[int], list[int]]:
+    """Cumulative requests/errors per minute for O(1) window queries."""
+    horizon = samples[-1].minute
+    cum_req = [0] * (horizon + 1)
+    cum_err = [0] * (horizon + 1)
+    for s in samples:
+        cum_req[s.minute] += s.requests
+        cum_err[s.minute] += s.errors
+    for t in range(1, horizon + 1):
+        cum_req[t] += cum_req[t - 1]
+        cum_err[t] += cum_err[t - 1]
+    return cum_req, cum_err
+
+
+def _burn(cum_req: list[int], cum_err: list[int], t: int, window: int) -> float:
+    lo = max(0, t - window)  # window (t - window, t]
+    total = cum_req[t] - cum_req[lo]
+    errors = cum_err[t] - cum_err[lo]
+    return (errors / total / BUDGET_RATE) if total else 0.0
+
+
+def evaluate(
+    samples: list[MinuteSample],
+    policies: list[BurnRatePolicy] | None = None,
+) -> list[Alert]:
+    """First firing of each policy; reset requires the long window to clear."""
+    fired: list[Alert] = []
+    active: set[str] = set()
+    if not samples:
+        return fired
+    policies = policies or POLICIES
+    cum_req, cum_err = _prefix_sums(samples)
+    for t in range(1, samples[-1].minute + 1):
+        for policy in policies:
+            if t < policy.long_window_min:
+                continue  # window not yet fully populated; don't alert on cold data
+            long_burn = _burn(cum_req, cum_err, t, policy.long_window_min)
+            short_burn = _burn(cum_req, cum_err, t, policy.short_window_min)
+            breached = (
+                long_burn >= policy.burn_rate
+                and short_burn >= policy.burn_rate
+            )
+            if breached and policy.name not in active:
+                active.add(policy.name)
+                fired.append(Alert(policy.name, t, long_burn, short_burn))
+            elif long_burn < policy.burn_rate and policy.name in active:
+                active.remove(policy.name)  # recovered; may re-fire later
+    return fired
+
+
+def synthetic_timeline(seed: int = 18, minutes: int = 3 * 24 * 60) -> list[MinuteSample]:
+    """Three days of traffic; a scripted bad deploy burns hot for 50 minutes.
+
+    Baseline: ~120 req/min with a healthy 0.05% error rate (below budget).
+    Incident: minutes 2000..2049 at 8% errors --- an 80x burn rate, the
+    classic "deploy wedged a dependency" shape. Everything seeded, so the
+    alert timeline below reproduces on every machine.
+    """
+    rng = random.Random(seed)
+    out: list[MinuteSample] = []
+    for t in range(minutes):
+        requests = 120 + rng.randint(-10, 10)
+        error_rate = 0.08 if 2000 <= t < 2050 else 0.0005
+        # errors are a deterministic quota plus seeded jitter around it
+        errors = int(requests * error_rate) + (1 if rng.random() < 0.02 else 0)
+        out.append(MinuteSample(t, requests, errors))
+    return out
+
+
+def _demo() -> None:
+    samples = synthetic_timeline()
+    print(f"timeline: {len(samples)} minutes, SLO={SLO}, "
+          f"budget={BUDGET_MINUTES_EQUIVALENT:.1f} min-equivalent/30d")
+    print(f"{'policy':<10} {'burn':>5} {'long':>6} {'short':>6} {'budget%':>8}")
+    for p in POLICIES:
+        print(f"{p.name:<10} {p.burn_rate:>5} {p.long_window_min:>5}m "
+              f"{p.short_window_min:>5}m {p.budget_consumed_pct:>7.1f}%")
+    print("\nalert timeline (minute = minutes since window start):")
+    for alert in evaluate(samples):
+        hh, mm = divmod(alert.fired_at, 60)
+        print(f"  [t={alert.fired_at:>5} ({hh:02d}h{mm:02d}m)] PAGE {alert.policy}"
+              f"  long-burn={alert.long_burn:.1f}x short-burn={alert.short_burn:.1f}x")
+
+
+# ---------------------------------------------------------------------------
+# Embedded test suite: pytest burn_rate_sim.py -q
+# ---------------------------------------------------------------------------
+def test_error_budget_minutes() -> None:
+    assert abs(BUDGET_MINUTES_EQUIVALENT - 43.2) < 1e-9  # the famous 43.2 min/month
+
+
+def test_budget_consumed_percentages_match_workbook_table() -> None:
+    assert abs(POLICIES[0].budget_consumed_pct - 2.0) < 1e-9
+    assert abs(POLICIES[1].budget_consumed_pct - 5.0) < 1e-9
+    assert abs(POLICIES[2].budget_consumed_pct - 10.0) < 1e-9
+
+
+def test_healthy_traffic_never_pages() -> None:
+    samples = synthetic_timeline()
+    healthy = [s for s in samples if not 1950 <= s.minute < 2100]
+    assert evaluate(healthy) == []
+
+
+def test_incident_fires_both_pages_but_no_ticket() -> None:
+    alerts = evaluate(synthetic_timeline())
+    fast = [a for a in alerts if a.policy == "fast-page"]
+    assert fast, "an 80x burn for 50 minutes must page the fast policy"
+    assert 2005 <= fast[0].fired_at <= 2060  # fires during/right after burst
+    # 50 min at 80x still averages 11x over the 6h window -> slow page too
+    assert any(a.policy == "slow-page" for a in alerts)
+    # but 50 bad minutes out of 3 days stays under the 1x ticket threshold
+    assert not any(a.policy == "ticket" for a in alerts)
+
+
+def test_sustained_low_burn_fires_ticket_only() -> None:
+    # 0.3% errors = 3x burn, sustained for the whole timeline
+    samples = [
+        MinuteSample(t, requests=1000, errors=3) for t in range(3 * 24 * 60 + 400)
+    ]
+    alerts = evaluate(samples)
+    names = {a.policy for a in alerts}
+    assert names == {"ticket"}, f"3x burn should page ticket only, got {names}"
+
+
+def test_window_rate_excludes_boundary_and_handles_empty() -> None:
+    samples = [MinuteSample(0, 100, 10), MinuteSample(5, 100, 0)]
+    assert window_rate(samples, 5, 5) == 0.0            # (0, 5] holds minute 5 only
+    assert window_rate(samples, 5, 6) == 10 / 200       # (-1, 5] holds both minutes
+    assert window_rate(samples, 10, 5) == 0.0           # (5, 10] holds neither
+    assert window_rate([], 10, 5) == 0.0
+
+
+if __name__ == "__main__":
+    _demo()
+\end{minted}
+
+\noindent Its alert timeline for the scripted incident:
+
+\begin{minted}{text}
+alert timeline (minute = minutes since window start):
+  [t= 2010 (33h30m)] PAGE fast-page  long-burn=14.5x short-burn=76.1x
+  [t= 2027 (33h47m)] PAGE slow-page  long-burn=6.2x short-burn=71.7x
+\end{minted}
+
+\subsection{Listing 18.6 --- Runbook and Postmortem Generator}
+\label{subsec:ch18-listing-templates}
+
+\texttt{incident\_templates.py} turns incident metadata into markdown
+skeletons with every mandatory section present: the runbook carries SLOs,
+alert entry points, a ten-minute triage checklist, mitigation commands, and
+escalation; the postmortem carries the blameless preamble, timeline, impact,
+mechanism-level root cause, action items, and an explicit ``lessons for the
+SLO'' section. Tests assert the sections exist and that invalid severities
+and empty service lists are rejected.
+
+\noindent\textbf{Listing 18.6 --- \texttt{incident\_templates.py}: structure
+enforced by code.}
+\label{lst:ch18-templates}
+\begin{minted}{python}
+"""Runbook and blameless-postmortem skeleton generator (stdlib only).
+
+Incident response fails in predictable ways: nobody remembers the rollback
+command at 3 a.m., and postmortems devolve into blame or vanish unwritten.
+Both are structure problems, and structure is exactly what code is good at.
+Given incident metadata, this module emits markdown skeletons with every
+mandatory section present and every placeholder explicit, so the human
+work is analysis, not formatting.
+
+Run:  python incident_templates.py        (writes demo artifacts)
+      pytest incident_templates.py -q     (embedded test suite)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+SEVERITIES = {
+    "SEV1": "total outage or data loss; all-hands, page immediately",
+    "SEV2": "major degradation of a core SLO; page the owning team",
+    "SEV3": "minor degradation or single-tenant impact; ticket, next business day",
+    "SEV4": "cosmetic or internal-only; backlog",
+}
+
+
+@dataclass(frozen=True)
+class ServiceProfile:
+    name: str
+    slo_target: float
+    owner: str
+    endpoints: tuple[str, ...]
+    dashboards: tuple[str, ...]
+    rollback_command: str
+
+
+@dataclass(frozen=True)
+class IncidentMetadata:
+    incident_id: str
+    title: str
+    severity: str
+    commander: str
+    services: tuple[str, ...]
+    started_utc: str
+    detected_by: str
+    slo_impact: str
+    action_items: tuple[str, ...] = field(default=())
+
+    def __post_init__(self) -> None:
+        if self.severity not in SEVERITIES:
+            raise ValueError(f"severity must be one of {sorted(SEVERITIES)}")
+        if not self.services:
+            raise ValueError("an incident must name at least one service")
+
+
+def render_runbook(profile: ServiceProfile) -> str:
+    endpoints = "\n".join(f"| `{ep}` | | |" for ep in profile.endpoints)
+    boards = "\n".join(f"- {d}" for d in profile.dashboards)
+    return f"""# Runbook: {profile.name}
+
+Owner: {profile.owner} | SLO: {profile.slo_target:.3%} availability (30d rolling)
+
+## 1. Service summary
+One paragraph: what {profile.name} does, who calls it, what breaks when it
+breaks.
+
+## 2. SLOs and alert entry points
+| Endpoint | SLI | Alert |
+|---|---|---|
+{endpoints}
+
+Dashboards:
+{boards}
+
+## 3. Triage checklist (first 10 minutes)
+1. Confirm the alert is real: check the SLO dashboard, not one log line.
+2. Declare severity (see severity table) and open an incident channel.
+3. Capture the current trace exemplars before mitigation flushes them.
+
+## 4. Mitigation
+- Rollback: `{profile.rollback_command}`
+- Feature flag: <flag name and console path>
+- Traffic shift / drain: <load balancer procedure>
+
+## 5. Escalation
+- Primary on-call -> secondary (15 min ack) -> engineering manager.
+"""
+
+
+def render_postmortem(meta: IncidentMetadata) -> str:
+    items = "\n".join(f"- [ ] {a}" for a in meta.action_items) or "- [ ] <action>"
+    services = ", ".join(meta.services)
+    return f"""# Postmortem: {meta.incident_id} -- {meta.title}
+
+**Severity:** {meta.severity} ({SEVERITIES[meta.severity]})
+**Incident commander:** {meta.commander}
+**Services:** {services}
+**Started (UTC):** {meta.started_utc}
+**Detected by:** {meta.detected_by}
+**SLO impact:** {meta.slo_impact}
+
+> This document is blameless. We analyze systems, not people: any engineer
+> in the same situation, with the same information, might have done the
+> same thing. Naming a person as a cause voids the review.
+
+## Summary
+Two sentences a VP can read.
+
+## Impact
+Who was affected, for how long, in what units (requests failed, SLO budget
+burned, revenue or contractual exposure).
+
+## Timeline (all times UTC)
+| Time | Event |
+|---|---|
+| | detection (alert or human?) |
+| | mitigation applied |
+| | full recovery |
+
+## Root cause
+The mechanism, not the culprit: what change, what assumption failed, why
+existing guardrails did not catch it.
+
+## What went well / what went poorly
+Detection latency, mitigation latency, runbook accuracy, paging quality.
+
+## Action items
+{items}
+
+## Lessons for the SLO
+Did the alerts fire at the right time? Was the burn-rate table tuned
+correctly, or did this incident reveal a gap (add a row, adjust a window)?
+"""
+
+
+def write_artifacts(out_dir: Path, profile: ServiceProfile, meta: IncidentMetadata) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"runbook_{profile.name}.md").write_text(render_runbook(profile), encoding="utf-8")
+    (out_dir / f"postmortem_{meta.incident_id}.md").write_text(
+        render_postmortem(meta), encoding="utf-8"
+    )
+
+
+def _demo() -> None:
+    profile = ServiceProfile(
+        name="fleet-telemetry",
+        slo_target=0.999,
+        owner="fleet-platform@northwind-robotics.example",
+        endpoints=("POST /fleet/telemetry", "GET /fleet/status", "GET /health"),
+        dashboards=("SLO / fleet-telemetry (Grafana uid=nr-fleet-slo)",
+                    "RED / per-endpoint (Grafana uid=nr-fleet-red)"),
+        rollback_command="kubectl rollout undo deploy/fleet-telemetry",
+    )
+    meta = IncidentMetadata(
+        incident_id="NR-2026-0142",
+        title="Retry storm after inventory latency regression",
+        severity="SEV2",
+        commander="a.reyes",
+        services=("fleet-gateway", "orders", "inventory"),
+        started_utc="2026-08-19T14:03Z",
+        detected_by="fast-burn SLO alert (14.4x, 1h/5m)",
+        slo_impact="41% of monthly availability budget in 52 minutes",
+        action_items=(
+            "Cap gateway retries at 2 with jitter (owner: fleet-platform)",
+            "Add fan-out panel (requests per client request) to the SLO board",
+        ),
+    )
+    write_artifacts(Path("incident_docs"), profile, meta)
+    print(render_postmortem(meta).splitlines()[0])
+    print("wrote incident_docs/runbook_fleet-telemetry.md and",
+          "incident_docs/postmortem_NR-2026-0142.md")
+
+
+# ---------------------------------------------------------------------------
+# Embedded test suite: pytest incident_templates.py -q
+# ---------------------------------------------------------------------------
+def _profile() -> ServiceProfile:
+    return ServiceProfile(
+        name="orders", slo_target=0.9995, owner="orders@northwind-robotics.example",
+        endpoints=("POST /orders",), dashboards=("SLO / orders",),
+        rollback_command="kubectl rollout undo deploy/orders",
+    )
+
+
+def _meta() -> IncidentMetadata:
+    return IncidentMetadata(
+        incident_id="NR-2026-0001", title="Test incident", severity="SEV3",
+        commander="oncall", services=("orders",), started_utc="2026-01-01T00:00Z",
+        detected_by="test", slo_impact="none",
+    )
+
+
+def test_runbook_has_all_mandatory_sections() -> None:
+    text = render_runbook(_profile())
+    for section in ("Service summary", "SLOs and alert entry points",
+                    "Triage checklist", "Mitigation", "Escalation"):
+        assert f"## " in text and section in text, f"missing section: {section}"
+    assert "kubectl rollout undo deploy/orders" in text
+    assert "99.950%" in text  # SLO rendered as a percentage
+
+
+def test_postmortem_is_blameless_and_complete() -> None:
+    text = render_postmortem(_meta())
+    for section in ("Summary", "Impact", "Timeline", "Root cause",
+                    "Action items", "Lessons for the SLO"):
+        assert section in text, f"missing section: {section}"
+    assert "blameless" in text.lower()
+    assert "SEV3" in text
+
+
+def test_invalid_severity_rejected() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        IncidentMetadata(
+            incident_id="X", title="t", severity="SEV9", commander="c",
+            services=("s",), started_utc="2026-01-01T00:00Z",
+            detected_by="test", slo_impact="none",
+        )
+    with pytest.raises(ValueError):
+        IncidentMetadata(
+            incident_id="X", title="t", severity="SEV1", commander="c",
+            services=(), started_utc="2026-01-01T00:00Z",
+            detected_by="test", slo_impact="none",
+        )
+
+
+def test_write_artifacts(tmp_path: Path) -> None:
+    write_artifacts(tmp_path, _profile(), _meta())
+    assert (tmp_path / "runbook_orders.md").exists()
+    assert (tmp_path / "postmortem_NR-2026-0001.md").exists()
+
+
+if __name__ == "__main__":
+    _demo()
+\end{minted}
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch18-pitfalls}
+
+\begin{enumerate}
+  \item \textbf{Logging PII, tokens, or request bodies.} One
+        \texttt{logger.info("request \%s", body)} and your log backend ---
+        with its generous retention, broad ACLs, and vendor UIs --- is now
+        a shadow database of everything Chapter~\ref{ch:api_security} told
+        you to protect. Log identifiers and outcomes, not payloads; enforce
+        it with an allowlist formatter field set and a redaction processor
+        in the collector as the second line of defense.
+  \item \textbf{High-cardinality metric labels.} \texttt{user\_id},
+        \texttt{request\_id}, concrete URL paths, or error-message strings
+        as label values are a memory and billing incident on a timer
+        (Equation~\eqref{eq:ch18-cardinality}: $90$ series become $4.5$
+        million). Rule of thumb: if you would not put the label on a
+        dashboard group-by, it does not belong on a metric. Use trace
+        attributes and logs for unbounded dimensions.
+  \item \textbf{Averaging percentiles, or percentiling averages.} Both are
+        statistical category errors (Proposition~\ref{prop:ch18-p99avg}):
+        quantiles do not average, and averaging first destroys the tail you
+        were measuring. Merge histograms by adding bucket counts; estimate
+        percentiles from the merged histogram. If your metrics pipeline
+        cannot do that, fix the pipeline before trusting the dashboards.
+  \item \textbf{Alerting on every 5xx spike.} A raw error-count page fires
+        for a 30-second blip and sleeps through a slow 30-day bleed.
+        Alert on budget burn with the window pairs of
+        Table~\ref{tab:ch18-burnrate}: fast burn pages, slow burn tickets,
+        blips appear on dashboards.
+  \item \textbf{Sampling away the errors you need.} A 1\% head sampler
+        keeps 1\% of your error traces too --- exactly the traces you will
+        beg for during an incident. Sample errors at 100\% (tail sampling
+        at the collector, or a keep-all-errors sampler), and aggregate
+        metrics \emph{before} sampling, never from sampled spans.
+  \item \textbf{Dashboard sprawl without SLO anchoring.} Sixty panels that
+        no alert references are a museum. Build dashboards outward from the
+        SLO row; any panel that has never been cited in an incident review
+        or a runbook is a deletion candidate. Dashboard count is not a
+        maturity metric --- decision latency is.
+  \item \textbf{Tracing without propagation through queues.} The
+        \texttt{traceparent} header dies at the broker unless you
+        explicitly inject the context into message metadata on publish and
+        extract it on consume (Chapter~\ref{ch:async_apis}). The symptom is
+        a forest of single-span traces and a service map with severed
+        edges; the fix is one inject/extract pair per messaging boundary.
+  \item \textbf{Mean-keyed latency dashboards and SLOs.} ``Average latency
+        761\,ms'' sounds acceptable for the distribution of
+        Figure~\ref{fig:ch18-longtail} while 1\% of users wait 24 seconds.
+        SLOs are threshold ratios (``99\% under 300\,ms''); dashboards show
+        p50/p95/p99 from histograms; the mean survives only as a capacity
+        planning input.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch18-lab}
+
+\subsection*{Lab: Propagation, Percentiles, and Pages}
+
+\textbf{Goal.} Reproduce this chapter's three load-bearing claims on your
+own machine: trace context survives a three-hop chain, percentiles beat
+averages on a long tail, and burn-rate policies page at the mathematically
+predicted minutes.
+
+\textbf{Setup.} Save Listings 18.1--18.6 into one directory and create the
+virtual environment from Section~\ref{sec:ch18-objectives}.
+
+\begin{enumerate}
+  \item \textbf{Prove the wire format.} \texttt{pytest test\_trace\_context.py -q}
+        --- 19 passes. Then flip the flags nibble in one valid header to
+        \texttt{02} and confirm the parser accepts it but reports
+        \texttt{sampled=False}: bit 0 is the only defined bit.
+  \item \textbf{Run the instrumented service.} \texttt{python instrumented\_app.py}
+        --- three spans export to \texttt{spans.jsonl}, all sharing the
+        incoming trace id \texttt{4bf9\ldots4736}, with the parent chain
+        asserted. Open \texttt{spans.jsonl} and find the two RED metrics in
+        the demo output. Then break propagation: comment out the
+        \texttt{PROPAGATOR.inject(outbound)} in \texttt{orders\_create} and
+        re-run --- the assertion fails and \texttt{inventory.reserve}
+        becomes a root span of a new trace. You have just manufactured the
+        most common production tracing bug.
+  \item \textbf{Measure the lying average.} \texttt{python latency\_histograms.py}
+        --- confirm mean $\approx$ 761\,ms against p99 $\approx$ 23.7\,s,
+        then \texttt{pytest latency\_histograms.py -q} (7 passes). Edit
+        \texttt{synthetic\_latencies} to drop the tail branch to 1\% and
+        watch the mean collapse toward the median while p95 barely moves:
+        the mean is a tail detector, not a typical-experience metric.
+  \item \textbf{Watch the alerts fire.} \texttt{python burn\_rate\_sim.py}
+        --- the fast page fires at $t{=}2010$, the slow page at $t{=}2027$.
+        Then edit the incident to a sustained 0.3\% error rate with no
+        spike and confirm only the ticket policy fires
+        (\texttt{pytest burn\_rate\_sim.py -q} already proves both
+        directions: 6 passes). Explain, using
+        Equation~\eqref{eq:ch18-burnrate}, why the fast page fired 10
+        minutes into the incident and not at its first minute.
+  \item \textbf{Generate the paperwork.} \texttt{python incident\_templates.py}
+        --- inspect the runbook and postmortem skeletons, then fill the
+        postmortem template for the scripted incident as if you had paged
+        on it: timeline from the alert log, root cause, and two action
+        items.
+\end{enumerate}
+
+\subsection{Case Study: The Invisible Retry Storm}
+\label{sec:ch18-case}
+
+Northwind Robotics' fleet gateway calls \texttt{orders}, which calls
+\texttt{inventory}. On a Thursday deploy, an \texttt{inventory} connection
+pool was resized from 50 to 5 (a configuration typo, reviewed and green).
+Inventory p50 rose from 22\,ms to 140\,ms and p99 to 1.8\,s --- slow, but
+every individual request \emph{succeeded}. The gateway's resilience layer
+(Chapter~\ref{ch:microservices}) treated the slowness-plus-occasional-timeout
+as transient and retried: two retries with jittered backoff, exactly as
+configured.
+
+The logs were a wall of health. Every line was a well-formed request that
+completed: 200s everywhere, INFO level, correct correlation ids. Aggregate
+error rate: under 0.1\%. Nobody paged on errors, correctly.
+
+What actually happened was visible only in the traces. Spans per trace for
+\texttt{POST /fleet/telemetry} jumped from a steady 3 (one per hop) to a
+median of 7 --- one gateway span, then \emph{three} \texttt{orders.create}
+CLIENT spans where there should be one, each retry fanning into its own
+\texttt{inventory.reserve} subtree. The trace fan-out metric --- spans per
+trace, per route --- had no dashboard panel, but the trace backend's
+service-graph view showed \texttt{orders} receiving $5\times$ its usual
+request rate while \emph{client-facing} rate was flat. That mismatch was
+the smoking gun: retries multiply downstream load, so the victim service's
+traffic diverges from the front door's. The retry storm then deepened the
+latency that triggered it --- a self-reinforcing loop that error-rate logs
+cannot see because nothing, technically, was failing.
+
+The slow-burn SLO alert (6$\times$, 6h/30m) paged at minute 41 of hour
+two: latency SLI burn, not errors. The fix was threefold: the pool typo
+reverted; the gateway's retry policy capped at one retry with a per-route
+retry \emph{budget} (retries themselves rate-limited,
+Chapter~\ref{ch:rate_limiting}); and two permanent additions to the
+service dashboard --- a \emph{fan-out panel} (downstream requests per
+client request, per route) and a spans-per-trace alert at $2\times$
+baseline. The postmortem's headline: \emph{your retry policy is a load
+multiplier, and multipliers are invisible to logs.} War-story rules worth
+keeping: alert on the topology of traffic (fan-out), not only its volume
+and failures; and treat every resilience mechanism as something that can
+itself become the incident~\cite{nygard2018releaseit}.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch18-exercises}
+
+\begin{enumerate}
+  \item \textbf{SLI selection.} Northwind Robotics ships a new endpoint,
+        \texttt{GET /fleet/route-plan}, that computes asynchronously and
+        returns 202 + a polling URL (Chapter~\ref{ch:async_apis}). Write
+        SLIs for availability, latency, \emph{and} freshness of the
+        finished plan. Which events count as ``good'' for each, and why is
+        ``request returned 202'' not an availability SLI for the plan
+        itself?
+  \item \textbf{Budget arithmetic.} A 99.95\% SLO service burned 14 minutes
+        of budget by day 10. What average burn rate does that represent,
+        and what is the latest day on which a 2$\times$ sustained burn can
+        start without exhausting the month's budget?
+  \item \textbf{Window pairs.} Using Equation~\eqref{eq:ch18-burnrate},
+        show that a 100\% error burst lasting $t$ minutes raises the 1-hour
+        burn rate to $t / (0.001 \cdot 60)$. From that, derive the shortest
+        full-outage that fires the 14.4$\times$ fast page, and check your
+        answer against Listing~18.5's simulator.
+  \item \textbf{Histogram design.} Choose bucket boundaries for an endpoint
+        with a 300\,ms latency SLO and explain why at least two buckets
+        must straddle 300\,ms. What does the percentile estimate's maximum
+        error become at the SLO threshold under your layout?
+  \item \textbf{Cardinality audit.} A teammate proposes labels
+        \texttt{route}, \texttt{status}, \texttt{tenant\_id} (4{,}000
+        tenants), and \texttt{client\_version} (30 versions) on the request
+        histogram. Compute the series count, decide which labels survive,
+        and say where the rejected dimensions go instead.
+  \item \textbf{Propagation through a queue.} Sketch the inject/extract
+        code path for telemetry published to a message broker, including
+        what happens to the trace when a consumer batches 50 messages into
+        one processing span. (Hint: span \emph{links}, not parents.)
+  \item \textbf{Fallacy patrol.} Your weekly report shows ``average p99
+        latency across instances: 210\,ms.'' List two distinct ways this
+        number can understate user pain, and give the correct aggregation.
+  \item \textbf{Sampling design.} You may keep 5\% of trace volume.
+        Design the sampling policy (head + tail) for a fleet API where
+        errors cost you money but slow-and-successful requests cost your
+        \emph{customers} money. State precisely which traces are guaranteed
+        to survive.
+  \item \textbf{Debugging drill.} p99 for \texttt{POST /orders} tripled;
+        per-span durations in sampled traces are unchanged, but the gap
+        between the SERVER span's start and its first child span grew.
+        Name three candidate causes and the USE metric that confirms or
+        clears each.
+  \item \textbf{Postmortem review.} Given a postmortem whose root-cause
+        section reads ``on-call engineer misconfigured the pool,'' rewrite
+        it blamelessly: what mechanism questions replace the person
+        question, and which action items follow?
+\end{enumerate}
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch18-interview}
+
+\subsection*{Junior (Q1--Q10)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{What are the three pillars of observability, and what
+        question does each answer?}
+        Logs: what happened, once, here (events). Metrics: how often and
+        how fast, aggregated cheaply (numbers over time). Traces: where did
+        this one request's time go across services (causality). They join
+        on shared identifiers --- trace ids in logs, exemplars on metrics.
+  \item \textbf{What makes a log line ``structured,'' and why do you care?}
+        It is a machine-parseable object (one JSON per line) with a fixed
+        schema --- timestamp, level, logger, message, correlation ids ---
+        rather than free text. You care because parsing regexes over prose
+        during an incident is how minutes of error budget become hours.
+  \item \textbf{What may never appear in logs?}
+        PII, credentials, tokens, session ids, request/response bodies, and
+        anything Chapter~\ref{ch:api_security} classifies as sensitive.
+        Logs have wide read access and long retention; treat them as a
+        broadcast medium.
+  \item \textbf{Define RED and USE.}
+        RED --- Rate, Errors, Duration: the service-level view (are users
+        hurting?). USE --- Utilization, Saturation, Errors: the
+        resource-level view (which pool, queue, or disk is the
+        bottleneck?). You page on RED and diagnose with USE.
+  \item \textbf{What is a span? A trace?}
+        A span is a named, timed operation with attributes, a status, and a
+        parent pointer. A trace is all spans sharing one trace id --- the
+        tree of one request's work across every service it touched.
+  \item \textbf{What does the \texttt{traceparent} header look like?}
+        Four dash-separated lowercase-hex fields:
+        \texttt{version-traceid-spanid-flags}, e.g.\
+        \texttt{00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01}.
+        Version \texttt{ff} is invalid; all-zero ids are invalid; flags bit
+        0 is \emph{sampled}.
+  \item \textbf{What is an SLO, in one sentence?}
+        A measurable target on a service level indicator over a rolling
+        window --- e.g.\ ``99.9\% of requests succeed over 30 days'' ---
+        against which you define an error budget and alerting.
+  \item \textbf{How much downtime does a 99.9\% monthly SLO allow?}
+        $0.001 \times 43{,}200$ minutes $=$ \textbf{43.2 minutes} per
+        month. (99.99\% allows 4.32; 99\% allows 7 h 12 min.)
+  \item \textbf{Why is average latency a bad dashboard number?}
+        Latency is long-tailed; the mean is dragged into the tail and
+        describes no actual user. Use histogram-based p50/p95/p99 ---
+        Listing~18.4's demo shows a 761\,ms mean over a 25\,ms median and
+        a 23.7\,s p99.
+  \item \textbf{What is a correlation id and where does it live?}
+        One identifier (here: the W3C trace id) attached to a request at
+        the edge and echoed in every log line, span, metric exemplar, and
+        problem-details response, so one id retrieves the request's whole
+        story.
+\end{enumerate}
+
+\subsection*{Mid (Q11--Q20)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{Walk through the OpenTelemetry architecture.}
+        Application code calls the vendor-neutral \emph{API}; the
+        \emph{SDK} (configured by the application only) runs samplers, span
+        processors, and metric aggregations; \emph{exporters} ship OTLP to
+        the \emph{collector}, which batches, redacts, tail-samples, and
+        fans out to per-signal backends. Vendor changes stop at collector
+        config~\cite{opentelemetrydocs}.
+  \item \textbf{Why can't you average p99s across instances or minutes?}
+        Quantiles are order statistics, not additive measures; the average
+        of per-minute p99s is not any percentile of the underlying
+        distribution and systematically understates the tail
+        (Proposition~\ref{prop:ch18-p99avg}). Correct path: merge histogram
+        bucket counts, then compute the percentile from the merged
+        histogram.
+  \item \textbf{Explain multi-window multi-burn-rate alerting.}
+        Alert on burn rate (observed error rate $\div$ budget rate), and
+        fire only when a \emph{long} window (precision: the burn is real
+        and sustained) and a \emph{short} window (currency: it is happening
+        now) both exceed the threshold --- Equation~\eqref{eq:ch18-mwmb}.
+        Canonical 99.9\% table: 14.4$\times$ with 1h+5m (2\% budget), 6$\times$
+        with 6h+30m (5\%), 1$\times$ with 3d+6h (10\%, ticket).
+  \item \textbf{Head vs tail sampling trade-offs?}
+        Head sampling decides at trace start: cheap, unbiased statistics,
+        but it discards rare error traces at the sampling rate. Tail
+        sampling decides at the collector after buffering whole traces:
+        keeps all errors and slow traces, at the cost of collector memory,
+        decision latency, and operational complexity. Hybrids head-sample
+        the healthy bulk and tail-sample the interesting tail.
+  \item \textbf{What is cardinality and why does it bankrupt metrics
+        systems?}
+        Series count is the product of label cardinalities
+        (Equation~\eqref{eq:ch18-cardinality}); each series costs index and
+        chunk memory plus ingestion on every scrape. One unbounded label
+        (\texttt{user\_id}) turns 90 series into 4.5 million. Labels must
+        be dashboard group-bys; unbounded dimensions belong in logs and
+        trace attributes.
+  \item \textbf{What are exemplars?}
+        Trace ids pinned to specific histogram observations. They convert
+        ``p99 spiked'' into one clickable slow trace --- the metric-to-
+        waterfall bridge --- and they only work because metrics and traces
+        share the trace-id namespace.
+  \item \textbf{Design SLIs for an asynchronous (202 + polling) API.}
+        Three ratios: submission availability (accepted vs.\ rejected
+        submissions), completion latency (fraction of jobs finishing within
+        $T$ of submission, measured at the poller or job store), and
+        freshness/correctness of results where applicable. The HTTP 202
+        latency is a client-ergonomics metric, not the job's SLI --- the
+        unit of good is the \emph{finished job}, not the acknowledgment.
+  \item \textbf{How does \texttt{traceparent} propagate through a queue?}
+        It does not --- by itself. There are no HTTP headers on a broker
+        message unless you put them there: inject the context into message
+        metadata on publish, extract it on consume, and start the consumer
+        span as a \texttt{CONSUMER} kind (with span links when batching).
+        The OTel propagator API is transport-agnostic; the discipline is
+        not automatic.
+  \item \textbf{What is the difference between \texttt{tracestate} and
+        baggage?}
+        \texttt{tracestate}: vendor-specific propagation state (sampling
+        decisions, vendor ids), a $\le$32-member \texttt{key=value} list
+        with strict syntax, managed by tracers. Baggage: user-defined
+        key/value pairs propagated with the trace for application use
+        (tenant, plan tier) --- deliberately separate, and a PII leak
+        vector if abused because it rides every outbound call.
+  \item \textbf{Your p99 latency alert fires. First three moves?}
+        (1)~Check the SLO dashboard: is this budget burn or a blip ---
+        which endpoint, which burn window? (2)~Pull an exemplar trace from
+        the violated histogram bucket and decompose the waterfall:
+        dominant span or inter-span gap? (3)~Check USE metrics for the
+        implicated resource (pool utilization, queue depth) before reading
+        a single log line.
+\end{enumerate}
+
+\subsection*{Senior (Q21--Q30)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=21]
+  \item \textbf{Derive the fast-page window pair from first principles.}
+        A 99.9\% SLO allows budget rate $0.001$. To page when 2\% of the
+        monthly budget burns in one hour, require burn rate $b$ with
+        $b \times 1\text{h} / 720\text{h} = 0.02$, so $b = 14.4$. The 1-hour
+        long window estimates the burn with enough samples; the 5-minute
+        short window confirms it is still active, so the alert resolves
+        after mitigation instead of paging on history.
+  \item \textbf{Why do 4xx responses not count against an availability
+        SLO?}
+        The SLI measures \emph{service} behavior; a 400 means the client
+        sent an invalid request --- counting it would let one buggy
+        integrator burn your budget and page you for their bug. Track 4xx
+        as a separate indicator (sudden 4xx shifts do reveal bad deploys
+        and doc drift), but the availability SLI counts 5xx and transport
+        failures.
+  \item \textbf{Your traces show healthy spans but the gaps between spans
+        grew. Where did the time go?}
+        Between-span time is work nobody instrumented: connection
+        acquisition from an exhausted pool, TLS handshakes on cold
+        connections, DNS, thread/executor queueing, GC pauses, or
+        client-side retries (check fan-out first --- see
+        Section~\ref{sec:ch18-case}). Confirm with USE metrics on the
+        suspected resource, then add spans for the confirmed stage.
+  \item \textbf{How do you keep metrics correct while sampling traces?}
+        Aggregate metrics from every request \emph{before} sampling ---
+        counters and histograms are unconditional; only span export is
+        sampled. Never derive request rates or latency percentiles from
+        sampled spans: your RED metrics would be off by the sampling
+        factor, silently.
+  \item \textbf{Design a latency SLO for an endpoint with a heavy tail of
+        legitimate work (large fleet exports).}
+        Split the SLI by request class (separate export vs.\ interactive
+        routes, different thresholds), pick the threshold from the
+        histogram at the knee rather than from a wish, and express the SLO
+        as a threshold ratio (``99\% of interactive requests under
+        300\,ms''). If one route genuinely has two populations, one SLI
+        will lie to one of them.
+  \item \textbf{What breaks when you attach \texttt{http.route} as the raw
+        path instead of the template?}
+        \texttt{/fleet/robot-4821} instead of \texttt{/fleet/\{id\}} makes
+        every id a new label value: per-request series creation, index
+        blowup, dashboards that cannot aggregate, and eventually a metrics
+        backend that drops or bills you into noticing. Route templates are
+        a cardinality control, not a cosmetic choice.
+  \item \textbf{Explain the alert-fatigue failure mode and its fix.}
+        Pages that do not require immediate action train the on-call to
+        ignore pages; response latency to \emph{real} pages degrades ---
+        fatigue is a system output, not a character flaw. Fix: page only on
+        symptom-level budget burn (fast/slow policies), ticket the rest,
+        delete or demote alerts that fire unactionably, and review page
+        volume as a budget.
+  \item \textbf{How would you verify a third-party client's claim that
+        ``your API was down for us at 14:03''?}
+        Ask for the correlation id or \texttt{traceparent} they sent (you
+        taught them to, via problem-details \texttt{traceId}); query traces
+        and logs for that id; then check the SLI window around 14:03 for
+        their route and region. If their requests never appear in server
+        telemetry, the failure is between them and your edge --- which is
+        also a finding.
+  \item \textbf{When is a gauge the wrong instrument?}
+        For anything you will want to aggregate across instances or
+        percentile over time: gauges capture instantaneous values at scrape
+        time and lose everything between scrapes. Rates come from counters,
+        distributions from histograms; gauges are for levels that are
+        meaningful instantaneously (queue depth, pool in-use).
+  \item \textbf{What belongs in a runbook entry for one alert?}
+        The SLO it protects; the dashboard that confirms it; the triage
+        checklist (ten minutes, ordered); mitigation with exact commands
+        (rollback, flag, drain); escalation path with ack timeouts; and the
+        date it was last exercised. A runbook that has never been drilled
+        is a hypothesis.
+\end{enumerate}
+
+\subsection*{Staff (Q31--Q36)}
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=31]
+  \item \textbf{Design the observability architecture for a 40-service API
+        platform. What do you standardize centrally vs.\ leave to teams?}
+        Central: the collector tier (endpoints, redaction, tail sampling,
+        per-tenant quotas), the trace-context and baggage policy, metric
+        naming and label vocabularies (route templates, status classes),
+        the SLO framework and burn-rate alerting library, exemplar wiring,
+        and the dashboard/slo-as-code templates. Teams: SLI thresholds and
+        SLO targets for their services, domain attributes on spans, and
+        their runbooks. The invariant: propagation and cardinality
+        discipline are platform concerns; target-setting is an ownership
+        concern.
+  \item \textbf{When would you deliberately \emph{lower} an SLO?}
+        When the budget is consistently unspent and users cannot perceive
+        the marginal reliability --- an over-tight SLO is a tax on velocity
+        (frozen releases, rejected experiments) buying nothing. SLOs are
+        set from user pain and business tolerance, not from what the
+        architecture happens to achieve; ratcheting to the observed maximum
+        is the stealth failure mode.
+  \item \textbf{How do error budgets change organizational behavior, and
+        how do you keep them honest?}
+        The budget converts reliability from a vibe into a shared currency:
+        unspent budget authorizes risk (faster releases, experiments);
+        exhausted budget shifts the roadmap to reliability by policy, not
+        by argument~\cite{beyer2016sre}. Keeping it honest: the SLI must be
+        user-visible (no internal-health proxies), the measurement window
+        and query are versioned and reviewed, and budget policy changes are
+        signed off like contracts --- otherwise teams relitigate the ruler
+        instead of fixing the service.
+  \item \textbf{Critique: ``we sample 10\% of traces and compute our SLO
+        from the sampled spans.''}
+        Two independent errors. First, metrics from sampled spans are
+        biased by the sampler (and catastrophically so under tail sampling,
+        which \emph{over-represents} errors and slow traces --- your SLI
+        would read worse than reality, or better under head sampling if
+        errors correlate with sampling bugs). Second, SLOs must be computed
+        from complete event data: unsampled request logs, load-balancer
+        records, or pre-sampling metric aggregations. Traces are for
+        diagnosis; SLIs are for accounting; never mix the supplies.
+  \item \textbf{A queue-based pipeline drops trace continuity at three
+        broker boundaries. Design the fix and its failure modes.}
+        Inject \texttt{traceparent}/\texttt{tracestate} into message
+        metadata at every publish (one carrier-agnostic propagator call),
+        extract at every consume, start \texttt{PRODUCER}/\texttt{CONSUMER}
+        spans, and use span \emph{links} for fan-in batches so one
+        consumer span can reference fifty parents without lying about
+        causality. Failure modes to design for: metadata size limits on the
+        broker, consumers on old library versions that drop unknown fields
+        (contract-test the metadata schema), and the temptation to log the
+        baggage --- which now travels everywhere.
+  \item \textbf{Your CEO asks: ``why did we invest in all this telemetry
+        when the outage still lasted 40 minutes?'' Defend the program with
+        numbers.}
+        Compare against the counterfactual the telemetry itself records:
+        detection time (alert fired at minute 4 of burn, not at a customer
+        ticket at minute 40), diagnosis time (exemplar-to-root-cause in
+        minutes via the waterfall vs.\ hours of log archaeology), and
+        budget math (40 minutes consumed vs.\ 43.2 allowed --- the
+        month survived). Observability does not prevent incidents; it
+        compresses detection and diagnosis, which are the two phases
+        engineering actually controls. Then say what will shrink
+        mitigation: better runbooks and rehearsed rollbacks --- the program
+        is how you know that.
+\end{enumerate}
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch18-bibliography}
+
+\begin{itemize}
+  \item B.~Beyer, C.~Jones, J.~Petoff, N.~Murphy (eds.), \emph{Site
+        Reliability Engineering} (O'Reilly, 2016) --- the source of SLOs,
+        error budgets, and the elimination-of-toil philosophy this chapter
+        operationalizes~\cite{beyer2016sre}.
+  \item B.~Beyer, N.~Murphy, D.~Rensin, K.~Kawahara, S.~Thorne (eds.),
+        \emph{The Site Reliability Workbook} (O'Reilly, 2018) --- chapter~4
+        (``Implementing SLOs'') and chapter~5 (``Alerting on SLOs'') are
+        the origin of the multi-window multi-burn-rate table implemented in
+        Listing~18.5 (uncited in text; the practical companion to the SRE
+        book).
+  \item OpenTelemetry project documentation --- API/SDK concepts, the
+        collector, and the HTTP semantic conventions referenced throughout
+        Section~\ref{sec:ch18-mechanics}~\cite{opentelemetrydocs}.
+  \item W3C, \emph{Trace Context} (Recommendation) and \emph{Baggage} ---
+        the normative specifications for \texttt{traceparent} and
+        \texttt{tracestate} that Listings 18.1--18.2 implement by hand
+        (uncited in text; short, readable, and worth reading in full).
+  \item C.~Majors, L.~Fong-Jones, G.~Miranda, \emph{Observability
+        Engineering} (O'Reilly, 2022) --- the high-cardinality,
+        high-dimensionality argument for event-first observability and the
+        clearest treatment of exemplar-style debugging loops (uncited in
+        text).
+  \item Prometheus documentation, \emph{Histograms and Summaries} --- why
+        percentiles must come from histogram buckets, the
+        \texttt{histogram\_quantile} interpolation behind
+        Equation~\eqref{eq:ch18-histpct}, and the unaggregability of
+        summary quantiles (uncited in text).
+  \item J.~Turnbull, \emph{The Art of Monitoring} --- the opinionated
+        end-to-end framing of metrics, alerting, and dashboard design that
+        shaped Section~\ref{subsec:ch18-ops} (uncited in text).
+  \item RFC~9110, \emph{HTTP Semantics} --- status-code classes that define
+        ``good'' versus ``bad'' events in availability SLIs, and the header
+        semantics trace context rides on~\cite{rfc9110}.
+  \item M.~Kleppmann, \emph{Designing Data-Intensive Applications} --- the
+        messaging and stream-processing background for the
+        propagation-through-queues discussion~\cite{kleppmann2017ddia}.
+  \item M.~Nygard, \emph{Release It!}, 2nd ed. --- the stability patterns
+        whose interactions with telemetry produced
+        Section~\ref{sec:ch18-case}'s retry storm~\cite{nygard2018releaseit}.
+  \item FastAPI documentation --- middleware and the ASGI surface
+        instrumented in Listing~18.3~\cite{fastapidocs}.
+  \item A.~H\'{e}tu, \emph{The HdrHistogram} project documentation --- the
+        log-bucket layout and its bounded-relative-error guarantee
+        re-implemented in Listing~18.4 (uncited in text).
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch18-capstones}
+
+\subsection*{Capstone 18.1 --- Trace Context Conformance Pack \hfill [junior]}
+\textbf{Objective:} Prove you own the wire format by extending the parser
+into a conformance checker.
+
+\textbf{Inputs/Datasets:} Listings 18.1--18.2; a hand-written file of 20
+\texttt{traceparent} headers (10 valid, 10 invalid in distinct ways) plus
+5 \texttt{tracestate} headers.
+
+\textbf{Steps:} (1)~Write the header corpus as a data file, one header per
+line with an expected verdict. (2)~Build a checker that runs every corpus
+line through \texttt{parse\_traceparent} and reports pass/fail per case.
+(3)~Add version-\texttt{01} headers with trailing fields and verify
+forward-compatible parsing. (4)~Add a property test: for 500 seeded random
+contexts, \texttt{parse(header(x)) == x}.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All 25 corpus cases produce the expected verdict.
+  \item[$\square$] The seeded round-trip property test passes 500/500.
+  \item[$\square$] Every rejection message names the offending field.
+\end{itemize}
+
+\textbf{Stretch Goals:} Fuzz with random truncations and case flips; assert
+the parser never throws anything but \texttt{ValueError}.
+
+\subsection*{Capstone 18.2 --- RED Metrics for a Real Route Set \hfill [mid]}
+\textbf{Objective:} Extend Listing~18.3 into a per-endpoint RED story for
+Northwind Robotics' four public routes.
+
+\textbf{Inputs/Datasets:} Listing~18.3; routes \texttt{POST /fleet/telemetry},
+\texttt{GET /fleet/status}, \texttt{GET /fleet/\{id\}}, \texttt{GET /health}.
+
+\textbf{Steps:} (1)~Record counter and histogram with attributes
+\texttt{route} (template only), \texttt{status\_class}
+(\texttt{2xx}/\texttt{4xx}/\texttt{5xx}), nothing else. (2)~Drive 2{,}000
+seeded synthetic requests with a per-route latency model and a 0.2\% error
+rate on one route. (3)~Read back the \texttt{InMemoryMetricReader} and
+render a per-route RED table (rate, error ratio, p50/p99 from bucket
+counts). (4)~Prove the cardinality bound: assert the exported series count
+equals routes $\times$ status classes, exactly.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] RED table prints with per-route error ratios matching
+        the seeded model within sampling jitter.
+  \item[$\square$] Series-count assertion passes; adding a
+        \texttt{user\_id} label makes it fail loudly (demonstrate, then
+        revert).
+  \item[$\square$] Everything deterministic under one seed; no network.
+\end{itemize}
+
+\textbf{Stretch Goals:} Attach exemplars (one trace id per histogram bucket
+observation) and print one exemplar id for the p99 bucket.
+
+\subsection*{Capstone 18.3 --- SLO Workbench \hfill [mid]}
+\textbf{Objective:} Turn Listing~18.5 into a policy design tool and defend
+one design change with data.
+
+\textbf{Inputs/Datasets:} Listing~18.5; three scripted incidents you write
+(a 3-minute total outage, a 6-hour 2\% error bleed, a flapping
+30-seconds-on/30-seconds-off failure).
+
+\textbf{Steps:} (1)~Encode the three incidents as timeline generators with
+distinct seeds. (2)~Run the stock policy table against each; record
+time-to-page and false positives. (3)~Propose one modification (e.g.\ a
+third window pair at 3$\times$/1d+2h, or a flapping-damping reset rule) and
+show its effect on all three incidents. (4)~Write a one-page memo: which
+table ships, and why, in budget-consumption terms.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] All three incidents produce a documented, reproducible
+        alert timeline.
+  \item[$\square$] The flapping incident is shown to reset-and-refire under
+        the stock table, and your modification addresses it.
+  \item[$\square$] The memo states budget math for every policy row.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add alert-resolution tracking (when would each page
+auto-resolve?) and report mean time to resolve per policy.
+
+\subsection*{Capstone 18.4 --- Queue Propagation End to End \hfill [senior]}
+\textbf{Objective:} Close the tracing gap this chapter warns about: one
+trace across HTTP \emph{and} a message broker.
+
+\textbf{Inputs/Datasets:} Listing~18.3; an in-process fake broker you write
+(dict of queues; no network, deterministic).
+
+\textbf{Steps:} (1)~Publish telemetry from the gateway to the fake broker,
+injecting \texttt{traceparent}/\texttt{tracestate} into message metadata.
+(2)~A consumer extracts context and starts a \texttt{CONSUMER} span parented
+correctly; a batch consumer uses span links for its 50 parents. (3)~Export
+and assert: one trace id spans HTTP ingress, publish, and consume; batch
+consumption produces one span with 50 links. (4)~Write the failure-mode
+test: a legacy consumer that drops unknown metadata fields produces a
+detectably orphaned span (assert and log a warning).
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] The exported tree crosses the broker boundary with one
+        trace id and correct parentage.
+  \item[$\square$] Batch consumption uses links, not a false single parent.
+  \item[$\square$] The legacy-consumer test detects the orphaned span
+        programmatically.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a redaction pass that strips baggage at the
+queue boundary and prove no baggage key survives into consumer spans.
+
+\subsection*{Capstone 18.5 --- Incident Program in a Box \hfill [staff]}
+\textbf{Objective:} Stand up the complete operational loop for the
+fleet-telemetry platform and run a game day against it.
+
+\textbf{Inputs/Datasets:} Listings 18.3--18.6; the case study of
+Section~\ref{sec:ch18-case} as the game-day scenario.
+
+\textbf{Steps:} (1)~Define SLOs (availability + latency + freshness) for
+three services with per-endpoint thresholds. (2)~Generate runbooks from
+Listing~18.6 for all three services and fill every placeholder.
+(3)~Script the retry-storm incident into the simulator's timeline plus a
+fan-out metric; verify the fast/slow pages and show that a
+spans-per-trace alert fires \emph{before} the latency burn pages.
+(4)~Run the game day: one teammate injects the fault, another follows only
+the runbook; measure detection, mitigation, and resolution times.
+(5)~Produce the blameless postmortem from the generator, including the
+``lessons for the SLO'' section with at least one concrete alerting change.
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] SLOs, runbooks, and dashboards-as-tables exist for all
+        three services and cite one another.
+  \item[$\square$] The game day produces measured detection/mitigation/
+        resolution times, all reproducible from seeds.
+  \item[$\square$] The postmortem is complete, blameless, and its action
+        items include one alerting-topology change with an owner.
+  \item[$\square$] A second run by a different pair reproduces the
+        timelines within one minute of simulated time.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a budget-policy gate: when the simulator shows
+$>$75\% budget consumed, the deploy script refuses to ship and explains why.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch18-deps}
+
+All code runs offline after a one-time install. From PowerShell:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\noindent\textbf{requirements.txt:}
+\begin{minted}{text}
+opentelemetry-sdk>=1.25
+opentelemetry-instrumentation-fastapi>=0.46b0
+fastapi>=0.110
+pytest>=8
+\end{minted}
+
+For real deployments (never needed by this chapter's listings): add the
+OTLP exporter package (\texttt{opentelemetry-exporter-otlp}) and point it
+at a collector endpoint --- the \texttt{SpanExporter} interface Listing~18.3
+implements is the same one OTLP satisfies, so the swap is constructor-deep.
+
+\subsection{opentelemetry-sdk ($\geq$ 1.25)}
+\textbf{Description:} The OpenTelemetry SDK for Python: tracer and meter
+providers, span processors, samplers, metric views, and the propagator API.
+\textbf{Why included:} it is the entire telemetry backbone of Listing~18.3
+--- and its \texttt{SpanExporter} interface is what lets the chapter replace
+OTLP with an offline JSON-lines exporter without touching application
+code. \textbf{Alternatives:} the Prometheus \texttt{prometheus\_client}
+(metrics only --- no traces, no logs, and a pull model that changes your
+deployment shape); the Datadog SDK / \texttt{ddtrace} (vendor-locked but
+zero-collector); \texttt{structlog} for structured logging specifically
+(excellent, and composable with the stdlib handler used here --- but it is
+a logging library, not a telemetry pipeline). \textbf{Installation:}
+\texttt{pip install "opentelemetry-sdk>=1.25"}.
+
+\subsection{opentelemetry-instrumentation-fastapi ($\geq$ 0.46b0)}
+\textbf{Description:} Auto-instrumentation that wraps every FastAPI route
+in a SERVER span with semantic-convention attributes and extracts incoming
+\texttt{traceparent} headers. \textbf{Why included:} it is the difference
+between teaching propagation as a diagram and having it happen on every
+request for free; Listing~18.3 instruments the app with it and then
+demonstrates the manual inject/extract path it automates.
+\textbf{Alternatives:} hand-written ASGI middleware (full control, full
+maintenance); the \texttt{opentelemetry-instrumentation-asgi} package it
+builds on (framework-agnostic, more manual); vendor agents (locked).
+\textbf{Installation:}
+\texttt{pip install "opentelemetry-instrumentation-fastapi>=0.46b0"} ---
+the pre-1.0 instrumentation packages version in lockstep with the SDK
+(0.46b0 pairs with SDK 1.25).
+
+\subsection{fastapi ($\geq$ 0.110)}
+\textbf{Description:} The ASGI framework hosting the instrumented service.
+\textbf{Why included:} the chapter's service is a FastAPI app because the
+book's services are FastAPI apps (Chapter~\ref{ch:fastapi}); the framework
+supplies routing, middleware, and the request objects the instrumentation
+wraps~\cite{fastapidocs}. \textbf{Alternatives:} Starlette directly (the
+instrumentation targets ASGI and would work unchanged); Flask via
+\texttt{opentelemetry-instrumentation-flask} (WSGI; identical concepts);
+a gateway-level service mesh (sidecar telemetry without code changes, at
+the price of losing in-process spans). \textbf{Installation:}
+\texttt{pip install "fastapi>=0.110"}.
+
+\subsection{pytest ($\geq$ 8)}
+\textbf{Description:} Test framework running every embedded suite in this
+chapter (36 tests across four files). \textbf{Why included:} the chapter's
+claims are executable --- the header round-trips, histogram percentile
+proofs, and burn-rate policy tests all run under it.
+\textbf{Alternatives:} \texttt{unittest} (stdlib; the suites would survive
+a port, but \texttt{parametrize} and \texttt{tmp\_path} would need
+hand-rolling); \texttt{nose2} (unmaintained momentum). \textbf{Installation:}
+\texttt{pip install "pytest>=8"}.
+
+\subsection*{Ecosystem alternatives worth knowing}
+For production telemetry beyond this chapter's offline exporters: the
+OpenTelemetry Collector itself (the binary this chapter simulates),
+Prometheus + \texttt{prometheus\_client} for metrics-only deployments,
+Grafana Tempo/Jaeger for trace storage, Loki or Elasticsearch for logs,
+and \texttt{structlog} when you want richer structured logging pipelines
+than a stdlib formatter. Evaluate each against
+Section~\ref{sec:ch18-mechanics}: which signal, which cardinality story,
+which sampling point, which failure mode when the backend is down.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch18-summary}
+
+\begin{itemize}
+  \item The three pillars answer different questions and join on one
+        identifier: structured JSON logs (levels, sampling, never PII or
+        secrets), RED metrics for services and USE for resources, and
+        traces as parent-linked span trees propagated by context.
+  \item OpenTelemetry's layering is the architecture: code to the API,
+        configure the SDK, export to a collector, and let the collector own
+        vendor coupling --- the offline file exporter in Listing~18.3 is
+        the same interface OTLP satisfies~\cite{opentelemetrydocs}.
+  \item \texttt{traceparent} is four hex fields --- version, trace id,
+        span id, flags --- with all-zero ids and version \texttt{ff}
+        invalid and bit 0 meaning \emph{sampled}
+        (Table~\ref{tab:ch18-traceparent}); queues do not propagate it for
+        you --- inject and extract at every messaging boundary.
+  \item Latency is a histogram. Percentiles come from bucket counts
+        (Equation~\eqref{eq:ch18-histpct}); averaging first destroys the
+        tail (Proposition~\ref{prop:ch18-p99avg}); cardinality is
+        multiplicative and priced per series
+        (Equation~\eqref{eq:ch18-cardinality}); exemplars bridge metrics to
+        traces.
+  \item SLOs turn telemetry into judgment: availability, latency, and
+        freshness SLIs as good/total ratios; error budgets (43.2 minutes
+        per month at 99.9\%); and multi-window multi-burn-rate alerts ---
+        14.4$\times$ over 1h+5m, 6$\times$ over 6h+30m, 1$\times$ over
+        3d+6h --- that page on budget burn instead of noise
+        (Table~\ref{tab:ch18-burnrate})~\cite{beyer2016sre}.
+  \item Operations is a discipline, not a mood: correlation ids end to end,
+        dashboards anchored to SLOs, latency debugged by timeline
+        decomposition (span or gap first, logs last), incidents run with
+        severities, roles, runbooks, and blameless postmortems.
+  \item The retry storm of Section~\ref{sec:ch18-case} is the exam
+        question: resilience mechanisms multiply load invisibly to logs;
+        alert on the topology of traffic (fan-out, spans per trace), not
+        only its volume and errors.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch18-quickref}
+
+\subsection*{SLI Formulas}
+Availability $= \frac{\#\,\text{status} < 500}{\#\,\text{requests}}$
+$\bullet$ Latency $= \frac{\#\,\text{requests} < T}{\#\,\text{requests}}$
+(from histogram buckets) $\bullet$ Freshness $= \frac{\#\,\text{reads newer
+than } D}{\#\,\text{reads}}$ $\bullet$ Error budget $= (1-\text{SLO}) \times
+\text{window}$: 99.9\%/30d $=$ 43.2 min; 99.95\% $=$ 21.6 min; 99.99\% $=$
+4.32 min $\bullet$ Burn rate $= \frac{\text{error rate}}{1 - \text{SLO}}$
+$\bullet$ Budget consumed $=$ burn $\times\, w / 43{,}200$ min.
+
+\subsection*{Burn-Rate Window Table (99.9\% SLO)}
+Fast page: 14.4$\times$, long 1h + short 5m, 2\% budget $\bullet$ slow
+page: 6$\times$, long 6h + short 30m, 5\% budget $\bullet$ ticket:
+1$\times$, long 3d + short 6h, 10\% budget $\bullet$ fire $\iff$
+burn$_{\text{long}} \ge b \land$ burn$_{\text{short}} \ge b$; reset when
+the long window clears.
+
+\subsection*{\texttt{traceparent} Field Reference}
+\texttt{version-traceid-spanid-flags} $\bullet$ version: 2 hex,
+\texttt{ff} forbidden, \texttt{00} forbids extra fields $\bullet$ trace id:
+32 hex, nonzero, constant across hops $\bullet$ span id: 16 hex, nonzero,
+fresh per hop, recorded as the callee's parent $\bullet$ flags: 2 hex, bit
+\texttt{0x01} $=$ sampled; echo only defined bits $\bullet$
+\texttt{tracestate}: $\le$32 vendor \texttt{key=value} members $\bullet$
+baggage: user key/values, propagates everywhere --- never PII.
+
+\subsection*{Field Discipline (compressed)}
+Logs: JSON, levels mean something, sample hot paths, no PII/tokens/bodies
+$\bullet$ Metrics: RED per route template + status class only; histograms
+for latency; exemplars on; series $=$ product of label cardinalities
+$\bullet$ Traces: SERVER/CLIENT/INTERNAL/PRODUCER/CONSUMER kinds; metrics
+aggregated \emph{before} sampling; errors kept at 100\% $\bullet$ Debug
+order: SLO dashboard $\to$ exemplar waterfall $\to$ dominant span or gap
+$\to$ USE metrics $\to$ correlated logs $\bullet$ Incidents: severity with
+a response contract, commander coordinates (never debugs), runbook first
+ten minutes, postmortem blames mechanisms.
+
+\input{chapters/_standard_addendum}

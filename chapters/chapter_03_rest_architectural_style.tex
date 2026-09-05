@@ -1,0 +1,2841 @@
+%% ============================================================================
+%% Chapter 3: The REST Architectural Style & Resource Design
+%% ============================================================================
+\chapter{The REST Architectural Style \& Resource Design}
+\label{ch:rest_style}
+
+\section*{Executive Summary}
+
+Representational State Transfer (REST) is the most influential --- and the most
+misunderstood --- architectural style in modern software engineering. Coined by Roy
+Fielding in his 2000 doctoral dissertation \cite{fielding2000rest}, REST is not a
+protocol, not a specification, and emphatically not ``JSON over HTTP.'' It is a
+\emph{style}: a named set of architectural constraints that, when applied together,
+induce a specific, desirable set of system properties --- scalability, reliability,
+visibility, portability, and independent evolvability. An HTTP API earns the label
+``RESTful'' only to the degree that it honors those constraints; an HTTP API that
+ignores them is merely an HTTP API, which may still be a perfectly defensible
+engineering choice --- provided the choice is made deliberately rather than by
+accident of vocabulary.
+
+This chapter formalizes Fielding's six constraints (client--server, statelessness,
+cacheability, uniform interface, layered system, and the optional code-on-demand),
+stating each precisely, enumerating the properties it induces, and identifying what
+each forbids. We then confront the industry's chronic mislabeling problem through the
+Richardson Maturity Model \cite{richardson2013restful}, a diagnostic ladder from the
+``swamp of POX'' (Plain Old XML) through resources and HTTP verbs up to hypermedia
+controls. The middle of the chapter is devoted to the discipline of resource design:
+identifying resources as nouns, distinguishing collections, documents, stores, and
+controllers, and engineering URI grammars that are hierarchical, predictable, and
+opaque to clients. We give the uniform interface its full semantic treatment ---
+method safety and idempotency, precise status codes for every CRUD lifecycle
+transition, PUT versus PATCH (including JSON Merge Patch and JSON Patch), and content
+negotiation --- before turning to HATEOAS and the practical economics of hypermedia
+media types (HAL, JSON:API, Collection+JSON). Representation design closes the
+theory: embedding versus linking, partial representations, and the anti-corruption
+discipline that keeps your API from becoming a serialized database dump.
+
+Three complete, offline, stdlib-first Python 3.11 implementations anchor the theory
+in practice: a zero-framework REST parts-catalog service for the fictional
+\emph{Northwind Robotics} universe that implements ETags, conditional requests,
+content negotiation, and correct method semantics with nothing but
+\texttt{http.server}; a URI design linter that flags style violations in route
+tables; and a HAL-style hypermedia serializer. A worked OpenAPI 3.1 excerpt
+\cite{openapi31} demonstrates the design-first workflow. The chapter closes with
+thirty-six interview questions, five progressive capstone projects, and a
+quick-reference card. Mastery objective: by the end of this chapter you should be
+able to \emph{state}, \emph{defend}, and \emph{enforce} REST's constraints --- and
+to recognize, with surgical precision, when an API is RESTful, when it is merely
+HTTP, and why the difference matters for evolvability.
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch3-objectives}
+
+\subsection*{Learning Objectives}
+
+After completing this chapter, its labs, and at least two capstone projects, you
+will be able to:
+
+\begin{enumerate}
+  \item \textbf{Formalize} REST as an architectural style: state Fielding's six
+        constraints verbatim-adjacent, name the properties each induces, and name
+        what each forbids \cite{fielding2000rest}.
+  \item \textbf{Diagnose} any HTTP API on the Richardson Maturity Model and
+        articulate precisely which constraints it satisfies or violates
+        \cite{richardson2013restful}.
+  \item \textbf{Model} a business domain as resources: distinguish collections,
+        documents, stores, and controllers; choose nouns over verbs; and design a
+        coherent URI grammar (hierarchy, casing, pluralization, query versus path).
+  \item \textbf{Apply} the uniform interface with precision: safety and
+        idempotency of every method, correct status codes for each CRUD
+        transition, conditional requests, and PUT versus PATCH semantics
+        \cite{rfc9110}.
+  \item \textbf{Evaluate} hypermedia (HATEOAS) as an engineering trade-off:
+        compare HAL, JSON:API, and Collection+JSON, and decide when hypermedia
+        pays for itself \cite{rfc8288}.
+  \item \textbf{Design} representations for evolution: embedding versus linking,
+        partial representations, and anti-corruption layering between the API and
+        the database schema \cite{kleppmann2017ddia}.
+  \item \textbf{Implement} constraint-compliant REST services with the Python
+        standard library alone, and \textbf{govern} API style with linting,
+        design-first OpenAPI workflows, and review gates \cite{openapi31,gehl2021apidesign}.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+
+This chapter assumes you have completed Chapters 0--2 of this book:
+
+\begin{itemize}
+  \item \textbf{Chapter 0} --- the course contract, environment setup, and the
+        Northwind Robotics fictional universe used for all synthetic data.
+  \item \textbf{Chapter 1} --- the HTTP wire protocol: requests, responses,
+        headers, methods, status codes, and message bodies, as specified in
+        RFC 9110 \cite{rfc9110}.
+  \item \textbf{Chapter 2} --- consuming HTTP APIs from Python: \texttt{urllib}
+        and \texttt{http.client}, parsing JSON, handling errors, and reading
+        response headers.
+\end{itemize}
+
+You should be comfortable reading an HTTP request--response exchange in raw text
+form and writing typed Python 3.11. No third-party packages are required for the
+core listings; the optional route-table validator uses \texttt{pyyaml} when YAML
+input is desired (Section~\ref{sec:ch3-dependencies}). Everything in this chapter
+runs offline on a fresh Windows machine with PowerShell.
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch3-mechanics}
+
+\subsection{REST Is an Architectural Style, Not a Protocol}
+
+The single most consequential sentence in Fielding's dissertation is also the most
+ignored: REST is ``an architectural style for distributed hypermedia systems''
+\cite{fielding2000rest}. An \emph{architectural style}, in Fielding's formal usage,
+is a named, coordinated set of architectural constraints. A \emph{constraint} is a
+rule that restricts the design space --- it \emph{removes} options. Styles earn
+their keep because constraints, applied in combination, \emph{induce properties}:
+emergent, measurable qualities of the resulting system such as scalability,
+reliability, visibility, and evolvability.
+
+\begin{definition}[Architectural Style]
+An \emph{architectural style} is a coordinated set of constraints on the elements
+(components, connectors, data) of an architecture and on the relationships among
+them, chosen so that the constraints jointly induce a desired set of system
+properties. REST is one such style; pipe-and-filter, event-driven integration, and
+the layered monolith are others.
+\end{definition}
+
+Three practical consequences follow immediately:
+
+\begin{enumerate}
+  \item \textbf{REST is not HTTP.} HTTP is a transfer protocol whose design
+        \emph{embodies} many REST constraints (Fielding co-authored it
+        \cite{rfc9110}), which makes HTTP an unusually convenient substrate. But
+        REST could in principle be realized over another transfer mechanism, and
+        --- more importantly --- an HTTP API can violate every REST constraint
+        while remaining perfectly valid HTTP.
+  \item \textbf{``RESTful'' is gradated, not binary.} An API satisfies individual
+        constraints to a degree. The honest engineering question is never ``is it
+        REST?'' but ``which constraints does it honor, which does it trade away,
+        and was that trade deliberate?''
+  \item \textbf{Compliance is bought, not declared.} Each constraint has a cost
+        (for example, statelessness moves session data onto the wire; cacheability
+        risks staleness). The style is a negotiated exchange: constraints in,
+        properties out.
+\end{enumerate}
+
+\begin{keyconceptbox}
+REST is a \emph{style} (constraints $\rightarrow$ properties), not a protocol,
+product, or specification. ``JSON over HTTP'' describes two data formats in
+transit; it says nothing about architecture. An API is RESTful only insofar as it
+honors Fielding's constraints --- and the most commonly skipped one is the uniform
+interface's hypermedia clause.
+\end{keyconceptbox}
+
+\subsection{The Six Constraints, Formalized}
+\label{sec:ch3-constraints}
+
+Fielding derives REST incrementally, starting from the ``null style'' (no
+constraints) and adding one constraint at a time \cite{fielding2000rest}. We follow
+the same derivation, stating each constraint, its induced properties, and what it
+forbids.
+
+\subsubsection{Constraint 1: Client--Server}
+
+\textbf{Statement.} Separate the user-interface concerns (client) from the
+data-storage concerns (server) so that the two may evolve independently,
+communicating only through a well-defined interface.
+
+\textbf{Induced properties.} \emph{Portability} of the user interface across
+platforms; \emph{scalability} by simplification of server components; and, most
+valuably, \emph{independent evolvability} --- the server can change its storage
+technology, and the client its rendering technology, without coordination.
+
+\textbf{Forbids.} Shared-nothing violations in the small: the client may not reach
+into server storage (no database links exposed to consumers), and the server may
+not assume anything about client presentation.
+
+\subsubsection{Constraint 2: Statelessness}
+
+\begin{definition}[Statelessness (Fielding's sense)]
+Each request from client to server must contain all of the information necessary
+to understand the request, and cannot take advantage of any stored context on the
+server. \emph{Session state is therefore kept entirely on the client.}
+\end{definition}
+
+Note the precise meaning: the server may of course hold \emph{resource} state (the
+parts catalog itself). What it may not hold is \emph{session} state --- memory of
+where a particular client is in an interaction. A request authenticated with a
+bearer token, carrying its pagination cursor and all parameters, is stateless even
+though the token validates against server-side data.
+
+\textbf{Induced properties.} \emph{Visibility} (a monitoring system can understand
+a request in isolation), \emph{reliability} (recovery from partial failure: any
+request can simply be retried), and \emph{scalability} (no session affinity; any
+replica can serve any request, and memory is freed between requests).
+
+\textbf{Forbids.} Server-side session contexts, ``sticky'' conversational state,
+and protocols whose requests are only interpretable relative to previous requests
+on the same connection. The cost: repetitive data per request and reduced server
+control over consistent application behavior --- the classic trade Fielding
+acknowledges explicitly \cite{fielding2000rest}.
+
+\subsubsection{Constraint 3: Cacheability}
+
+\textbf{Statement.} The data within a response to a request must be implicitly or
+explicitly labeled as cacheable or non-cacheable.
+
+\textbf{Induced properties.} When a response is cacheable, a client cache may reuse
+it for later, equivalent requests: \emph{efficiency}, \emph{scalability}, and
+\emph{user-perceived performance} improve, sometimes by eliminating network
+interactions entirely. HTTP realizes this constraint with validators
+(\texttt{ETag}, \texttt{Last-Modified}) and freshness directives
+(\texttt{Cache-Control}) \cite{rfc9110}.
+
+\textbf{Forbids.} Ambiguity: a response that says nothing about its cacheability
+forces intermediaries to guess, and guessed caching is how stale inventory gets
+sold twice. The admitted risk is decreased \emph{reliability} if stale cached data
+differs significantly from what a direct request would have returned.
+
+\subsubsection{Constraint 4: Uniform Interface}
+
+This is the constraint that distinguishes REST from generic HTTP usage, and it
+decomposes into four sub-constraints \cite{fielding2000rest}:
+
+\begin{enumerate}
+  \item \textbf{Identification of resources.} Each resource is named by a stable
+        identifier (in HTTP, a URI). The resource is the conceptual entity; the
+        identifier is its name.
+  \item \textbf{Manipulation of resources through representations.} Clients never
+        touch the resource itself; they exchange \emph{representations} (e.g., a
+        JSON document) of its current or desired state. A representation plus its
+        metadata is sufficient to modify or delete the resource, given permission.
+  \item \textbf{Self-descriptive messages.} Each message carries enough metadata
+        (media type, method, status code, cache directives) to describe its own
+        processing. Intermediaries can act on messages without private knowledge.
+  \item \textbf{Hypermedia as the engine of application state (HATEOAS).} The
+        client navigates the application by following links and forms discovered
+        in representations --- not by constructing URIs from out-of-band
+        knowledge.
+\end{enumerate}
+
+\begin{definition}[Resource]
+A \emph{resource} is any named conceptual target of a hypertext reference: a
+document, a temporal service (``today's weather in Lodz''), a collection of other
+resources, a non-virtual object (a person), and so forth. A resource is a mapping
+to a set of entities; the set may vary over time, provided the \emph{semantics}
+of the mapping remain stable. ``The current price of part NX-1001'' is a fine
+resource even though its value changes hourly.
+\end{definition}
+
+\begin{definition}[Representation]
+A \emph{representation} is a sequence of bytes plus metadata (media type,
+validators, links) that captures the current or intended state of a resource at
+the time of a request. One resource admits many representations (JSON, CSV,
+HTML); representations are negotiated, not assumed.
+\end{definition}
+
+\textbf{Induced properties.} \emph{Simplicity} of the overall architecture,
+\emph{visibility} for intermediaries, and \emph{independent evolvability}, because
+implementations are decoupled from the services they access. \textbf{The cost is
+efficiency:} a uniform interface transfers information in a standardized form
+rather than a form specialized to one application's needs.
+
+\subsubsection{Constraint 5: Layered System}
+
+\textbf{Statement.} The architecture is composed of hierarchical layers; each
+component cannot ``see'' beyond the immediate layer with which it interacts.
+Intermediaries --- gateways, load balancers, shared caches, content delivery
+networks --- may be introduced at any layer without changing component semantics.
+
+\textbf{Induced properties.} \emph{Scalability} (load balancing, shared caching at
+organizational boundaries), \emph{security policy enforcement} at the edge, and
+\emph{legacy encapsulation}. \textbf{The cost} is added latency and data overhead
+per hop, which the cache constraint is expected to compensate for.
+
+\subsubsection{Constraint 6: Code-on-Demand (Optional)}
+
+\textbf{Statement.} The server may temporarily extend client functionality by
+transferring executable code (scripts, applets) which the client executes.
+
+\textbf{Induced properties.} \emph{Extensibility} and simplified clients (features
+deploy without client installation). \textbf{Forbids/reduces:} \emph{visibility}
+--- an intermediary cannot understand what arbitrary code will do --- which is
+precisely why Fielding marks this constraint optional. JavaScript delivered to
+browsers is its canonical realization; for machine-to-machine APIs it is almost
+always omitted.
+
+Figure~\ref{fig:ch3-layered} traces one conditional \texttt{GET} through a
+concrete layered deployment, annotating which constraint each layer exploits.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw, rounded corners, minimum width=2.55cm, minimum height=1.05cm,
+                align=center, font=\small, fill=blue!6},
+  ann/.style={font=\scriptsize\itshape, text=packtgray, align=center},
+  req/.style={->, thick, darkblue},
+  res/.style={->, thick, dashed, packtgray}
+]
+  \node[layer] (client)  at (0,0)    {Client};
+  \node[layer, right=1.15cm of client]  (edge) {Edge\\ gateway};
+  \node[layer, right=1.15cm of edge]    (cache) {Shared\\ cache};
+  \node[layer, right=1.15cm of cache]   (app)  {Catalog\\ service};
+  \node[layer, right=1.15cm of app]     (store){Resource\\ store};
+
+  \draw[req] (client) -- node[above, font=\scriptsize]
+    {GET \texttt{/parts/NX-1001}} (edge);
+  \draw[req] (edge) -- (cache);
+  \draw[req] (cache) -- node[above, font=\scriptsize]
+    {miss / revalidate} (app);
+  \draw[req] (app) -- node[above, font=\scriptsize] {query} (store);
+
+  \draw[res] (store.south) to[out=-35,in=-145]
+    node[below, font=\scriptsize] {representation + \texttt{ETag}} (app.south);
+  \draw[res] (cache.north) to[out=145,in=35]
+    node[above, font=\scriptsize] {304 / cached hit} (edge.north);
+
+  \node[ann, below=0.12cm of client] {session state\\ lives here};
+  \node[ann, below=0.12cm of edge]   {layered system:\\ auth, TLS, routing};
+  \node[ann, below=0.12cm of cache]  {cache constraint:\\ \texttt{ETag}, \texttt{Cache-Control}};
+  \node[ann, below=0.12cm of app]    {stateless:\\ any replica\\ serves any request};
+  \node[ann, below=0.12cm of store]  {resource state\\ (not session state)};
+\end{tikzpicture}
+\caption{Request lifecycle through a layered, constraint-compliant deployment.
+Each layer sees only its immediate neighbors (layered system); the shared cache
+short-circuits revalidation (cacheability); the service holds no session state
+(statelessness).}
+\label{fig:ch3-layered}
+\end{figure}
+
+Table~\ref{tab:ch3-constraints} summarizes the exchange each constraint offers.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Constraint} & \textbf{Induced properties} & \textbf{Cost / forbids} \\
+    \midrule
+    Client--server & portability, independent evolution & no shared storage access \\
+    Statelessness & visibility, reliability, scalability & repeated context per request \\
+    Cacheability & efficiency, perceived performance & staleness risk; must label responses \\
+    Uniform interface & simplicity, visibility, decoupling & less efficient than bespoke forms \\
+    Layered system & scalability, security at boundaries & per-hop latency \\
+    Code-on-demand (opt.) & extensibility, thin clients & reduced visibility \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Fielding's six constraints as an exchange: constraints in, properties out \cite{fielding2000rest}.}
+  \label{tab:ch3-constraints}
+\end{table}
+
+\subsection{``JSON over HTTP Is Not REST'': The Richardson Maturity Model}
+\label{sec:ch3-rmm}
+
+Because the industry adopted the word ``REST'' long before it absorbed Fielding's
+constraints, a corrective vocabulary became necessary. Leonard Richardson's
+\emph{Maturity Model} \cite{richardson2013restful} classifies HTTP APIs into four
+levels according to which web technologies they actually exploit. It is best read
+not as a moral hierarchy but as a diagnostic: each level names the constraints an
+API has \emph{started} to honor. Figure~\ref{fig:ch3-rmm} shows the ladder.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  lvl/.style={draw, rounded corners, minimum width=7.4cm, minimum height=1.15cm,
+              align=center, font=\small},
+  desc/.style={font=\scriptsize\itshape, text=packtgray, align=left}
+]
+  \node[lvl, fill=red!12] (l0) at (0,0)
+    {\textbf{Level 0 --- The Swamp of POX}\\ one URI, one method (POST), RPC payloads};
+  \node[lvl, fill=orange!14, anchor=south west]
+    at ($(l0.north east)+(1.0,0.5)$)
+    {\textbf{Level 1 --- Resources}\\ many URIs (nouns), still one method};
+  \node[lvl, fill=yellow!20, anchor=south west] (l2)
+    at ($(l1.north east)+(1.0,0.5)$)
+    {\textbf{Level 2 --- HTTP Verbs}\\ methods + status codes carry semantics};
+  \node[lvl, fill=green!16, anchor=south west] (l3)
+    at ($(l2.north east)+(1.0,0.5)$)
+    {\textbf{Level 3 --- Hypermedia}\\ HATEOAS: representations carry controls};
+  \draw[->, thick, packtgray] (l0.east) -- (l1.west);
+  \draw[->, thick, packtgray] (l1.east) -- (l2.west);
+  \draw[->, thick, packtgray] (l2.east) -- (l3.west);
+  \node[desc, anchor=north west] at ($(l0.south west)+(0,-0.15)$)
+    {RPC tunneling: HTTP as transport only};
+  \node[desc, anchor=south east] at ($(l3.north east)+(0,0.15)$)
+    {Full uniform interface \cite{fielding2000rest}};
+\end{tikzpicture}
+\caption{The Richardson Maturity Model. Each step adopts one more web
+technology: resource URIs, then HTTP method/status semantics, then hypermedia
+controls \cite{richardson2013restful}.}
+\label{fig:ch3-rmm}
+\end{figure}
+
+\subsubsection{Level 0: The Swamp of POX}
+
+A single endpoint receives every operation; the HTTP method and status code carry
+no application meaning. This is HTTP used as a tunnel --- SOAP and many legacy
+``XML-RPC over HTTP'' services live here.
+
+\begin{minted}{text}
+POST /rpc HTTP/1.1
+Content-Type: application/json
+
+{"action": "getPart", "sku": "NX-1001"}
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status": "ok", "part": {"sku": "NX-1001", "name": "Servo Motor 12V"}}
+
+POST /rpc HTTP/1.1
+Content-Type: application/json
+
+{"action": "getPart", "sku": "NOPE"}
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status": "error", "message": "part not found"}
+\end{minted}
+
+Every failure is a \texttt{200 OK}; no proxy, cache, or monitoring tool can
+distinguish success from failure, safe from unsafe. Nothing about the interaction
+is visible to the web's infrastructure.
+
+\subsubsection{Level 1: Resources}
+
+The API introduces individually addressable resources --- URIs are nouns --- but
+still tunnels all operations through one method.
+
+\begin{minted}{text}
+POST /parts/NX-1001 HTTP/1.1
+Content-Type: application/json
+
+{"action": "restock", "quantity": 40}
+
+HTTP/1.1 200 OK
+{"status": "ok", "stock": 180}
+\end{minted}
+
+Resources now exist as first-class addressable things (a genuine improvement:
+URIs can be bookmarked, logged, and secured individually), but safety,
+idempotency, and cacheability semantics remain unavailable because every request
+is a \texttt{POST}.
+
+\subsubsection{Level 2: HTTP Verbs}
+
+Methods and status codes are used as RFC 9110 intends \cite{rfc9110}: \texttt{GET}
+for retrieval (safe, cacheable), \texttt{PUT}/\texttt{PATCH} for update,
+\texttt{DELETE} for removal, \texttt{POST} for subordinate creation, with status
+codes that tell the truth.
+
+\begin{minted}{text}
+GET /parts/NX-1001 HTTP/1.1
+Accept: application/json
+
+HTTP/1.1 200 OK
+ETag: "v3-9f2c"
+Content-Type: application/json
+
+{"sku": "NX-1001", "name": "Servo Motor 12V", "stock": 140}
+
+GET /parts/NOPE HTTP/1.1
+
+HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+
+{"type": "about:blank", "title": "Not Found", "status": 404,
+ "detail": "No part with sku 'NOPE' exists."}
+\end{minted}
+
+Level 2 is where caches, conditional requests, idempotent retries, and honest
+monitoring become possible. The overwhelming majority of well-run production APIs
+live here.
+
+\subsubsection{Level 3: Hypermedia Controls (HATEOAS)}
+
+Representations carry \emph{controls} --- links and forms --- that advertise the
+client's legal next steps, so application state is driven by server-supplied
+hypermedia rather than client-side URI construction \cite{rfc8288}.
+
+\begin{minted}{json}
+{
+  "sku": "NX-1001",
+  "name": "Servo Motor 12V",
+  "stock": 140,
+  "_links": {
+    "self":      { "href": "/parts/NX-1001" },
+    "collection":{ "href": "/parts" },
+    "category":  { "href": "/categories/actuators" },
+    "restock":   { "href": "/parts/NX-1001/stock-adjustments",
+                   "method": "POST",
+                   "title": "Record a stock adjustment" }
+  }
+}
+\end{minted}
+
+A Level 3 client that needs to restock a part does not \emph{know} the adjustment
+URI; it discovers it. The server can therefore restructure its URI space ---
+insert a gateway, shard by region, rename collections --- without breaking
+clients, because clients treat URIs as opaque (Section~\ref{sec:ch3-uri-grammar}).
+Section~\ref{sec:ch3-hateoas} examines why this highest level remains rare and
+when it is worth the investment.
+
+\begin{warningbox}
+Richardson's levels are diagnostic, not aspirational dogma. Level 3 buys
+evolvability at real cost in tooling and client complexity. The engineering sin is
+not stopping at Level 2; it is calling a Level 0 service ``RESTful'' and thereby
+importing expectations (caches, safe retries, intermediaries) the service cannot
+meet.
+\end{warningbox}
+
+%% ---------------------------------------------------------------------------
+\subsection{Resource Modeling Discipline}
+\label{sec:ch3-resources}
+
+REST's central design act is deciding \emph{what the things are}. Get the resource
+model right and methods, status codes, caching, and security policies fall into
+place; get it wrong and no amount of framework sophistication will save the API.
+
+\subsubsection{Nouns, Not Verbs}
+
+A resource URI names a \emph{thing} (a noun); the HTTP method supplies the
+\emph{operation} (the verb). The discipline exists because the uniform interface
+already provides a fixed, universally understood verb vocabulary --- embedding
+verbs in URIs duplicates that vocabulary with an unbounded, vendor-specific one,
+destroying visibility: \texttt{GET /getPart?id=7} tells an intermediary nothing
+about safety, while \texttt{GET /parts/NX-1001} declares itself safe and cacheable
+by construction.
+
+When a domain concept genuinely \emph{is} an action (``restock,'' ``authorize,''
+``translate''), the RESTful resolution is to \emph{reify the action's result} as a
+resource: instead of \texttt{POST /parts/NX-1001/restock}, create
+\texttt{POST /parts/NX-1001/stock-adjustments} --- each adjustment is a record
+with its own identity, audit trail, and lifecycle. The verb becomes a noun, and
+the audit log you would have built anyway becomes the resource.
+
+\subsubsection{The Four Resource Archetypes}
+
+Following the taxonomy popularized by Mass\'e's \emph{REST API Design Rulebook}
+(see Section~\ref{sec:ch3-bibliography}), resources come in four archetypes:
+
+\begin{itemize}
+  \item \textbf{Document} --- a singular, object-like resource:
+        \texttt{/parts/NX-1001}. The REST analogue of a row or object instance.
+  \item \textbf{Collection} --- a server-managed directory of documents:
+        \texttt{/parts}. Clients \texttt{GET} it; \texttt{POST} proposes new
+        members.
+  \item \textbf{Store} --- a \emph{client}-managed resource repository: the
+        client decides when an entry is created, updated, or deleted
+        (\texttt{PUT /parts/NX-1001} with a client-chosen SKU is store-like).
+  \item \textbf{Controller} --- the sanctioned escape hatch: a verb-like resource
+        standing in for an operation that cannot be reified:
+        \texttt{POST /catalog/exports} (creates an export job) is better modeled
+        as a collection of \emph{jobs}; \texttt{POST /password-resets} similarly
+        turns a procedure into a resource. Use controllers only when reification
+        fails.
+\end{itemize}
+
+\subsubsection{Sub-Resources and Relationship Modeling}
+
+Hierarchy in the path should express \emph{containment} or \emph{ownership} that
+outlives either participant's individual addressing: a stock level exists only in
+the context of a warehouse \emph{and} a part, so
+\texttt{/warehouses/WH-01/stock/NX-1001} is defensible. Independent aggregates
+with their own lifecycles deserve top-level URIs linked by hypermedia or foreign
+identifiers, not deep nesting:
+
+\begin{minted}{text}
+GET /warehouses/WH-01                       # document
+GET /warehouses/WH-01/stock                 # collection scoped by parent
+GET /warehouses/WH-01/stock/NX-1001         # sub-resource (contained)
+GET /purchase-orders?warehouse=WH-01        # relationship via query filter
+GET /purchase-orders/PO-2026-0417           # independent aggregate, top level
+\end{minted}
+
+Rule of thumb, enforced by the linter in Listing~\ref{lst:ch3-urilint}: nest at
+most two levels. Beyond that, prefer a top-level collection with a query filter.
+Deep paths encode a \emph{single} navigational path into a graph that has many;
+they ossify one query pattern and complicate authorization, caching keys, and
+refactoring. Figure~\ref{fig:ch3-resources} shows the resource graph for the
+Northwind Robotics warehouse domain developed in the lab
+(Section~\ref{sec:ch3-lab}): solid edges are containment (path hierarchy),
+dashed edges are associations (query filters or hypermedia links).
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  coll/.style={draw, rounded corners, fill=green!12, minimum width=3.1cm,
+               minimum height=0.85cm, font=\small\ttfamily, align=center},
+  doc/.style={draw, rounded corners, fill=blue!8, minimum width=3.1cm,
+              minimum height=0.85cm, font=\small\ttfamily, align=center},
+  sub/.style={draw, rounded corners, fill=yellow!18, minimum width=3.6cm,
+              minimum height=0.85cm, font=\small\ttfamily, align=center},
+  owns/.style={->, thick, packtgray},
+  assoc/.style={->, thick, dashed, darkblue}
+]
+  \node[coll] (warehouses)  at (0,0)     {/warehouses};
+  \node[doc,   right=2.9cm of warehouses] (warehouse) {/warehouses/\{wid\}};
+  \node[sub,   below=1.35cm of warehouse] (stock)
+    {/warehouses/\{wid\}/stock};
+  \node[coll,  below=1.35cm of warehouses] (parts) {/parts};
+  \node[doc,   right=2.9cm of parts]      (part) {/parts/\{sku\}};
+  \node[coll,  below=1.35cm of parts]     (pos) {/purchase-orders};
+  \node[doc,   right=2.9cm of pos]        (po) {/purchase-orders/\{poid\}};
+
+  \draw[owns] (warehouses) -- node[above, font=\scriptsize\itshape]{contains} (warehouse);
+  \draw[owns] (warehouse) -- node[right, font=\scriptsize\itshape]{scopes} (stock);
+  \draw[owns] (parts) -- node[above, font=\scriptsize\itshape]{contains} (part);
+  \draw[owns] (pos) -- node[above, font=\scriptsize\itshape]{contains} (po);
+  \draw[assoc] (stock.west) to[out=180,in=90]
+    node[left, font=\scriptsize\itshape, align=center]{identifies part\\ (foreign key)} (parts.north);
+  \draw[assoc] (po.north) to[out=90,in=-90]
+    node[right, font=\scriptsize\itshape, align=center]{ships to\\ \texttt{?warehouse=}} (warehouse.south);
+  \draw[assoc] (po.south) to[out=-90,in=0]
+    node[below, font=\scriptsize\itshape, align=center]{orders parts\\ \texttt{?part=}} (part.south);
+\end{tikzpicture}
+\caption{Resource-relationship graph for the Northwind Robotics warehouse
+domain. Containment (solid) appears in the path; independent aggregates
+(purchase orders) get top-level URIs and relate via query filters and links
+(dashed), keeping nesting at or below two levels.}
+\label{fig:ch3-resources}
+\end{figure}
+
+\subsubsection{URI Design Grammar}
+\label{sec:ch3-uri-grammar}
+
+A URI decomposes as \texttt{scheme://authority/path?query\#fragment}; path
+segments left-to-right descend a hierarchy. Production conventions, settled with
+arguments rather than taste:
+
+\begin{itemize}
+  \item \textbf{Hierarchy.} Forward slashes express containment;
+        \texttt{/warehouses/WH-01/stock} reads as a path \emph{into} the domain.
+        Do not use hierarchy to encode \emph{queries}: filters belong after
+        \texttt{?}.
+  \item \textbf{Casing.} Lowercase \emph{kebab-case} for multi-word segments
+        (\texttt{/purchase-orders}). URIs are case-sensitive per RFC 9110
+        \cite{rfc9110}, but hosts and humans are not; camelCase paths
+        (\texttt{/purchaseOrders}) produce duplicate-resource bugs behind
+        case-insensitive proxies and normalize differently across gateways.
+        Kebab-case is also what Zalando's and Microsoft's published guidelines
+        converge on (Section~\ref{sec:ch3-bibliography}).
+  \item \textbf{Pluralization.} The honest answer: the debate is noise; the
+        invariant is \emph{consistency}. Plural collections win on three
+        arguments: (1) the collection URI \texttt{/parts} and the document URI
+        \texttt{/parts/NX-1001} then share a stem, making containment legible;
+        (2) plural reads correctly for both \texttt{GET /parts} (many) and
+        \texttt{GET /parts/NX-1001} (one member \emph{of} many); (3) singular
+        resources remain expressible as singleton documents
+        (\texttt{/catalog/profile}) without forcing every collection into
+        grammatical contortions. Mixed schemes (\texttt{/part/NX-1001} but
+        \texttt{/warehouses}) are the only unambiguously wrong answer, and the
+        linter in Section~\ref{sec:ch3-code} treats them as defects.
+  \item \textbf{Trailing slashes.} \texttt{/parts} and \texttt{/parts/} are
+        \emph{different URIs} \cite{rfc9110}; permitting both doubles cache keys
+        and splits analytics. Pick the bare form, and answer the slashed form
+        with \texttt{301 Moved Permanently} --- a redirect is cacheable and
+        self-healing; silent aliasing is not.
+  \item \textbf{Query versus path.} Path segments identify; query parameters
+        \emph{modulate}: filtering (\texttt{?category=sensors}), sorting
+        (\texttt{?sort=-unitPrice}), pagination (\texttt{?cursor=...}), partial
+        representation (\texttt{?fields=sku,name}). If removing the parameter
+        changes \emph{which} resource is addressed, it belongs in the path; if it
+        changes only \emph{how much} or \emph{which view} of that resource is
+        returned, it belongs in the query.
+\end{itemize}
+
+\subsubsection{URI Opacity}
+
+\begin{definition}[URI Opacity]
+Clients must treat URIs as opaque identifiers: they may store, compare, and
+dereference them, but must not parse, construct, or infer semantics from their
+internal structure. Knowledge of how to \emph{form} a URI lives on the server and
+is communicated through hypermedia or (pragmatically) a versioned contract such
+as OpenAPI \cite{openapi31}.
+\end{definition}
+
+Opacity is what makes Level 3 restructuring safe and what makes even Level 2 APIs
+evolvable: the day a client string-templates \texttt{/parts/} + sku, your URI
+grammar has become an unchangeable public contract whether you intended it or
+not. Fielding's formulation is blunt --- the only types of URI a RESTful system
+may mint are those embedded in representations or constructed through
+server-supplied templates \cite{fielding2000rest}.
+
+%% ---------------------------------------------------------------------------
+\subsection{Uniform Interface Semantics}
+\label{sec:ch3-uniform}
+
+\subsubsection{Safety and Idempotency}
+
+RFC 9110 assigns every standard method two formal properties
+\cite{rfc9110}. \emph{Safety} means the request is essentially read-only: the
+client does not request, and cannot be held accountable for, any state change.
+\emph{Idempotency} means the intended effect of multiple identical requests is
+the same as that of a single request --- the property that makes automatic
+retries of timed-out requests a sound engineering decision rather than a gamble.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c X}
+    \toprule
+    \textbf{Method} & \textbf{Safe} & \textbf{Idempotent} & \textbf{Typical semantics on \texttt{/parts}} \\
+    \midrule
+    GET     & yes & yes & retrieve a representation; cacheable by default \\
+    HEAD    & yes & yes & GET without the body; metadata probe \\
+    OPTIONS & yes & yes & discover allowed methods (\texttt{Allow}) \\
+    POST    & no  & no  & create subordinate; server assigns identity \\
+    PUT     & no  & yes & full replacement (or creation) at a known URI \\
+    PATCH   & no  & no\,\textsuperscript{*} & partial modification; semantics defined by media type \\
+    DELETE  & no  & yes & remove; repeating yields 404, state unchanged \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Method properties per RFC 9110 \cite{rfc9110}.
+  \textsuperscript{*}\,PATCH is not \emph{guaranteed} idempotent, but a specific
+  patch document applied twice usually is --- design for it when you can.}
+  \label{tab:ch3-methods}
+\end{table}
+
+Idempotency is defined over \emph{server state}, not responses: repeating
+\texttt{DELETE /parts/NX-1001} returns 404 the second time, yet the method is
+idempotent because the resulting state (no such part) is identical. This is why
+load balancers and client libraries may transparently retry idempotent methods
+and must never transparently retry \texttt{POST}.
+
+\subsubsection{Status Codes for the CRUD Lifecycle}
+
+Status codes are the server's half of the uniform interface: they let generic
+components --- caches, gateways, monitors, retry loops --- react correctly
+without private knowledge. Table~\ref{tab:ch3-status} gives the lifecycle map
+used throughout this book \cite{rfc9110}.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Transition} & \textbf{Success} & \textbf{Failure semantics} \\
+    \midrule
+    Create (POST/PUT) & 201 + \texttt{Location} &
+      400 invalid body; 409 conflict (duplicate SKU); 415 wrong media type; 422 semantically invalid \\
+    Read (GET)        & 200 (304 on conditional hit) &
+      404 unknown resource; 410 permanently retired; 406 no acceptable representation \\
+    Replace (PUT)     & 200 or 204 (201 if created) &
+      412 precondition failed (\texttt{If-Match} mismatch); 409 concurrent-edit conflict; 400/422 invalid \\
+    Modify (PATCH)    & 200 or 204 &
+      400 malformed patch document; 409 conflicting state; 422 patch not applicable; 415 wrong patch media type \\
+    Remove (DELETE)   & 204 (200 with body) &
+      404 already absent; 409 referenced by other resources \\
+    Any               & --- &
+      405 method not allowed (+ \texttt{Allow} header); 429 rate limited; 500/503 server-side \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Precise status codes for CRUD lifecycles. 404 in response to DELETE
+  is informative, not an error the client must handle differently; 204 versus
+  200 signals whether the response carries a representation.}
+  \label{tab:ch3-status}
+\end{table}
+
+Two habits deserve special emphasis. First, \texttt{201 Created} without a
+\texttt{Location} header is half an answer: the client learns \emph{that} a
+resource was created but not \emph{where} it lives. Second, conditional requests
+--- \texttt{If-None-Match} on GET (yielding \texttt{304 Not Modified}) and
+\texttt{If-Match} on PUT/DELETE (yielding \texttt{412 Precondition Failed} on
+mismatch) --- turn caching and optimistic concurrency from application-level
+schemes into generic HTTP machinery that every intermediary already understands
+\cite{rfc9110}. Listing~\ref{lst:ch3-catalog} implements both.
+
+\subsubsection{PUT versus PATCH: Replacement versus Modification}
+
+\texttt{PUT} is \emph{full replacement}: the enclosed representation becomes the
+new state of the resource; omitted fields are reset, not preserved. It is
+idempotent by construction. \texttt{PATCH} is \emph{partial modification}:
+the body describes a \emph{change}, and its semantics are defined by the patch
+media type. Two standardized patch formats dominate:
+
+\begin{itemize}
+  \item \textbf{JSON Merge Patch (RFC 7386).} The patch is itself a JSON
+        document; it is recursively merged into the target: provided members
+        replace, \texttt{null} members are \emph{removed}, absent members are
+        untouched. Trivial to produce (any JSON object is a valid patch), but
+        arrays are replaced wholesale and \texttt{null} can never be a stored
+        value --- you cannot distinguish ``absent'' from ``set to null.''
+\begin{minted}{json}
+PATCH /parts/NX-1001        Content-Type: application/merge-patch+json
+{ "unitPrice": { "currency": "USD", "amountCents": 2799 }, "legacyNote": null }
+\end{minted}
+  \item \textbf{JSON Patch (RFC 6902).} The patch is an \emph{array of
+        operations} --- \texttt{add}, \texttt{remove}, \texttt{replace},
+        \texttt{move}, \texttt{copy}, \texttt{test} --- applied in order with
+        transaction semantics: if any operation fails, none is applied. The
+        \texttt{test} operation doubles as a lightweight precondition
+        (``apply only if \texttt{/stock} is still 140''). Verbose, but precise,
+        array-aware, and atomically safe.
+\begin{minted}{json}
+PATCH /parts/NX-1001        Content-Type: application/json-patch+json
+[
+  { "op": "test",    "path": "/stock", "value": 140 },
+  { "op": "replace", "path": "/stock", "value": 180 }
+]
+\end{minted}
+\end{itemize}
+
+Choose Merge Patch for forgiving, human-authored configuration updates; choose
+JSON Patch for collaborative, concurrent editing where atomicity and
+preconditions matter. Chapter 10 develops idempotency and concurrency control
+in depth.
+
+\subsubsection{Content Negotiation in Resource Design}
+
+Because resources are manipulated \emph{through representations}, the same
+resource may be rendered as JSON, CSV, or a vendor-specific media type. Server
+driven negotiation uses the \texttt{Accept} header with quality values; the
+server answers with the best available representation or \texttt{406 Not
+Acceptable} \cite{rfc9110}:
+
+\begin{minted}{text}
+GET /parts HTTP/1.1
+Accept: application/hal+json;q=1.0, text/csv;q=0.5
+
+HTTP/1.1 200 OK
+Content-Type: application/hal+json
+Vary: Accept
+\end{minted}
+
+Design consequences: (1) always send \texttt{Vary: Accept} so shared caches key
+variants separately; (2) negotiate \emph{format}, not \emph{semantics} --- a
+\texttt{text/csv} rendering of \texttt{/parts} must describe the same resource
+state, merely shaped differently; (3) media-type parameters
+(\texttt{application/vnd.northwind.part+json;version=2}) are a legitimate
+versioning surface, examined against URI versioning in Chapter 9.
+
+%% ---------------------------------------------------------------------------
+\subsection{HATEOAS and Hypermedia}
+\label{sec:ch3-hateoas}
+
+\subsubsection{Links and Affordances}
+
+RFC 8288 standardizes \emph{web linking}: typed links between resources,
+serializable in \texttt{Link} headers or in the body, each carrying a relation
+type (\texttt{rel}) that names its semantics (\texttt{self}, \texttt{next},
+\texttt{edit}, or an extension relation) \cite{rfc8288}. A link is a
+\emph{navigation affordance}; a link plus method plus expected payload (HAL
+forms, Collection+JSON templates) is an \emph{action affordance} --- the
+hypermedia equivalent of an HTML form. Together they let the server, at runtime,
+advertise the client's legal state transitions: the \texttt{restock} link in our
+earlier example can simply be \emph{absent} when the part is discontinued, and
+the client needs no `if discontinued` logic.
+
+\subsubsection{Three Hypermedia Media Types Compared}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X}
+    \toprule
+    & \textbf{HAL} & \textbf{JSON:API} & \textbf{Collection+JSON} \\
+    \midrule
+    Media type & \texttt{application/hal+json} & \texttt{application/vnd.api+json} & \texttt{application/vnd.collection+json} \\
+    Core model & \texttt{\_links}, \texttt{\_embedded}, curies & \texttt{data}/\texttt{attributes}/\texttt{relationships}, compound documents & collection of items + \texttt{queries} + write \texttt{template} \\
+    Write support & out of scope (HAL Forms extension) & full CRUD semantics specified & template-driven POST/PUT bodies \\
+    Philosophy & minimalism; bring your own conventions & opinionated full protocol (pagination, errors, sparse fields) & pure hypermedia; the representation \emph{is} the contract \\
+    Best fit & adding links to an existing JSON API & greenfield APIs wanting everything standardized & reference designs, hypermedia research, generic clients \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Hypermedia media types for JSON APIs (see Section~\ref{sec:ch3-bibliography}).}
+  \label{tab:ch3-hypermedia}
+\end{table}
+
+HAL is the pragmatic minimum: two reserved members buy link-driven navigation
+with near-zero disruption \cite{rfc8288}. JSON:API standardizes nearly every
+recurring design decision --- pagination, filtering, error objects, compound
+documents --- which eliminates bikeshedding across teams but constrains resource
+shapes. Collection+JSON is the purest realization of Fielding's constraint: its
+\texttt{template} tells clients how to \emph{write} without any out-of-band
+schema.
+
+\subsubsection{Why Hypermedia Is Rare, and When It Pays Off}
+
+Honesty about adoption matters for engineering judgment. Hypermedia APIs are
+rare because (1) most API consumers are first-party web and mobile clients whose
+release cadence matches the server's, so compile-time coupling to URIs is
+tolerable; (2) mainstream tooling (OpenAPI generators, SDK pipelines) is built
+around static contracts, not runtime-discovered affordances; (3) hypermedia
+shifts complexity onto client authors, who must write generic link-followers
+instead of calling endpoints. Hypermedia pays off when the cost asymmetry
+flips: long-lived public APIs whose servers must restructure without breaking
+integrations they do not control; workflow-heavy domains (order state machines,
+approval chains) where the legal next actions genuinely vary per state; and
+generic clients (crawlers, API browsers, agentic consumers) that cannot embed
+per-API path knowledge. The professional default for this book: Level 2 with
+\emph{selective} hypermedia --- \texttt{self}/\texttt{next}/\texttt{prev}
+pagination links and state-transition links on workflow resources --- capturing
+most of the evolvability at a fraction of the cost
+\cite{richardson2013restful}.
+
+%% ---------------------------------------------------------------------------
+\subsection{Representation Design}
+\label{sec:ch3-representations}
+
+\subsubsection{Embedding versus Linking}
+
+Should \texttt{GET /purchase-orders/PO-2026-0417} embed its line items, link to
+them, or both? Embedding saves round trips and atomicity of read; linking saves
+payload size, enables independent caching and freshness per resource, and keeps
+the representation stable as the related collection grows. The disciplined
+default: embed \emph{identity and summary} (id, name, and a link) of related
+resources; offer full embedding behind an explicit opt-in
+(\texttt{?embed=lines}) so the base representation stays small and cacheable.
+Never embed unbounded collections in a document representation --- that is a
+pagination accident waiting to happen (Chapter 8).
+
+\subsubsection{Partial Representations}
+
+Sparse fieldsets (\texttt{?fields=sku,name}) let bandwidth-sensitive clients
+(mobile, high-fan-out aggregators) pay only for what they render. Keep the
+mechanism simple, deterministic, and documented in the contract; projection must
+never change \emph{which} resource is addressed --- that is what paths are for.
+
+\subsubsection{API Is Not Database Schema: Anti-Corruption Thinking}
+
+The fastest way to freeze your database forever is to serialize it. When
+\texttt{GET /parts/NX-1001} is an \texttt{ORM} object passed through a JSON
+encoder, every column rename, normalization, or storage migration becomes a
+breaking API change --- and every breaking API change is now a schema change
+negotiated with every consumer. The corrective is an \emph{anti-corruption
+layer}: a deliberate translation between the storage model and the published
+representation. The catalog in Section~\ref{sec:ch3-code} stores
+\texttt{unit\_price\_cents} (an integer) but publishes a structured
+\texttt{unitPrice} object with currency --- the representation is designed for
+consumers, the storage column for accountants, and neither dictates the other.
+Kleppmann's treatment of schema evolution gives the theoretical grounding:
+systems evolve safely when writers and readers are decoupled by explicit
+encodings with defined compatibility rules \cite{kleppmann2017ddia}.
+
+\subsubsection{Evolution-Friendly Representations}
+
+Four rules carry most of the weight \cite{gehl2021apidesign}: (1) \emph{additive
+only} --- new optional fields are safe; removing or renaming fields is a
+breaking change requiring a version transition (Chapter 9); (2) \emph{tolerant
+readers} --- clients must ignore unknown members, and the contract must say so;
+(3) \emph{never reuse names} --- a retired field's name stays retired, or old
+clients will misread new data; (4) \emph{explicit nulls and enums} --- document
+whether absent and null differ, and treat enum extension as a breaking change
+for strict consumers. Applied consistently, these rules let a Level 2 API evolve
+for years without version banners.
+
+%% ---------------------------------------------------------------------------
+\subsection{API as a Product}
+\label{sec:ch3-product}
+
+An API is a product whose customers are developers. Consumer-first design
+inverts the usual implementation order: write the contract a consumer would
+\emph{want} to integrate against \emph{before} writing the code that fulfills
+it. The design-first workflow is concrete: draft the OpenAPI 3.1 document
+\cite{openapi31}; review it with a representative consumer; lint it against the
+organization's style guide; generate mocks so consumers can integrate against
+the contract immediately; only then implement, with the contract driving tests
+(Chapters 4 and 19). Consistency at scale is a governance problem, not a talent
+problem: published style guides (Zalando, Microsoft --- see
+Section~\ref{sec:ch3-bibliography}), automated linting in CI, and a review gate
+for contract changes turn ``we value consistency'' from a sentiment into a
+mechanism \cite{gehl2021apidesign}. The API Design Patterns corpus
+\cite{gehl2021apidesign} catalogues the recurring decisions --- resource layout,
+pagination tokens, long-running operations --- that such governance should
+standardize once and reuse everywhere.
+
+%% ---------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch3-code}
+
+The three listings in this section are complete, typed, and runnable offline on
+Python 3.11+ with no third-party dependencies. All data is synthetic, drawn from
+the fictional Northwind Robotics universe. Run each from PowerShell, e.g.
+\texttt{python catalog\_api.py -{}-selftest}.
+
+\subsection{A Stdlib-Only REST Mini-Framework: The Parts Catalog}
+
+Listing~\ref{lst:ch3-catalog} implements the catalog domain on nothing but
+\texttt{http.server}. It is deliberately framework-free so that every constraint
+is visible in code: statelessness (no session state exists anywhere), the uniform
+interface (method dispatch, status codes, \texttt{Allow} headers), cacheability
+(ETags, conditional requests, \texttt{Cache-Control}), self-descriptive messages
+(\texttt{Content-Type}, content negotiation, \texttt{Vary}), and layered-system
+friendliness (it speaks plain HTTP intermediaries can cache and route).
+
+\begin{minted}{python}
+"""Northwind Robotics parts catalog API (stdlib-only, offline).
+
+Demonstrates Fielding's constraints without frameworks:
+  * uniform interface  - correct methods, status codes, Allow headers
+  * cacheability       - ETag, If-None-Match (304), If-Match (412),
+                         Cache-Control on every representation
+  * statelessness      - zero session state; every request self-contained
+  * self-descriptiveness - content negotiation (JSON / CSV), Vary: Accept
+
+Python 3.11+. Run:
+    python catalog_api.py --selftest     # deterministic in-process checks
+    python catalog_api.py --port 8080    # serve; try curl.exe -i ...
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import logging
+import re
+from dataclasses import dataclass
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+logger = logging.getLogger("northwind.catalog")
+
+# --------------------------------------------------------------------------
+# Domain layer (anti-corruption: storage shape != representation shape)
+# --------------------------------------------------------------------------
+
+SKU_PATTERN = re.compile(r"^[A-Z]{2}-\d{4}$")
+VALID_CATEGORIES = {"actuators", "sensors", "frames", "mobility"}
+
+
+class ValidationError(Exception):
+    """Raised when a representation fails boundary validation (400)."""
+
+
+class ConflictError(Exception):
+    """Raised when a write conflicts with existing state (409)."""
+
+
+@dataclass
+class Part:
+    sku: str
+    name: str
+    category: str
+    unit_price_cents: int
+    stock: int
+    version: int = 1
+
+    def to_representation(self) -> dict[str, Any]:
+        # Published shape is designed for consumers, not for the table:
+        # money is a structured object; the storage column is an int.
+        return {
+            "sku": self.sku,
+            "name": self.name,
+            "category": self.category,
+            "unitPrice": {
+                "currency": "USD",
+                "amountCents": self.unit_price_cents,
+            },
+            "stock": self.stock,
+        }
+
+
+def parse_part(body: bytes, *, sku_from_path: str | None = None) -> Part:
+    """Validate a client representation into a Part. Fail fast, specifically."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"request body is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValidationError("request body must be a JSON object")
+
+    price = data.get("unitPrice")
+    if not isinstance(price, dict) or not isinstance(
+        price.get("amountCents"), int
+    ):
+        raise ValidationError("unitPrice.amountCents (integer) is required")
+    if price["amountCents"] < 0:
+        raise ValidationError("unitPrice.amountCents must be >= 0")
+
+    name = data.get("name")
+    category = data.get("category")
+    stock = data.get("stock")
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError("name (non-empty string) is required")
+    if category not in VALID_CATEGORIES:
+        raise ValidationError(
+            f"category must be one of {sorted(VALID_CATEGORIES)}"
+        )
+    if not isinstance(stock, int) or stock < 0:
+        raise ValidationError("stock (integer >= 0) is required")
+
+    sku = sku_from_path or data.get("sku", "")
+    if not SKU_PATTERN.match(sku):
+        raise ValidationError("sku must match pattern AA-0000")
+    if sku_from_path and data.get("sku") not in (None, sku_from_path):
+        raise ValidationError("body sku must match the URI sku")
+
+    return Part(
+        sku=sku,
+        name=name.strip(),
+        category=category,
+        unit_price_cents=price["amountCents"],
+        stock=stock,
+    )
+
+
+class CatalogStore:
+    """In-memory repository seeded with deterministic synthetic data."""
+
+    def __init__(self) -> None:
+        self._parts: dict[str, Part] = {}
+        self._seed()
+
+    def _seed(self) -> None:
+        for part in (
+            Part("NX-1001", "Servo Motor 12V", "actuators", 2599, 140),
+            Part("NX-1002", "LIDAR Module R2", "sensors", 18999, 32),
+            Part("NX-1003", "Aluminum Chassis Plate", "frames", 7450, 58),
+            Part("NX-1004", "Omni Wheel 96mm", "mobility", 3250, 210),
+        ):
+            self._parts[part.sku] = part
+
+    def list(self, category: str | None = None) -> list[Part]:
+        parts = sorted(self._parts.values(), key=lambda p: p.sku)
+        if category is not None:
+            parts = [p for p in parts if p.category == category]
+        return parts
+
+    def get(self, sku: str) -> Part | None:
+        return self._parts.get(sku)
+
+    def create(self, part: Part) -> None:
+        if part.sku in self._parts:
+            raise ConflictError(f"part {part.sku} already exists")
+        self._parts[part.sku] = part
+
+    def replace(self, sku: str, part: Part) -> bool:
+        """PUT semantics: full replacement. Returns True if it existed."""
+        existed = sku in self._parts
+        old = self._parts.get(sku)
+        part.version = (old.version + 1) if old else 1
+        self._parts[sku] = part
+        return existed
+
+    def delete(self, sku: str) -> bool:
+        return self._parts.pop(sku, None) is not None
+
+
+# --------------------------------------------------------------------------
+# HTTP layer
+# --------------------------------------------------------------------------
+
+COLLECTION_RE = re.compile(r"^/parts$")
+DOCUMENT_RE = re.compile(r"^/parts/(?P<sku>[A-Za-z0-9-]+)$")
+JSON = "application/json"
+CSV = "text/csv"
+
+
+def etag_for(part: Part) -> str:
+    digest = hashlib.sha256(
+        json.dumps(part.to_representation(), sort_keys=True).encode()
+    ).hexdigest()[:12]
+    return f'"p{part.version}-{digest}"'
+
+
+def negotiate(accept: str | None) -> str | None:
+    """Pick the best supported media type, honoring q-values. None => 406."""
+    if not accept or accept.strip() in ("", "*/*"):
+        return JSON
+    best: tuple[float, str] | None = None
+    for item in accept.split(","):
+        media, _, params = item.partition(";")
+        media = media.strip().lower()
+        quality = 1.0
+        for param in params.split(";"):
+            key, _, value = param.partition("=")
+            if key.strip() == "q":
+                try:
+                    quality = float(value)
+                except ValueError:
+                    quality = 0.0
+        if media in (JSON, CSV) and quality > 0:
+            if best is None or quality > best[0]:
+                best = (quality, media)
+    return best[1] if best else None
+
+
+def to_csv(reps: list[dict[str, Any]]) -> bytes:
+    lines = ["sku,name,category,unit_price_cents,stock"]
+    for r in reps:
+        name = r["name"].replace('"', '""')
+        lines.append(
+            f'{r["sku"]},"{name}",{r["category"]},'
+            f'{r["unitPrice"]["amountCents"]},{r["stock"]}'
+        )
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+class CatalogHandler(BaseHTTPRequestHandler):
+    server_version = "NorthwindCatalog/1.0"
+    store: CatalogStore  # injected by make_server
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        logger.info("%s - %s", self.address_string(), fmt % args)
+
+    # -- response helpers ---------------------------------------------------
+
+    def _send(
+        self,
+        status: HTTPStatus,
+        body: bytes = b"",
+        content_type: str = JSON,
+        extra: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Vary", "Accept")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        if body and self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _problem(self, status: HTTPStatus, detail: str) -> None:
+        body = json.dumps(
+            {"title": status.phrase, "status": int(status), "detail": detail}
+        ).encode()
+        self._send(status, body, "application/problem+json")
+
+    def _read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def _check_json_content_type(self) -> None:
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+        if ctype not in (JSON, "application/merge-patch+json"):
+            raise UnsupportedMediaType(ctype)
+
+    # -- method entry points ------------------------------------------------
+
+    def do_GET(self) -> None:  # noqa: N802 (http.server naming)
+        self._dispatch("GET")
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._dispatch("GET")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._dispatch("POST")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._dispatch("PUT")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._dispatch("PATCH")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        allowed = (
+            "GET, HEAD, POST, OPTIONS"
+            if COLLECTION_RE.match(parsed.path)
+            else "GET, HEAD, PUT, PATCH, DELETE, OPTIONS"
+        )
+        self._send(HTTPStatus.NO_CONTENT, extra={"Allow": allowed})
+
+    # -- router ---------------------------------------------------------------
+
+    def _dispatch(self, method: str) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
+        doc = DOCUMENT_RE.match(path)
+        try:
+            if COLLECTION_RE.match(path):
+                self._collection(method, query)
+            elif doc:
+                self._document(method, doc.group("sku"))
+            else:
+                self._problem(HTTPStatus.NOT_FOUND, f"no resource at {path}")
+        except ValidationError as exc:
+            self._problem(HTTPStatus.BAD_REQUEST, str(exc))
+        except ConflictError as exc:
+            self._problem(HTTPStatus.CONFLICT, str(exc))
+        except UnsupportedMediaType as exc:
+            self._problem(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                f"unsupported media type: {exc}",
+            )
+        except Exception:  # never leak internals over the wire
+            logger.exception("unhandled error processing %s %s", method, path)
+            self._problem(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error")
+
+    def _reject(self, allowed: str) -> None:
+        body = json.dumps(
+            {
+                "title": "Method Not Allowed",
+                "status": int(HTTPStatus.METHOD_NOT_ALLOWED),
+                "detail": "method not allowed on this resource",
+            }
+        ).encode()
+        self._send(
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            body,
+            "application/problem+json",
+            extra={"Allow": allowed},
+        )
+
+    # -- /parts (collection) --------------------------------------------------
+
+    def _collection(self, method: str, query: dict[str, list[str]]) -> None:
+        if method == "GET":
+            category = query.get("category", [None])[0]
+            reps = [p.to_representation() for p in self.store.list(category)]
+            media = negotiate(self.headers.get("Accept"))
+            if media is None:
+                self._problem(
+                    HTTPStatus.NOT_ACCEPTABLE, "supported: application/json, text/csv"
+                )
+                return
+            body = (
+                json.dumps({"parts": reps, "count": len(reps)}).encode()
+                if media == JSON
+                else to_csv(reps)
+            )
+            self._send(HTTPStatus.OK, body, media)
+        elif method == "POST":
+            self._check_json_content_type()
+            part = parse_part(self._read_body())
+            self.store.create(part)
+            body = json.dumps(part.to_representation()).encode()
+            self._send(
+                HTTPStatus.CREATED,
+                body,
+                extra={
+                    "Location": f"/parts/{part.sku}",
+                    "ETag": etag_for(part),
+                },
+            )
+        else:
+            self._reject("GET, HEAD, POST, OPTIONS")
+
+    # -- /parts/{sku} (document) ------------------------------------------------
+
+    def _document(self, method: str, sku: str) -> None:
+        part = self.store.get(sku)
+        if method == "GET":  # HEAD is dispatched here with body suppressed
+            if part is None:
+                self._problem(HTTPStatus.NOT_FOUND, f"no part with sku {sku!r}")
+                return
+            etag = etag_for(part)
+            if self.headers.get("If-None-Match") == etag:
+                self._send(HTTPStatus.NOT_MODIFIED, extra={"ETag": etag})
+                return
+            media = negotiate(self.headers.get("Accept"))
+            if media is None:
+                self._problem(HTTPStatus.NOT_ACCEPTABLE, "supported: json, csv")
+                return
+            rep = part.to_representation()
+            body = (
+                json.dumps(rep).encode() if media == JSON else to_csv([rep])
+            )
+            self._send(HTTPStatus.OK, body, media, extra={"ETag": etag})
+        elif method == "PUT":
+            self._check_json_content_type()
+            if part and self.headers.get("If-Match") not in (None, etag_for(part)):
+                self._problem(
+                    HTTPStatus.PRECONDITION_FAILED,
+                    "If-Match does not match current ETag; re-read and retry",
+                )
+                return
+            new_part = parse_part(self._read_body(), sku_from_path=sku)
+            existed = self.store.replace(sku, new_part)
+            etag = etag_for(self.store.get(sku))  # type: ignore[arg-type]
+            status = HTTPStatus.OK if existed else HTTPStatus.CREATED
+            extra = {"ETag": etag}
+            if not existed:
+                extra["Location"] = f"/parts/{sku}"
+            self._send(status, b"", extra=extra)
+        elif method == "PATCH":
+            if part is None:
+                self._problem(HTTPStatus.NOT_FOUND, f"no part with sku {sku!r}")
+                return
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0]
+            if ctype.strip() != "application/merge-patch+json":
+                raise UnsupportedMediaType(ctype or "<missing>")
+            patch = json.loads(self._read_body().decode("utf-8") or "{}")
+            merged = merge_patch(part.to_representation(), patch)
+            updated = parse_part(
+                json.dumps(merged).encode(), sku_from_path=sku
+            )
+            self.store.replace(sku, updated)  # bumps the version counter
+            stored = self.store.get(sku)
+            assert stored is not None  # just written by replace()
+            body = json.dumps(stored.to_representation()).encode()
+            self._send(HTTPStatus.OK, body, extra={"ETag": etag_for(stored)})
+        elif method == "DELETE":
+            if self.store.delete(sku):
+                self._send(HTTPStatus.NO_CONTENT)
+            else:
+                self._problem(HTTPStatus.NOT_FOUND, f"no part with sku {sku!r}")
+        else:
+            self._reject("GET, HEAD, PUT, PATCH, DELETE, OPTIONS")
+
+
+class UnsupportedMediaType(Exception):
+    """Raised when Content-Type is not one the resource understands (415)."""
+
+
+def merge_patch(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """RFC 7386 JSON Merge Patch: merge keys; null deletes the key."""
+    result = dict(target)
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_patch(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def make_server(port: int) -> ThreadingHTTPServer:
+    CatalogHandler.store = CatalogStore()
+    return ThreadingHTTPServer(("127.0.0.1", port), CatalogHandler)
+
+
+def run_selftest() -> None:
+    """Deterministic in-process checks; no sockets, no network."""
+    from http.client import HTTPConnection
+    import threading
+
+    server = make_server(0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    conn = HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/parts/NX-1001")
+        resp = conn.getresponse()
+        assert resp.status == 200 and resp.getheader("ETag")
+        etag = resp.getheader("ETag")
+        resp.read()
+
+        conn.request("GET", "/parts/NX-1001", headers={"If-None-Match": etag})
+        assert conn.getresponse().status == 304
+
+        conn.request("GET", "/parts/NOPE")
+        assert conn.getresponse().status == 404
+
+        conn.request(
+            "POST",
+            "/parts",
+            body=json.dumps({
+                "sku": "NX-1005", "name": "Torque Wrench Arm",
+                "category": "actuators",
+                "unitPrice": {"currency": "USD", "amountCents": 9900},
+                "stock": 12,
+            }),
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        assert resp.status == 201
+        assert resp.getheader("Location") == "/parts/NX-1005"
+        resp.read()
+
+        conn.request("DELETE", "/parts/NX-1005")
+        assert conn.getresponse().status == 204
+        conn.request("DELETE", "/parts/NX-1005")
+        assert conn.getresponse().status == 404
+
+        conn.request(
+            "GET", "/parts", headers={"Accept": "application/xml"}
+        )
+        assert conn.getresponse().status == 406
+        print("selftest: all checks passed (200/304/404/201/204/404/406)")
+    finally:
+        conn.close()
+        server.shutdown()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if args.selftest:
+        run_selftest()
+    else:
+        logger.info("serving Northwind parts catalog on 127.0.0.1:%d", args.port)
+        make_server(args.port).serve_forever()
+\end{minted}
+
+\noindent\textbf{Listing 3.1 --- \texttt{catalog\_api.py}: constraint-compliant
+REST service on \texttt{http.server}.}\label{lst:ch3-catalog}
+
+Note what the framework-free implementation makes unavoidable: the \texttt{ETag}
+is derived from representation bytes plus a version counter; \texttt{If-Match} on
+\texttt{PUT} implements optimistic concurrency for free; \texttt{405} responses
+carry \texttt{Allow}; \texttt{415} guards the content-type boundary; and the
+\texttt{Cache-Control: no-cache} plus \texttt{ETag} combination means caches must
+revalidate but may reuse bodies --- correctness without giving up the network
+savings \cite{rfc9110}. The one deliberate simplification is storage: the
+in-memory store stands in for a repository layer that Chapter 6 replaces with a
+real persistence stack behind the identical interface.
+
+\subsection{A URI Design Validator}
+
+Style guides die in wikis unless they are executable. Listing~\ref{lst:ch3-urilint}
+implements the URI grammar rules of Section~\ref{sec:ch3-uri-grammar} as a linter
+over a route table --- a JSON (stdlib) or YAML (requires \texttt{pyyaml},
+Section~\ref{sec:ch3-dependencies}) document shaped like a simplified OpenAPI
+\texttt{paths} object. It exits non-zero when it finds violations, so it can gate
+CI exactly like a code linter.
+
+\begin{minted}{python}
+"""uri_lint.py - enforce the URI design grammar on a route table.
+
+Usage (PowerShell):
+    python uri_lint.py                    # lint the embedded sample table
+    python uri_lint.py routes.json        # JSON route table (stdlib only)
+    python uri_lint.py routes.yaml        # YAML route table (needs pyyaml)
+
+Exit code 0 = clean, 1 = violations found, 2 = input could not be parsed.
+Deterministic: findings are sorted; no clock, no network, no randomness.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("northwind.uri_lint")
+
+MAX_NESTING_DEPTH = 2  # collection/document pairs, per style guide
+
+# Verb lexicon: segments that signal RPC-style tunneling (rule R001).
+VERB_LEXICON = {
+    "get", "fetch", "read", "list", "query", "search", "find",
+    "create", "add", "insert", "register", "make", "new",
+    "update", "edit", "modify", "change", "set", "patch",
+    "delete", "remove", "destroy", "purge",
+    "do", "process", "execute", "run", "submit", "trigger",
+    "calculate", "compute", "export", "import", "sync",
+}
+
+KEBAB_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+PARAM_RE = re.compile(r"^\{[a-zA-Z][a-zA-Z0-9_]*\}$")
+
+
+@dataclass(frozen=True)
+class Finding:
+    rule: str
+    path: str
+    message: str
+
+    def render(self) -> str:
+        return f"[{self.rule}] {self.path}: {self.message}"
+
+
+def static_segments(path: str) -> list[str]:
+    """Path segments minus template parameters like {sku}."""
+    return [s for s in path.split("/") if s and not PARAM_RE.match(s)]
+
+
+def lint_path(path: str) -> list[Finding]:
+    findings: list[Finding] = []
+
+    if path != "/" and path.endswith("/"):                       # R005
+        findings.append(Finding(
+            "R005", path,
+            "trailing slash creates a duplicate URI; use the bare form "
+            "and 301-redirect the slashed form",
+        ))
+
+    segments = [s for s in path.split("/") if s]
+    for seg in segments:
+        if PARAM_RE.match(seg):
+            continue
+        if seg.lower() in VERB_LEXICON:                          # R001
+            findings.append(Finding(
+                "R001", path,
+                f"verb {seg!r} in path; the HTTP method supplies the verb - "
+                f"reify the action as a resource instead",
+            ))
+        if not KEBAB_RE.match(seg):                              # R004
+            findings.append(Finding(
+                "R004", path,
+                f"segment {seg!r} is not lowercase kebab-case "
+                f"(no camelCase, snake_case, or mixed case)",
+            ))
+
+    depth = (len(segments) + 1) // 2                             # R002
+    if depth > MAX_NESTING_DEPTH:
+        findings.append(Finding(
+            "R002", path,
+            f"nesting depth {depth} exceeds {MAX_NESTING_DEPTH}; "
+            f"prefer a top-level collection with a query filter",
+        ))
+    return findings
+
+
+def lint_pluralization(paths: list[str]) -> list[Finding]:
+    """R003: collection segments must be consistently plural."""
+    singular: list[str] = []
+    plural: list[str] = []
+    for path in paths:
+        segs = static_segments(path)
+        if not segs:
+            continue
+        first = segs[0]
+        (plural if first.endswith("s") else singular).append(first)
+    if singular and plural:
+        return [Finding(
+            "R003", ", ".join(sorted(set(singular))),
+            "singular collection segment(s) mixed with plural "
+            f"{sorted(set(plural))}; pick plural everywhere",
+        )]
+    return []
+
+
+def lint_route_table(table: dict[str, Any]) -> list[Finding]:
+    paths = table.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        raise ValueError("route table must contain a non-empty 'paths' object")
+    findings: list[Finding] = []
+    for path in paths:
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(f"invalid path key: {path!r}")
+        findings.extend(lint_path(path))
+    findings.extend(lint_pluralization(list(paths)))
+    return sorted(findings, key=lambda f: (f.path, f.rule))
+
+
+def load_table(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix in (".yaml", ".yml"):
+        try:
+            import yaml  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise RuntimeError(
+                "YAML input requires pyyaml: pip install pyyaml"
+            ) from exc
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("route table must be a JSON/YAML object")
+    return data
+
+
+SAMPLE_TABLE: dict[str, Any] = {
+    "paths": {
+        "/parts": {},
+        "/parts/{sku}": {},
+        "/parts/{sku}/restock": {},    # action-like; reify as stock-adjustments
+        "/getPart": {},                # R003 + R004 (getPart: camelCase, singular)
+        "/warehouses/{wid}/stock/{sku}/history": {},  # R002: depth 3
+        "/purchaseOrders/{id}": {},            # R004: camelCase
+        "/suppliers/": {},                     # R005: trailing slash
+    }
+}
+
+
+def main(argv: list[str]) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    if len(argv) > 1:
+        try:
+            table = load_table(Path(argv[1]))
+        except (OSError, ValueError, RuntimeError,
+                json.JSONDecodeError) as exc:
+            logger.error("cannot load route table: %s", exc)
+            return 2
+    else:
+        table = SAMPLE_TABLE
+
+    findings = lint_route_table(table)
+    for finding in findings:
+        print(finding.render())
+    print(f"\n{len(findings)} violation(s) in {len(table['paths'])} path(s)")
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+\end{minted}
+
+\noindent\textbf{Listing 3.2 --- \texttt{uri\_lint.py}: executable URI style
+guide.}\label{lst:ch3-urilint}
+
+Run against its embedded sample, the linter reports five findings across seven
+paths (R002--R005 all fire) --- style defects caught mechanically, before a
+single line of service code exists. The lexicon deliberately contains only
+generic verbs; domain-specific action words like \texttt{restock} are caught by
+human review guided by the reification rule, not by an ever-growing word list. This is design governance as code: the same
+rule IDs can be referenced in review comments and waivers.
+
+\subsection{A HAL-Style Hypermedia Serializer}
+
+Listing~\ref{lst:ch3-hal} closes the loop on Section~\ref{sec:ch3-hateoas}: it
+renders the catalog domain as HAL-like documents with \texttt{\_links} and
+\texttt{\_embedded}, keeping serialization separate from both storage and
+transport.
+
+\begin{minted}{python}
+"""hal_serializer.py - render catalog resources as HAL-like documents.
+
+Stdlib-only and deterministic (sorted keys, fixed sample data). The point:
+links are DATA emitted by the server, not strings concatenated by clients.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+BASE = "https://api.northwind-robotics.example"  # fictional host, never called
+
+
+@dataclass(frozen=True)
+class Link:
+    href: str
+    method: str = "GET"
+    title: str | None = None
+    templated: bool = False
+
+    def render(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"href": self.href}
+        if self.method != "GET":
+            out["method"] = self.method
+        if self.title:
+            out["title"] = self.title
+        if self.templated:
+            out["templated"] = True
+        return out
+
+
+@dataclass
+class HalResource:
+    state: dict[str, Any]
+    links: dict[str, Link | list[Link]] = field(default_factory=dict)
+    embedded: dict[str, list["HalResource"]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        doc: dict[str, Any] = dict(self.state)
+        doc["_links"] = {
+            rel: ([lnk.render() for lnk in link]
+                  if isinstance(link, list) else link.render())
+            for rel, link in sorted(self.links.items())
+        }
+        if self.embedded:
+            doc["_embedded"] = {
+                rel: [res.to_dict() for res in resources]
+                for rel, resources in sorted(self.embedded.items())
+            }
+        return doc
+
+
+def part_resource(part: dict[str, Any]) -> HalResource:
+    sku = part["sku"]
+    links: dict[str, Link | list[Link]] = {
+        "self": Link(f"{BASE}/parts/{sku}"),
+        "collection": Link(f"{BASE}/parts", title="All parts"),
+        "category": Link(f"{BASE}/categories/{part['category']}"),
+    }
+    # Action affordances are state-dependent: only in-stock, active parts
+    # advertise the restock transition. Clients need no business rule for this.
+    if part["stock"] > 0 and part.get("status", "active") == "active":
+        links["restock"] = Link(
+            f"{BASE}/parts/{sku}/stock-adjustments",
+            method="POST",
+            title="Record a stock adjustment",
+        )
+    return HalResource(state={k: v for k, v in part.items() if k != "status"},
+                       links=links)
+
+
+def parts_collection(parts: list[dict[str, Any]], *, cursor: str | None,
+                     next_cursor: str | None) -> HalResource:
+    collection = HalResource(
+        state={"count": len(parts)},
+        links={"self": Link(f"{BASE}/parts" + (f"?cursor={cursor}" if cursor
+                                               else ""))},
+        embedded={"item": [part_resource(p) for p in parts]},
+    )
+    # Pagination links are the minimum viable hypermedia: the server owns the
+    # cursor format, so it can change storage without breaking clients.
+    if next_cursor is not None:
+        collection.links["next"] = Link(f"{BASE}/parts?cursor={next_cursor}")
+    return collection
+
+
+CATALOG_SAMPLE: list[dict[str, Any]] = [
+    {"sku": "NX-1001", "name": "Servo Motor 12V", "category": "actuators",
+     "unitPrice": {"currency": "USD", "amountCents": 2599}, "stock": 140},
+    {"sku": "NX-1002", "name": "LIDAR Module R2", "category": "sensors",
+     "unitPrice": {"currency": "USD", "amountCents": 18999}, "stock": 32},
+    {"sku": "NX-1003", "name": "Aluminum Chassis Plate", "category": "frames",
+     "unitPrice": {"currency": "USD", "amountCents": 7450}, "stock": 0,
+     "status": "discontinued"},
+]
+
+
+def main() -> None:
+    document = part_resource(CATALOG_SAMPLE[0]).to_dict()
+    listing = parts_collection(
+        CATALOG_SAMPLE, cursor=None, next_cursor="c3RlcDoy"
+    ).to_dict()
+    print("--- document ---")
+    print(json.dumps(document, indent=2, sort_keys=True))
+    print("--- collection ---")
+    print(json.dumps(listing, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\noindent\textbf{Listing 3.3 --- \texttt{hal\_serializer.py}: HAL-style
+serializer with state-dependent action affordances.}\label{lst:ch3-hal}
+
+Two details reward attention. First, the \texttt{restock} affordance is
+\emph{computed from resource state}: a discontinued part simply stops
+advertising the transition, and a hypermedia-driven client disables the feature
+without a code change. Second, the pagination \texttt{next} link is an opaque
+cursor the server owns --- the client stores and dereferences it but never
+constructs it, which is URI opacity (Section~\ref{sec:ch3-uri-grammar}) doing
+real work.
+
+\subsection{Design-First Contract: OpenAPI 3.1 Excerpt}
+
+Section~\ref{sec:ch3-product} argued for contract-first development.
+Listing~\ref{lst:ch3-openapi} is the worked excerpt for the catalog; the prose
+commentary follows in the block's design notes.
+
+\begin{minted}{yaml}
+openapi: 3.1.0
+info:
+  title: Northwind Robotics Parts Catalog API
+  version: 1.0.0
+  summary: Resource-oriented catalog of robot parts (synthetic training data).
+  license: { name: Proprietary }
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: http://localhost:8080
+    description: Offline development server (Listing 3.1)
+tags:
+  - name: parts
+    description: Catalog part documents and the parts collection.
+
+paths:
+  /parts:
+    get:
+      summary: List parts
+      operationId: listParts
+      tags: [parts]
+      parameters:
+        - name: category
+          in: query
+          description: Filter by category. Query modulates; path identifies.
+          schema:
+            type: string
+            enum: [actuators, sensors, frames, mobility]
+      responses:
+        "200":
+          description: A page of part representations.
+          headers:
+            Cache-Control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartList" }
+            text/csv:
+              schema: { type: string }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+    post:
+      summary: Create a part (server assigns nothing; client supplies SKU)
+      operationId: createPart
+      tags: [parts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PartInput" }
+      responses:
+        "201":
+          description: Created; Location header addresses the new document.
+          headers:
+            Location: { schema: { type: string } }
+            ETag: { schema: { type: string } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+
+  /parts/{sku}:
+    parameters:
+      - name: sku
+        in: path
+        required: true
+        schema: { type: string, pattern: "^[A-Z]{2}-[0-9]{4}$" }
+    get:
+      summary: Retrieve a part; supports conditional requests
+      operationId: getPart
+      tags: [parts]
+      parameters:
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        "200":
+          description: The part representation, with validators.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Part" }
+        "304": { description: Not modified; re-use the cached copy. }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: Full replacement (idempotent); If-Match guards lost updates
+      operationId: replacePart
+      tags: [parts]
+      parameters:
+        - name: If-Match
+          in: header
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PartInput" }
+      responses:
+        "200": { description: Replaced. }
+        "201": { description: Created at a client-known URI (store semantics). }
+        "412": { description: ETag precondition failed; re-read and retry. }
+    patch:
+      summary: Partial update via JSON Merge Patch (RFC 7386)
+      operationId: mergePatchPart
+      tags: [parts]
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { type: object }
+      responses:
+        "200": { description: Updated representation returned. }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+    delete:
+      summary: Remove a part (idempotent effect)
+      operationId: deletePart
+      tags: [parts]
+      responses:
+        "204": { description: Removed; no body. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  schemas:
+    Money:
+      type: object
+      required: [currency, amountCents]
+      properties:
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        amountCents: { type: integer, minimum: 0 }
+      additionalProperties: false
+    PartInput:
+      type: object
+      required: [sku, name, category, unitPrice, stock]
+      properties:
+        sku: { type: string, pattern: "^[A-Z]{2}-[0-9]{4}$" }
+        name: { type: string, minLength: 1 }
+        category: { type: string, enum: [actuators, sensors, frames, mobility] }
+        unitPrice: { $ref: "#/components/schemas/Money" }
+        stock: { type: integer, minimum: 0 }
+      additionalProperties: false
+    Part:
+      allOf:
+        - $ref: "#/components/schemas/PartInput"
+      description: Server representation; identical shape here by choice,
+        but the contract (not the database) is the source of truth.
+    PartList:
+      type: object
+      required: [parts, count]
+      properties:
+        parts:
+          type: array
+          items: { $ref: "#/components/schemas/Part" }
+        count: { type: integer }
+  responses:
+    BadRequest:
+      description: Malformed or invalid representation.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound: { description: Unknown resource. }
+    Conflict: { description: State conflict (duplicate SKU, stale edit). }
+    NotAcceptable: { description: No supported representation matches Accept. }
+    UnsupportedMediaType: { description: Content-Type not supported. }
+  # Problem schema elided for brevity: title/status/detail per problem+json.
+\end{minted}
+
+\noindent\textbf{Listing 3.4 --- \texttt{openapi.yaml} (excerpt): design-first
+contract for the catalog.}\label{lst:ch3-openapi}
+
+Design commentary: every response declares its headers (\texttt{ETag},
+\texttt{Location}) because headers are contract, not decoration; error responses
+are reusable components so the \texttt{400}s across resources can never drift
+apart; \texttt{additionalProperties: false} makes the contract closed by default,
+forcing field additions through deliberate review (the evolution discipline of
+Section~\ref{sec:ch3-representations}); and conditional-request headers are
+first-class parameters, so generated SDKs expose optimistic concurrency to every
+consumer. Chapter 4 develops serialization contracts; Chapter 9 extends this
+document with a versioning strategy.
+
+%% ---------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch3-pitfalls}
+
+Each anti-pattern below is stated with its symptom, the constraint it breaks,
+and the corrective. All are detected by Listing~\ref{lst:ch3-urilint} where they
+appear in URIs.
+
+\begin{enumerate}
+  \item \textbf{Verbs in URIs} (\texttt{/getPart}, \texttt{/createOrder}).
+        \emph{Breaks:} uniform interface --- the URI vocabulary duplicates the
+        method vocabulary, so nothing is safe, idempotent, or cacheable by
+        inspection. \emph{Fix:} noun for the thing, method for the operation;
+        reify true actions as resources (\texttt{/stock-adjustments}).
+  \item \textbf{Tunneling everything through POST.} \emph{Breaks:} safety,
+        idempotency, cacheability, visibility --- intermediaries must assume
+        the worst about every request. \emph{Fix:} Level 2 method discipline;
+        \texttt{GET} for reads so caches and conditional requests can work.
+  \item \textbf{Returning 200 for errors} (error objects in a 200 body).
+        \emph{Breaks:} self-descriptive messages --- monitors, retry loops, and
+        caches all read status codes; a 200-wrapped failure may be
+        \emph{cached}. \emph{Fix:} the Table~\ref{tab:ch3-status} lifecycle,
+        with \texttt{application/problem+json} bodies for detail.
+  \item \textbf{Leaking the database schema} (ORM objects serialized directly).
+        \emph{Breaks:} independent evolvability --- schema migrations become
+        breaking API changes. \emph{Fix:} an anti-corruption layer between
+        storage and representation (Section~\ref{sec:ch3-representations}).
+  \item \textbf{Inconsistent naming} (mixed singular/plural, camelCase beside
+        kebab-case, \texttt{/order} beside \texttt{/warehouses}).
+        \emph{Breaks:} the uniform interface's simplicity property --- every
+        consumer now carries a lookup table of your exceptions. \emph{Fix:} one
+        written grammar; lint it in CI (Listing~\ref{lst:ch3-urilint}).
+  \item \textbf{Ignoring caching semantics} (no \texttt{Cache-Control}, no
+        validators). \emph{Breaks:} cacheability --- intermediaries guess, and
+        guessed caching is either absent (wasted scale) or wrong (stale data
+        sold twice). \emph{Fix:} validators on every GET representation;
+        explicit freshness policy, even if the policy is
+        \texttt{no-cache} \cite{rfc9110}.
+  \item \textbf{Deep nesting beyond two levels}
+        (\texttt{/warehouses/WH-01/zones/Z-3/bins/B-17/parts/NX-1001}).
+        \emph{Breaks:} evolvability --- the path ossifies one navigational
+        route through a many-pathed graph; authorization and cache keys
+        multiply. \emph{Fix:} top-level collections with query filters;
+        containment paths only where lifetime truly depends on the parent.
+  \item \textbf{Idempotency theater} (\texttt{PUT} that increments a counter).
+        \emph{Breaks:} PUT's contract; safe retry becomes corruption.
+        \emph{Fix:} if the operation is intrinsically non-idempotent
+        (increment, append), use \texttt{POST} to a subordinate collection.
+  \item \textbf{Versioned filenames-as-APIs} (\texttt{/api/v2/final/REAL/}).
+        \emph{Breaks:} URI opacity and cool-URI discipline; version policy
+        belongs in the contract, not in path folklore (Chapter 9).
+  \item \textbf{Silent query-parameter divergence} (\texttt{?format=json}
+        beside \texttt{Accept}). \emph{Breaks:} self-description and cache
+        correctness (the URI key now varies by parameter a cache may ignore).
+        \emph{Fix:} negotiate via headers with \texttt{Vary}, or make the
+        variant a distinct URI deliberately --- never both.
+\end{enumerate}
+
+\begin{warningbox}
+The most expensive anti-pattern is not on this list because it is meta:
+\emph{labeling a Level 0/1 service ``REST''} in documentation. Consumers then
+assume safety, idempotent retries, and cacheability that the service does not
+provide, and build those assumptions into production traffic. Name your
+architecture honestly; an ``HTTP RPC API'' is a respectable, supportable thing.
+\end{warningbox}
+
+%% ---------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch3-lab}
+
+\subsection{Lab Part A: Design the Warehouse Domain as REST Resources}
+
+Work in the Northwind Robotics universe (all data synthetic). Target: 60--90
+minutes, paper or a scratch OpenAPI file; no implementation required.
+
+\begin{enumerate}
+  \item \textbf{Inventory the domain.} Northwind's warehouse system tracks:
+        warehouses; the parts catalog (Listing~\ref{lst:ch3-catalog}); stock
+        levels (how many of a part sit in a warehouse); suppliers; purchase
+        orders sent to suppliers; and inbound shipments against those orders.
+  \item \textbf{Classify every concept} into the four archetypes
+        (Section~\ref{sec:ch3-resources}): collections, documents, stores,
+        controllers. Expect zero controllers; if you invented one, try to
+        reify it.
+  \item \textbf{Draw the resource graph.} Decide which relations are
+        \emph{containment} (path hierarchy) versus \emph{association}
+        (query filter or link). Compare with Figure~\ref{fig:ch3-resources}.
+        Specifically: is \texttt{/warehouses/\{wid\}/stock/\{sku\}} justified?
+        (Yes --- a stock level's identity is the pair (warehouse, part); it
+        cannot exist without both.) Is \texttt{/suppliers/\{sid\}/purchase-orders/\{poid\}}
+        justified? (No --- orders outlive any single navigational path; make
+        \texttt{/purchase-orders?supplier=SID} instead.)
+  \item \textbf{Write the URI table} for at least eight routes and lint it with
+        \texttt{python uri\_lint.py yourtable.json} until clean.
+  \item \textbf{Assign the uniform interface.} For each route, tabulate allowed
+        methods, success codes, the three most likely failure codes, and the
+        caching policy (validator, freshness) for each GET.
+  \item \textbf{Design one hypermedia transition.} Purchase orders move
+        \texttt{draft} $\rightarrow$ \texttt{submitted} $\rightarrow$
+        \texttt{received} $\rightarrow$ \texttt{closed}. Express the legal
+        transitions as state-dependent links on the order representation, as
+        Listing~\ref{lst:ch3-hal} does for \texttt{restock}.
+\end{enumerate}
+
+\textbf{Exit criteria:} a lint-clean URI table, a completed method/status/cache
+matrix, and a defensible two-sentence justification for every nested route.
+
+\subsection{Lab Part B: Constraint Critique of a Deliberately Bad API}
+
+The following route table ships from a fictional vendor, ``RoboDirect'' (any
+resemblance to production APIs you have suffered is coincidental). Audit it
+against every constraint and rule in this chapter before reading the key.
+
+\begin{minted}{text}
+POST   /api/getPartDetails            -> 200 always; errors in body
+POST   /api/getPartDetails?id=NX-1001 -> same endpoint, query id
+POST   /api/updateStockLevel          -> body: {partId, warehouseId, qty}
+GET    /api/Parts/ListAll             -> 200, no ETag, no Cache-Control
+POST   /api/warehouses/WH-01/zones/Z3/bins/B17/getContents
+DELETE /api/purchaseOrder/delete/PO-2026-0417 -> 200 {"ok":true}
+GET    /api/v2_final/parts/NX-1001.json
+\end{minted}
+
+\textbf{Answer key (abridged).} Every route tunnels through POST or embeds a
+verb (R001), so nothing is safe, idempotent, or cacheable; errors hidden in 200
+bodies defeat monitors and caches; \texttt{ListAll} returns an uncacheable,
+unbounded collection with no validators; the five-segment warehouse path (R002)
+ossifies one navigation path; \texttt{delete} in a DELETE path doubles the verb;
+\texttt{v2\_final} and the \texttt{.json} suffix hard-code version and format
+into the URI, defeating content negotiation and cool-URI discipline; and the
+mixed \texttt{Parts}/\texttt{parts}/\texttt{purchaseOrder} naming fails R003
+three ways. Estimated Richardson level: 0, trending 1. Rewrite left as
+Self-Assessment Exercise 7.1.
+
+\subsection{Case Study: The Redesign That Broke the Mobile Fleet}
+
+\textbf{Context.} Northwind Robotics' field-technician app (a deployed fleet of
+rugged Android devices scanning warehouse stock) consumed
+\texttt{GET /api/inventory/\{sku\}}, which returned stock across all warehouses.
+A platform team, having read a book much like this one, redesigned the API
+``properly'': \texttt{/api/inventory/\{sku\}} became
+\texttt{/api/v2/stock?part=\{sku\}}, launched in six weeks, and the old route
+was deleted the same day. Within hours, the entire device fleet returned 404s;
+technicians reverted to paper; two warehouses missed shipping cutoffs.
+
+\textbf{Failure analysis.} The new URI design was, in isolation, better. The
+failure was a discipline failure, not a design failure. (1) \emph{URIs are
+contracts}: clients had hard-coded paths (violating opacity, as clients
+inevitably do), so renaming was a breaking change regardless of how ``clean''
+the new grammar was. (2) \emph{No coexistence window}: mobile fleets upgrade on
+app-store timescales of months; the old route must live until measured traffic
+reaches zero, returning deprecation signals (\texttt{Deprecation} and
+\texttt{Sunset} headers per RFC 8594 and RFC 9745 practice). (3) \emph{No
+consumer observability}: nobody could answer ``who still calls the old route?''
+because access logs were never keyed by client version. (4) \emph{Versioning as
+renaming}: \texttt{v2} was minted for a change that a new \emph{resource}
+(\texttt{/stock-levels}) alongside the old one would have made non-breaking.
+
+\textbf{Recovery and doctrine.} The old route was restored behind a 308 redirect
+to a compatibility shim; a deprecation schedule with dated sunset headers was
+published; per-client-version request logging was added at the gateway; and the
+governance rule adopted was: \emph{additive changes ship immediately; breaking
+changes ship only behind measured coexistence}. Chapters 9 and 20 turn this war
+story into process.
+
+%% ---------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch3-assessment}
+
+\begin{enumerate}
+  \item \textbf{(7.1) Rewrite RoboDirect.} Produce a lint-clean route table for
+        the Lab Part B API, with a method/status/cache matrix for every route.
+  \item \textbf{(7.2)} State statelessness precisely enough to decide: is a
+        request carrying a session cookie stateless? A bearer token? An OAuth
+        access token validated against a token-introspection endpoint? Defend
+        each answer from the definition.
+  \item \textbf{(7.3)} Northwind sells ``today's promotions'' --- a resource
+        whose value changes daily. Design its URI, freshness headers, and
+        validators. What breaks if a shared cache serves it eight hours stale?
+  \item \textbf{(7.4)} Extend Listing~\ref{lst:ch3-catalog} with
+        \texttt{HEAD} correctness verified by the selftest, and with a
+        \texttt{POST /parts}-side \texttt{Idempotency-Key} header. Which
+        constraint does each addition strengthen?
+  \item \textbf{(7.5)} Implement an RFC 6902 JSON Patch evaluator (operations
+        \texttt{add}, \texttt{remove}, \texttt{replace}, \texttt{test}) and wire
+        it into the catalog's PATCH alongside Merge Patch. Which media type
+        selects which evaluator?
+  \item \textbf{(7.6) Deep dive.} Fielding calls the uniform interface
+        trade-off ``efficiency versus evolvability.'' Construct one concrete
+        Northwind scenario where the uniform interface is measurably less
+        efficient than a bespoke RPC, and state what is purchased with that
+        inefficiency.
+  \item \textbf{(7.7) Deep dive.} Argue both sides: should
+        \texttt{/warehouses/\{wid\}/stock/\{sku\}} expose \texttt{DELETE}, and
+        if so, what does it mean --- zero stock, or no record? What do 404 and
+        410 each communicate here?
+  \item \textbf{(7.8) Deep dive.} Your organization mandates JSON:API. Which
+        decisions in this chapter does it make for you, which does it forbid,
+        and where does its opinion cost you flexibility the catalog used?
+\end{enumerate}
+
+%% ---------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch3-qa}
+
+Thirty-six questions, ordered junior $\rightarrow$ staff. Answers are calibrated
+to what a strong candidate says in two to six sentences.
+
+\subsection{Junior (Q1--Q10)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, itemsep=0.6em]
+  \item \textbf{Is REST a protocol or a standard?}\\
+        \emph{Answer:} Neither. REST is an architectural \emph{style} --- a set
+        of constraints defined in Fielding's dissertation
+        \cite{fielding2000rest} --- that induces properties like scalability
+        and evolvability. HTTP is a protocol; OpenAPI is a description
+        standard; REST constrains how you use them.
+  \item \textbf{State Fielding's six constraints.}\\
+        \emph{Answer:} Client--server, statelessness, cacheability, uniform
+        interface, layered system, and (optional) code-on-demand. Bonus depth:
+        the uniform interface decomposes into resource identification,
+        manipulation through representations, self-descriptive messages, and
+        HATEOAS.
+  \item \textbf{What properties does statelessness induce?}\\
+        \emph{Answer:} Visibility (any request is understandable in isolation),
+        reliability (requests can simply be retried after failure), and
+        scalability (no session affinity; any replica serves any request).
+        Cost: session data travels on every request.
+  \item \textbf{What is a resource?}\\
+        \emph{Answer:} Any named conceptual target of a hypertext reference ---
+        a document, a collection, a service, even ``today's price of NX-1001.''
+        Clients never touch the resource, only representations of its state.
+  \item \textbf{Name the four resource archetypes.}\\
+        \emph{Answer:} Document (singular object), collection (server-managed
+        directory), store (client-managed entry repository), and controller
+        (verb-like escape hatch, to be minimized by reifying actions as
+        resources).
+  \item \textbf{Why ``nouns, not verbs'' in URIs?}\\
+        \emph{Answer:} The HTTP method already supplies the verb. Verbs in URIs
+        duplicate that vocabulary with unbounded private words, destroying the
+        safety, idempotency, and cacheability signals that generic
+        infrastructure depends on.
+  \item \textbf{What do safe and idempotent mean? Give one example each.}\\
+        \emph{Answer:} Safe: read-only, no accountability for state change
+        (GET). Idempotent: repeating the request has the same effect as one
+        (PUT, DELETE). Note idempotency is about server \emph{state}, not the
+        response --- a repeated DELETE returns 404 but is still idempotent.
+  \item \textbf{What status code should a successful POST that creates a
+        resource return, and with which header?}\\
+        \emph{Answer:} 201 Created with a \texttt{Location} header pointing at
+        the new resource's URI; ideally also its representation and ETag.
+  \item \textbf{What is the difference between 400 and 422?}\\
+        \emph{Answer:} 400: the request is malformed --- unparseable JSON,
+        missing required fields, wrong types. 422: syntactically fine but
+        semantically unprocessable --- a well-formed request whose values
+        violate business rules (e.g., negative stock).
+  \item \textbf{What does a 405 response require?}\\
+        \emph{Answer:} An \texttt{Allow} header listing the methods the
+        resource does support, so clients can self-correct without
+        documentation archaeology.
+\end{enumerate}
+
+\subsection{Mid-Level (Q11--Q20)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, itemsep=0.6em, resume]
+  \item \textbf{Explain the Richardson Maturity Model.}\\
+        \emph{Answer:} Four levels diagnosing which web technologies an HTTP API
+        exploits \cite{richardson2013restful}: L0 tunnels RPC through one URI
+        and POST; L1 introduces resource URIs; L2 uses methods and status codes
+        with correct semantics; L3 adds hypermedia controls (HATEOAS). It is
+        diagnostic, not a moral ladder.
+  \item \textbf{PUT versus PATCH?}\\
+        \emph{Answer:} PUT is full replacement --- the body becomes the
+        resource's new state; omitted fields are reset; idempotent by
+        construction. PATCH is partial modification whose semantics come from
+        the patch media type --- JSON Merge Patch (RFC 7386: merge, null
+        deletes) or JSON Patch (RFC 6902: ordered atomic operations with a
+        \texttt{test} precondition).
+  \item \textbf{When is a repeated DELETE not an error?}\\
+        \emph{Answer:} Always, by design. The first DELETE returns 204; the
+        second returns 404. Both leave the server in the same state, which is
+        exactly why DELETE is idempotent and safe for retry loops --- the
+        client should treat 404-after-DELETE as confirmation, not failure.
+  \item \textbf{How do ETags and conditional requests work?}\\
+        \emph{Answer:} The server attaches a validator (\texttt{ETag}) to a
+        representation. A client revalidating sends \texttt{If-None-Match}; a
+        match yields 304 with no body (cache efficiency). A client writing
+        sends \texttt{If-Match}; a mismatch yields 412 (optimistic concurrency
+        --- no lost updates) \cite{rfc9110}.
+  \item \textbf{Design a URI scheme for: parts, stock per warehouse, purchase
+        orders to suppliers.}\\
+        \emph{Answer:} \texttt{/parts}, \texttt{/parts/\{sku\}};
+        \texttt{/warehouses/\{wid\}/stock/\{sku\}} (containment: stock's
+        identity is the pair); \texttt{/purchase-orders} top-level with
+        \texttt{?supplier=} and \texttt{?warehouse=} filters because orders
+        outlive any single navigation path. Depth $\le$ 2, kebab-case, plural
+        collections.
+  \item \textbf{Query string or path segment --- how do you decide?}\\
+        \emph{Answer:} Path identifies \emph{which} resource; query modulates
+        \emph{how} it is returned: filtering, sorting, pagination, projection.
+        If deleting the parameter addresses a different thing, it belongs in
+        the path.
+  \item \textbf{Singular or plural collection names?}\\
+        \emph{Answer:} The debate is noise; consistency is the law. Plural wins
+        on three arguments: collection and member URIs share a stem
+        (\texttt{/parts}, \texttt{/parts/NX-1001}); it reads correctly for both
+        many and one-of-many; and singletons stay expressible as documents.
+        Mixing is the only indefensible answer.
+  \item \textbf{Are \texttt{/parts} and \texttt{/parts/} the same resource?}\\
+        \emph{Answer:} No --- URIs are compared character-wise, so they are
+        distinct identifiers with distinct cache keys. Publish the bare form
+        and answer the slashed form with a cacheable 301 redirect; never alias
+        silently.
+  \item \textbf{What is URI opacity and what does it buy?}\\
+        \emph{Answer:} Clients treat URIs as opaque: store, compare,
+        dereference --- never parse or construct. It buys the server freedom to
+        restructure (gateways, sharding, renaming) without breaking consumers,
+        and it is the precondition for hypermedia-driven evolution.
+  \item \textbf{When would you return 410 instead of 404?}\\
+        \emph{Answer:} 404 says ``not here, maybe never was, maybe
+        elsewhere''; 410 says ``was here, deliberately retired, do not ask
+        again.'' Use 410 for sunset resources so crawlers, caches, and clients
+        can permanently drop references.
+\end{enumerate}
+
+\subsection{Senior (Q21--Q28)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, itemsep=0.6em, resume]
+  \item \textbf{What does the layered-system constraint permit, and what does
+        it cost?}\\
+        \emph{Answer:} It permits intermediaries --- gateways, shared caches,
+        CDNs --- that components cannot see past, enabling load balancing,
+        edge security, and legacy encapsulation. It costs per-hop latency,
+        which the cache constraint is expected to amortize
+        \cite{fielding2000rest}.
+  \item \textbf{Why is code-on-demand optional, and where do you actually see
+        it?}\\
+        \emph{Answer:} It reduces visibility --- intermediaries cannot reason
+        about downloaded behavior --- so Fielding brackets it as the one
+        optional constraint. Its canonical realization is JavaScript to
+        browsers; machine-to-machine APIs almost always omit it.
+  \item \textbf{When does hypermedia pay off, and when is it over-engineering?}\\
+        \emph{Answer:} It pays when consumers outnumber your coordination
+        bandwidth: long-lived public APIs, server-driven workflows whose legal
+        transitions vary per state, generic clients. It is over-engineering for
+        first-party clients shipping in lockstep, where static contracts
+        (OpenAPI) plus selective links (pagination, state transitions) capture
+        most of the value \cite{richardson2013restful}.
+  \item \textbf{Compare HAL, JSON:API, and Collection+JSON.}\\
+        \emph{Answer:} HAL is minimal --- \texttt{\_links},
+        \texttt{\_embedded}, curies; reads only. JSON:API is a full protocol:
+        resource objects, relationships, compound documents, pagination and
+        error conventions, write semantics. Collection+JSON is the purest
+        hypermedia: the representation carries queries and a write template,
+        enabling fully generic clients.
+  \item \textbf{How do you keep an API from becoming a serialized database?}\\
+        \emph{Answer:} An anti-corruption layer: representations designed for
+        consumers (structured money, curated fields), storage designed for
+        integrity, explicit translation between. Signals you have failed:
+        column names in JSON, ORM objects passed to the encoder, schema
+        migrations breaking clients \cite{kleppmann2017ddia}.
+  \item \textbf{Design PATCH for a resource edited concurrently by many
+        clients.}\\
+        \emph{Answer:} JSON Patch (RFC 6902) with \texttt{test} operations as
+        preconditions and \texttt{If-Match} on the ETag; apply atomically or
+        not at all; return 409/412 with a problem detail so the client re-reads
+        and re-derives its patch. Merge Patch is the wrong tool --- no
+        atomicity, no preconditions.
+  \item \textbf{A stakeholder demands \texttt{?format=csv} instead of content
+        negotiation. Trade-offs?}\\
+        \emph{Answer:} It works and is browser-testable, but it forks the
+        identifier space (two URIs, one resource), complicates cache keys
+        unless \texttt{Vary}-equivalent discipline is applied to the query, and
+        bypasses q-values. Acceptable as a documented alias; the
+        \texttt{Accept} header with \texttt{Vary: Accept} remains the canonical
+        mechanism \cite{rfc9110}.
+  \item \textbf{Your API must expose a batch ``revalue inventory'' operation.
+        RESTful design?}\\
+        \emph{Answer:} Reify the operation: \texttt{POST /inventory-revaluations}
+        creates a revaluation resource with its own URI, status, and audit
+        trail; \texttt{GET} on it reports progress. You get idempotent
+        submission (via keys), observable lifecycle, and cancelability ---
+        none of which a \texttt{POST /revalueInventory} verb-endpoint can
+        offer.
+\end{enumerate}
+
+\subsection{Staff (Q29--Q36)}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=3.2em, itemsep=0.6em, resume]
+  \item \textbf{``REST doesn't scale to our read patterns --- clients need
+        aggregates from five resources.'' Respond.}\\
+        \emph{Answer:} REST never forbids server-composed resources: a
+        \texttt{/dashboards/warehouse-summary} resource is a first-class,
+        cacheable document. What REST forbids is letting clients dictate
+        per-request join graphs ad hoc. Compose on the server behind a stable
+        resource, or admit you need a query paradigm (GraphQL, Chapter 12) ---
+        the honest trade, not a tunnelled query POST pretending to be REST.
+  \item \textbf{How do you evolve a Level 2 API for five years without
+        \texttt{/v2}?}\\
+        \emph{Answer:} Additive-only changes, tolerant readers, never reuse
+        retired field names, closed-by-default schemas in review
+        (\texttt{additionalProperties: false} as a forcing function),
+        deprecation headers with measured coexistence, and consumer-keyed
+        access logging so every removal decision is data-driven. Version
+        banners become a rare, deliberate event (Chapter 9)
+        \cite{gehl2021apidesign}.
+  \item \textbf{Define a governance model for URI and contract consistency
+        across forty teams.}\\
+        \emph{Answer:} A short written style guide (archetypes, grammar, status
+        matrix), executable linting in CI with stable rule IDs (the
+        Listing~\ref{lst:ch3-urilint} pattern), a review gate only for
+        cross-cutting changes, and published exception/waiver mechanics.
+        Consistency enforced by tooling scales; consistency enforced by
+        meetings does not \cite{gehl2021apidesign}.
+  \item \textbf{Statelessness versus connection-oriented protocols: when do you
+        abandon the constraint?}\\
+        \emph{Answer:} When the interaction \emph{is} a session: streams,
+        collaborative editing, subscriptions. The disciplined move is to
+        declare the boundary --- REST for command/control resources, WebSocket
+        or gRPC streaming (Chapters 11, 13) for the conversational edge ---
+        rather than smuggling session state into ``REST'' endpoints.
+  \item \textbf{A cache served stale stock levels and inventory was oversold.
+        Root-cause through the constraints.}\\
+        \emph{Answer:} The cacheability constraint was violated by omission:
+        responses carried no freshness metadata, so an intermediary guessed.
+        Fix at the origin: validators plus explicit \texttt{Cache-Control}
+        (\texttt{no-cache} revalidation for stock), and treat any response
+        without a caching policy as a defect in review \cite{rfc9110}.
+  \item \textbf{When is RPC legitimately preferable to REST? Say so without
+        hedging.}\\
+        \emph{Answer:} Low-latency internal service-to-service calls with
+        schema-first contracts and no intermediaries (gRPC's home); operations
+        that are intrinsically computations over transient inputs
+        (\texttt{calculateRoute}); and teams whose consumers all ship in
+        lockstep. REST buys evolvability and interoperability with the web's
+        infrastructure; pay for it only when you need it.
+  \item \textbf{Design the migration from a Level 0 SOAP estate to resource
+        orientation without a big bang.}\\
+        \emph{Answer:} Strangle at the edge: stand up a gateway translating the
+        ten highest-traffic RPC operations into resources; publish OpenAPI for
+        the new surface; dual-run with reconciliation dashboards; migrate
+        consumers by cohort with sunset headers on the legacy endpoint; never
+        rename and restructure in the same release (the Lab case study).
+  \item \textbf{What would you instrument to prove REST's claimed properties
+        are actually materializing?}\\
+        \emph{Answer:} Cache hit ratio and revalidation rate (cacheability);
+        cross-replica request distribution without affinity (statelessness);
+        share of 4xx/5xx correctly classified by status code alone
+        (visibility/self-description); consumer breakage rate per contract
+        change (evolvability); and p99 added latency per intermediary layer
+        (the layered system's bill coming due).
+\end{enumerate}
+
+%% ---------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch3-bibliography}
+
+\begin{itemize}
+  \item \textbf{Roy T. Fielding,} \emph{Architectural Styles and the Design of
+        Network-based Software Architectures,} Ph.D. dissertation, UC Irvine,
+        2000 \cite{fielding2000rest}. Chapter 5 is the primary source for
+        everything in Section~\ref{sec:ch3-constraints}; read it before any
+        secondary source, including this book.
+  \item \textbf{Leonard Richardson, Mike Amundsen, Sam Ruby,}
+        \emph{RESTful Web APIs,} O'Reilly, 2013 \cite{richardson2013restful}.
+        The maturity model, Collection+JSON, and the most honest treatment of
+        hypermedia economics in print.
+  \item \textbf{Mark Mass\'e,} \emph{REST API Design Rulebook,} O'Reilly, 2011.
+        The WRML-influenced four-archetype taxonomy (document, collection,
+        store, controller) and URI grammar conventions used in
+        Section~\ref{sec:ch3-resources}.
+  \item \textbf{JJ Geewax,} \emph{API Design Patterns,} Manning, 2021
+        \cite{gehl2021apidesign}. A pattern catalogue for resource layout,
+        pagination, long-running operations, and versioning; the vocabulary of
+        Section~\ref{sec:ch3-product}'s governance discussion.
+  \item \textbf{RFC 9110,} \emph{HTTP Semantics,} IETF, 2022 \cite{rfc9110}.
+        The normative source for method properties, status codes, content
+        negotiation, and validators; cite it in design reviews, not folklore.
+  \item \textbf{RFC 8288,} \emph{Web Linking,} IETF, 2017 \cite{rfc8288}. Typed
+        links and relation types --- the mechanical foundation of HATEOAS.
+  \item \textbf{RFC 7386} (\emph{JSON Merge Patch}) and \textbf{RFC 6902}
+        (\emph{JSON Patch}), IETF. The two patch grammars compared in
+        Section~\ref{sec:ch3-uniform}; both short enough to read in one
+        sitting.
+  \item \textbf{OpenAPI Specification 3.1,} OpenAPI Initiative
+        \cite{openapi31}. The contract format for the design-first workflow;
+        note that 3.1 aligns fully with JSON Schema 2020-12.
+  \item \textbf{JSON:API specification} (jsonapi.org). Even if you never adopt
+        it, its pagination, error-object, and compound-document conventions are
+        a free design review of your own conventions.
+  \item \textbf{Zalando RESTful API Guidelines} and \textbf{Microsoft REST API
+        Guidelines.} Two battle-tested corporate style guides; read them to see
+        how the debates of Section~\ref{sec:ch3-uri-grammar} get settled in
+        practice (kebab-case, plural collections, explicit null policy).
+  \item \textbf{Martin Kleppmann,} \emph{Designing Data-Intensive Applications,}
+        O'Reilly, 2017 \cite{kleppmann2017ddia}. Chapter on encoding and
+        evolution: the theoretical basis for anti-corruption representations
+        and tolerant readers.
+  \item \textbf{The Twelve-Factor App} \cite{twelvefactor}. Process
+        disposability and backing-services discipline: operational cousins of
+        statelessness.
+\end{itemize}
+
+%% ---------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch3-capstones}
+
+Five progressive projects. Each produces artifacts suitable for a design-review
+portfolio. All are offline and use synthetic Northwind Robotics data only.
+
+\subsection{Capstone 3.1 [junior] --- Model the Library Domain}
+
+\textbf{Objective.} Practice pure resource modeling on an unfamiliar domain
+before touching code.
+
+\textbf{Inputs/Datasets.} A fictional circulating library: books (with editions
+and copies), members, loans, holds, fines. Invent all data; at least ten books,
+four members, three active loans.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Classify every concept into the four archetypes; reify at least two
+        ``actions'' (returning a book, placing a hold) as resources.
+  \item Draw the resource graph; justify every containment edge in one
+        sentence.
+  \item Write the full route table and lint it with
+        Listing~\ref{lst:ch3-urilint} until clean.
+  \item Produce the method/status/cache matrix for every route.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Zero lint findings (rules R001--R005).
+  \item[$\square$] No controller archetype without a written reification
+        failure analysis.
+  \item[$\square$] Nesting depth never exceeds two.
+  \item[$\square$] Every GET route has a stated validator and freshness policy.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add sparse fieldsets and an \texttt{?embed=} policy;
+write the JSON Merge Patch document that renews a loan.
+
+\subsection{Capstone 3.2 [junior] --- Run and Extend the Stdlib Catalog}
+
+\textbf{Objective.} Operate Listing~\ref{lst:ch3-catalog} and prove its
+constraint compliance empirically.
+
+\textbf{Inputs/Datasets.} \texttt{catalog\_api.py}; \texttt{curl.exe} (ships
+with Windows 10+); PowerShell.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Run \texttt{python catalog\_api.py -{}-selftest} and map each assertion
+        to the constraint it demonstrates.
+  \item Serve on port 8080; with \texttt{curl -i}, demonstrate: 200 with ETag;
+        304 via \texttt{If-None-Match}; 201 with \texttt{Location}; 409 on
+        duplicate SKU; 412 via a stale \texttt{If-Match} on PUT; 406 via
+        \texttt{Accept: application/xml}; CSV via \texttt{Accept: text/csv}.
+  \item Add one category, \texttt{batteries}, end-to-end (validation set, seed
+        data, one new selftest assertion).
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] All seven demonstrations captured as transcripts in a
+        \texttt{lab-notes.md}.
+  \item[$\square$] Selftest passes after your extension.
+  \item[$\square$] A one-paragraph memo: which constraint would break first if
+        you added server-side login sessions, and why.
+\end{itemize}
+
+\textbf{Stretch Goals.} Implement \texttt{HEAD}-only verification; add
+\texttt{Sunset}/\texttt{Deprecation} headers to a deliberately retired part.
+
+\subsection{Capstone 3.3 [mid] --- Productionize the URI Linter}
+
+\textbf{Objective.} Turn Listing~\ref{lst:ch3-urilint} into a governance tool a
+real platform team could run in CI.
+
+\textbf{Inputs/Datasets.} \texttt{uri\_lint.py}; three route tables you author:
+one clean, one failing each rule, one extracted by hand from a public API's
+documentation (retyped, synthetic base URLs).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Add a waiver mechanism (\texttt{\# lint-waive: R002 reason} in the
+        table's metadata) with expiry dates.
+  \item Add rules: R006 (identifier segments must pair with a collection),
+        R007 (query parameters documented in the table must be kebab-case).
+  \item Emit machine-readable output (\texttt{-{}-format json}) alongside the
+        text report.
+  \item Write \texttt{pytest}-style unit tests (stdlib \texttt{unittest} is
+        acceptable) covering every rule, including false-positive cases.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Exit codes 0/1/2 behave as documented.
+  \item[$\square$] Waivers suppress only their cited rule and path, and expire.
+  \item[$\square$] Full rule test coverage, all green and deterministic.
+  \item[$\square$] JSON report validates against a schema you write.
+\end{itemize}
+
+\textbf{Stretch Goals.} Accept a real OpenAPI 3.1 document as input; diff two
+route tables and classify each delta as breaking or additive.
+
+\subsection{Capstone 3.4 [senior] --- Port an RPC API to Resource Orientation}
+
+\textbf{Objective.} Execute the Section~\ref{sec:ch3-lab} migration doctrine on
+a realistic legacy surface.
+
+\textbf{Inputs/Datasets.} The RoboDirect API from Lab Part B, extended by you to
+twelve endpoints (add shipping, invoicing, and technician scheduling RPCs); a
+synthetic two-week access log you generate showing per-endpoint traffic.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Model the full RoboDirect domain as resources; produce the target
+        route table and lint it.
+  \item Write the OpenAPI 3.1 contract for the new surface, design-first.
+  \item Implement compatibility shims (301/308 redirects or proxy routes)
+        mapping every legacy call to a new resource, with
+        \texttt{Deprecation} and \texttt{Sunset} headers.
+  \item Write a migration plan keyed by the access log: consumer cohorts,
+        coexistence windows, measurable exit criteria per cohort.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Every legacy endpoint has a mapped resource or a written
+        reification failure analysis.
+  \item[$\square$] Contract passes Listing~\ref{lst:ch3-urilint} with zero
+        findings.
+  \item[$\square$] Shims demonstrably preserve behavior for the twelve legacy
+        calls (before/after transcripts).
+  \item[$\square$] Migration plan names dates, owners, and kill criteria.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add hypermedia transition links to the two
+workflow-heavy resources (shipments, invoices); quantify payload and
+round-trip deltas versus the RPC originals.
+
+\subsection{Capstone 3.5 [staff] --- Design-Review Report on a Public API}
+
+\textbf{Objective.} Produce a staff-grade architectural critique of a real,
+publicly documented API (documentation review only --- no production traffic;
+a captured, synthetic replay of documented examples is the dataset).
+
+\textbf{Inputs/Datasets.} The public documentation and OpenAPI document of one
+large API of your choice; this chapter's constraint tables; the
+Listing~\ref{lst:ch3-urilint} linter run against its published paths.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Score the API against all six constraints with evidence (captured
+        responses, documented behaviors).
+  \item Place it on the Richardson scale per subsystem --- large APIs are
+        rarely uniform.
+  \item Quantify: lint findings by rule; status-code usage distribution;
+        cacheability of GET responses; hypermedia coverage.
+  \item Write a prioritized remediation backlog with effort/impact estimates
+        and a coexistence-safe migration approach for the top three items.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Every claim cites observable evidence (header capture,
+        documented example, lint output).
+  \item[$\square$] At least one finding credits the API for a sophisticated
+        choice --- pure hatchet jobs fail review.
+  \item[$\square$] Remediation backlog survives the case-study doctrine: no
+        rename-and-restructure in a single step.
+  \item[$\square$] Report is eight pages or fewer and readable by a
+        non-specialist executive.
+\end{itemize}
+
+\textbf{Stretch Goals.} Repeat the review five years apart using archived
+documentation; measure whether the vendor's evolvability claims materialized.
+
+%% ---------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch3-dependencies}
+
+The chapter is stdlib-first: Listings~\ref{lst:ch3-catalog} and
+\ref{lst:ch3-hal} run on a bare Python 3.11 installation. Only the route-table
+validator has an optional third-party need.
+
+\begin{minted}{text}
+# requirements.txt -- Chapter 3 (Python 3.11+)
+# Core listings (catalog API, HAL serializer): standard library only.
+pyyaml>=6.0        # uri_lint.py: YAML route tables (JSON input works without it)
+jsonschema>=4.21   # optional: structurally validate OpenAPI 3.1 documents
+\end{minted}
+
+\subsection{pyyaml ($\geq$ 6.0)}
+
+\textbf{Description.} The de-facto YAML 1.1/1.2 parser for Python; used by
+\texttt{uri\_lint.py} only when the route table is authored in YAML (the native
+format of most OpenAPI documents).
+
+\textbf{Why included.} YAML is the authoring format of the API-design ecosystem;
+rejecting it would make the linter useless against real contracts. It is a
+mature, widely pinned dependency with no runtime services.
+
+\textbf{Alternatives.} \texttt{ruamel.yaml} (round-trip preservation; heavier);
+the standard library alone (accept JSON only --- the linter already does).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{bash}
+python -m pip install "pyyaml>=6.0"
+\end{minted}
+
+\subsection{jsonschema ($\geq$ 4.21)}
+
+\textbf{Description.} A JSON Schema validator implementing the 2020-12 draft
+that OpenAPI 3.1 adopts \cite{openapi31}.
+
+\textbf{Why included.} Optional belt-and-braces: validate that an OpenAPI
+document's schemas are well-formed and that example payloads conform, before
+the contract reaches consumers. Not required by any listing.
+
+\textbf{Alternatives.} \texttt{openapi-spec-validator} (validates the OpenAPI
+document itself, built on jsonschema); \texttt{check-jsonschema} (CLI wrapper).
+
+\textbf{Installation (PowerShell).}
+\begin{minted}{bash}
+python -m pip install "jsonschema>=4.21"
+\end{minted}
+
+%% ---------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+
+\begin{itemize}
+  \item \textbf{REST is a style, not a protocol.} Six constraints ---
+        client--server, statelessness, cacheability, uniform interface, layered
+        system, optional code-on-demand --- are traded for scalability,
+        visibility, reliability, and evolvability \cite{fielding2000rest}.
+  \item \textbf{Diagnose before you judge.} The Richardson Maturity Model
+        (POX $\rightarrow$ resources $\rightarrow$ verbs $\rightarrow$
+        hypermedia) tells you which constraints an API actually honors
+        \cite{richardson2013restful}. ``JSON over HTTP'' tells you nothing.
+  \item \textbf{Model things, not operations.} Nouns in URIs, the four
+        archetypes, reified actions, containment-only nesting (depth $\le 2$),
+        kebab-case, plural collections, bare trailing-slash policy, path for
+        identity and query for modulation.
+  \item \textbf{Let the uniform interface work.} Safety and idempotency are
+        contracts your retries and caches depend on; status codes are the
+        server's half of the conversation; ETags plus conditional requests give
+        caching and optimistic concurrency for free \cite{rfc9110}.
+  \item \textbf{PATCH means choosing a patch grammar.} Merge Patch for
+        forgiving updates, JSON Patch for atomic, preconditioned, concurrent
+        editing.
+  \item \textbf{Hypermedia is an investment decision.} Links and affordances
+        \cite{rfc8288} buy restructuring freedom; adopt selectively unless your
+        consumers genuinely outnumber your coordination bandwidth.
+  \item \textbf{Representations are products, not dumps.} Anti-corruption
+        layering, additive evolution, tolerant readers, and never reusing field
+        names keep APIs evolving for years \cite{kleppmann2017ddia,gehl2021apidesign}.
+  \item \textbf{Govern with code.} A linted route table and a design-first
+        OpenAPI contract \cite{openapi31} beat a wiki of good intentions.
+\end{itemize}
+
+%% ---------------------------------------------------------------------------
+\section{Quick-Reference Card}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Constraint} & \textbf{One-line test} \\
+    \midrule
+    Client--server & Can the UI and the datastore each change without the other? \\
+    Statelessness & Is every request self-contained --- no server session context? \\
+    Cacheability & Does every response say whether and how it may be cached? \\
+    Uniform interface & Resources identified; manipulated via representations; messages self-describing; hypermedia drives state? \\
+    Layered system & Could an intermediary be inserted without semantic change? \\
+    Code-on-demand (opt.) & If scripts are served, is the visibility loss accepted in writing? \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Six-constraint compliance checklist.}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{l c c l}
+    \toprule
+    \textbf{Method} & \textbf{Safe} & \textbf{Idempotent} & \textbf{Success} \\
+    \midrule
+    GET/HEAD & yes & yes & 200 / 304 \\
+    POST     & no  & no  & 201 (+ Location) or 200 \\
+    PUT      & no  & yes & 200 / 204 / 201 (412 on stale If-Match) \\
+    PATCH    & no  & (design for it) & 200 / 204 \\
+    DELETE   & no  & yes & 204 (404 on repeat is fine) \\
+    OPTIONS  & yes & yes & 204 + Allow \\
+    \bottomrule
+  \end{tabular}
+  \caption{Method semantics at a glance \cite{rfc9110}.}
+\end{table}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{RMM level} & \textbf{Signature} & \textbf{What you gain} \\
+    \midrule
+    0 --- POX & one URI, POST, 200-always & nothing; HTTP as tunnel \\
+    1 --- Resources & many noun URIs, one verb & addressability \\
+    2 --- Verbs & methods + status codes + validators & caching, safe retry, visibility \\
+    3 --- Hypermedia & representations carry links/forms & restructuring freedom, runtime discovery \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Richardson Maturity Model diagnostic \cite{richardson2013restful}.}
+\end{table}
+
+\begin{minted}{text}
+URI grammar: lowercase kebab-case . plural collections . depth <= 2 .
+  no verbs . no trailing slash (301 the slashed form) .
+  path = identity, query = modulation . URIs are opaque to clients
+\end{minted}
+
+\input{chapters/_standard_addendum}

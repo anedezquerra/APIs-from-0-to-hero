@@ -1,0 +1,4 @@
+# Stdlib-first: the Python 3.11+ standard library covers most of this project.
+# Add third-party packages only when the project genuinely needs them,
+# and update this file in the same change.
+pytest>=8

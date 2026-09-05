@@ -1,0 +1,2547 @@
+%% ============================================================================
+%% Chapter 11: Asynchronous & Event-Driven APIs: Webhooks, SSE & WebSockets
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{Asynchronous \& Event-Driven APIs: Webhooks, SSE \& WebSockets}
+\label{ch:async_apis}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Every chapter up to this point has treated HTTP as a telephone call: the
+client dials, the server answers, the connection hangs up. That
+request/response shape is the right default for the overwhelming majority of
+API work --- but it structurally cannot express a large and growing class of
+interactions in which \emph{the server knows something first}. A robot's
+battery crosses a critical threshold; a payment settles three minutes after
+checkout; a colleague edits the document you are viewing. In each case the
+interesting event originates server-side, and the client wants to know about
+it in milliseconds, not at the next polling interval. This chapter is about
+the three industrial-strength answers to that problem --- \textbf{webhooks},
+\textbf{Server-Sent Events (SSE)}, and \textbf{WebSockets} --- and about the
+engineering discipline each one demands before it can survive production.
+
+We begin with the interaction-pattern taxonomy, because the most expensive
+mistake in this space is choosing the wrong pattern, not implementing the
+right one badly. Request/response, short polling, long polling, and server
+push are compared on the axes that actually decide architectures: latency,
+fan-out cost, infrastructure compatibility, cacheability, and failure
+semantics. Webhooks are then treated with the seriousness they deserve as
+\emph{reverse APIs}: you, the provider, become an HTTP client calling
+endpoints you do not operate, across networks you do not control, with
+delivery guarantees you must engineer explicitly. We specify the de-facto
+industry contract wire by wire --- at-least-once delivery, bounded retries
+with exponential backoff, HMAC-SHA256 signatures over timestamp-plus-body in
+the Stripe-style \texttt{t=...,v1=...} header, timestamp tolerance windows
+for replay protection, endpoint verification handshakes, secret rotation,
+idempotent receivers, and dead-letter queues --- and we give the provider and
+consumer checklists that turn that contract into an operational habit.
+
+Server-Sent Events get the same wire-level treatment: the exact
+\texttt{text/event-stream} grammar (the \texttt{event}, \texttt{data},
+\texttt{id}, and \texttt{retry} fields, comment keep-alives, multi-line
+\texttt{data} folding), the \texttt{EventSource} reconnection protocol with
+\texttt{Last-Event-ID}, and the two production killers that rarely appear in
+tutorials --- buffering intermediaries that swallow your stream
+(\texttt{X-Accel-Buffering: no}) and the HTTP/1.1 six-connections-per-origin
+limit that HTTP/2 removes. WebSockets are specified per RFC~6455 with the
+full opening handshake --- including a worked derivation of
+\texttt{Sec-WebSocket-Accept} as
+$\mathrm{Base64}\bigl(\mathrm{SHA\text{-}1}(key \,\|\, \mathrm{GUID})\bigr)$ ---
+the frame format byte by byte, masking and the cache-poisoning rationale for
+it, opcodes, ping/pong keep-alive, close codes, and subprotocol negotiation.
+Just as importantly, we enumerate when WebSockets is the \emph{wrong} tool:
+stateless CRUD, cacheable reads, and anything that must traverse hostile
+intermediaries. The conceptual frame throughout is the event-driven
+architecture canon~\cite{kleppmann2017ddia} and its microservice
+application~\cite{newman2021microservices}, with HTTP semantics as specified
+in~\cite{rfc9110}.
+
+The code is production-shaped and entirely offline. You will build a webhook
+receiver that verifies Stripe-style HMAC signatures with a timestamp
+tolerance window and an idempotent event store; a delivery worker with
+bounded exponential-backoff retries, permanent-4xx short-circuiting, and a
+dead-letter log; an SSE producer emitting well-formed
+\texttt{text/event-stream} with \texttt{id} and \texttt{retry} fields plus a
+dependency-free client parser that resumes with \texttt{Last-Event-ID}; a
+WebSocket echo/broadcast demo with protocol-level ping/pong and a clean close
+handshake, alongside a pure-stdlib proof of the
+\texttt{Sec-WebSocket-Accept} derivation; and an AsyncAPI~3.0 document
+describing the Northwind Robotics telemetry contract~\cite{asyncapi}. Every
+listing is typed Python~3.11, deterministic, and covered by tests that run
+with no network, no credentials, and no clock dependence.
+
+\begin{keyconceptbox}
+Polling asks \emph{``has anything happened?''} on the client's schedule; push
+delivers \emph{``this happened''} on the server's schedule. The three push
+mechanisms are not interchangeable: \textbf{webhooks} push between
+\emph{servers} (durable, signed, retried, at-least-once), \textbf{SSE} pushes
+a one-way text stream to \emph{browsers and simple clients} over plain HTTP
+with automatic reconnection, and \textbf{WebSockets} open a full-duplex
+frame-oriented channel for genuinely bidirectional interaction. Choose by
+direction of data flow and who the consumer is --- then engineer delivery
+semantics, authentication, and backpressure explicitly, because none of the
+three gives you those for free.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch11-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Classify any real-time requirement --- dashboards, notifications,
+        chat, collaborative editing, server-to-server eventing --- into
+        request/response, short polling, long polling, SSE, WebSockets, or
+        webhooks, and defend the classification with a latency / fan-out /
+        infrastructure trade-off matrix.
+  \item Specify a production webhook contract end to end: at-least-once
+        delivery semantics, bounded retry schedules with exponential backoff,
+        HMAC-SHA256 signature headers in the \texttt{t=...,v1=...} scheme,
+        timestamp tolerance windows, endpoint verification handshakes, secret
+        rotation with overlapping \texttt{v1} entries, ordering caveats, and
+        dead-letter handling.
+  \item Implement an idempotent webhook receiver that verifies Stripe-style
+        HMAC signatures with a timestamp tolerance window, and a delivery
+        worker that distinguishes retryable from permanent failures --- in
+        typed Python~3.11 with FastAPI~\cite{fastapidocs}.
+  \item Read and write the \texttt{text/event-stream} wire format exactly:
+        \texttt{event}/\texttt{data}/\texttt{id}/\texttt{retry} fields,
+        multi-line \texttt{data} folding, comment keep-alives; explain
+        \texttt{EventSource} reconnection with \texttt{Last-Event-ID}; and
+        neutralize buffering proxies with \texttt{X-Accel-Buffering: no}.
+  \item Derive \texttt{Sec-WebSocket-Accept} from
+        \texttt{Sec-WebSocket-Key} using SHA-1 and the RFC~6455 GUID; parse a
+        WebSocket frame header byte by byte (FIN, opcode, mask bit, 7/16/64-bit
+        payload lengths); explain why client-to-server masking exists; and use
+        ping/pong and close codes correctly.
+  \item Decide when WebSockets is the wrong choice --- stateless CRUD,
+        cacheable content, hostile intermediaries, horizontally scaled
+        stateless services --- and articulate what SSE, long polling, or plain
+        REST does better in each case.
+  \item Describe an event-driven contract in AsyncAPI~3.0 (channels,
+        messages, operations, bindings) and govern event schemas with the
+        same rigor as OpenAPI-governed REST contracts~\cite{asyncapi}.
+  \item Design consumer-side processing for at-least-once streams:
+        idempotent consumers, poison-message quarantine, and the operational
+        telemetry that detects retry storms before they become incidents.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed:
+
+\begin{itemize}
+  \item \textbf{Chapter 0} --- environment setup: Python 3.11+, a virtual
+        environment, and \texttt{pip}/\texttt{pytest} under PowerShell.
+  \item \textbf{Chapter 1} --- the HTTP wire protocol: methods, status codes,
+        header fields, connection management, and the Upgrade mechanism
+        \cite{rfc9110}.
+  \item \textbf{Chapter 2} --- consuming APIs from Python, including
+        streaming response bodies with \texttt{httpx}~\cite{httpxdocs}.
+  \item \textbf{Chapters 3--4} --- REST resource modeling and serialization
+        contracts; events are just representations pushed instead of pulled.
+  \item \textbf{Chapter 5} --- client-side security fundamentals: TLS,
+        bearer tokens~\cite{rfc6749}, and HMAC concepts, which this chapter
+        extends to message signing.
+  \item \textbf{Chapter 6} --- building APIs with FastAPI: routing, Pydantic
+        models, dependency injection, and \texttt{TestClient}
+        \cite{fastapidocs}.
+  \item \textbf{Chapter 7} --- error modeling with problem details, reused
+        here for webhook rejection responses.
+\end{itemize}
+
+No network access, cloud account, or API key is required anywhere in this
+chapter. Every server binds to \texttt{127.0.0.1}; every fixture is
+synthetic, embedded, and deterministic, set in the fictional \emph{Northwind
+Robotics} fleet-telemetry universe.
+
+\begin{warningbox}
+Webhooks invert the trust relationship you are used to. When you \emph{send}
+webhooks you are an HTTP client exposed to arbitrary customer endpoints
+(SSRF, slow receivers, retry storms); when you \emph{receive} them you are an
+unauthenticated-by-default server that the public internet will probe within
+minutes of deployment. Both directions require explicit security
+engineering --- signatures, tolerances, timeouts, and bounded retries ---
+none of which frameworks provide by default.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch11-mechanics}
+
+\subsection{The Interaction-Pattern Taxonomy}
+\label{sec:ch11-taxonomy}
+
+Strip away branding and every real-time mechanism reduces to one question:
+\emph{who initiates, and how long does the connection live?}
+
+\begin{definition}[Interaction pattern]
+An \emph{interaction pattern} is the contract about initiation and connection
+lifetime between a consumer and a producer of API data. The four canonical
+patterns are: \textbf{request/response} (consumer initiates; one response per
+request; connection reusable but logically stateless); \textbf{short polling}
+(consumer re-issues request/response on a fixed interval, usually receiving
+``nothing new''); \textbf{long polling} (consumer initiates; producer
+\emph{holds} the request open until data is available or a deadline passes,
+then the consumer immediately re-issues); and \textbf{server push} (producer
+initiates delivery over a long-lived or provider-initiated channel: SSE,
+WebSocket, or an outbound webhook call).
+\end{definition}
+
+Short polling is request/response with a timer, and its economics are brutal
+at scale: if a dashboard polls every $5\,\mathrm{s}$ for events that arrive
+twice an hour, over $99\%$ of requests are empty work --- yet the load
+balancer, TLS terminator, auth middleware, and application worker pay full
+price for every one. Long polling converts that waste into connection
+occupancy: fewer, longer requests, each of which returns the instant data
+arrives. It works through every proxy and firewall on earth because it
+\emph{is} plain HTTP, but each notification still costs a full
+request/response cycle, and a ``thundering reconnect'' after every publish
+can stampede the server.
+
+Server push inverts initiation. SSE keeps one HTTP response open forever and
+appends events to it --- strictly server-to-client, text-only, but otherwise
+an ordinary HTTP response that enjoys CORS, cookies, and standard auth.
+WebSockets perform an HTTP Upgrade and then abandon HTTP semantics entirely
+for a bidirectional frame protocol. Webhooks abandon the shared connection
+altogether: the \emph{provider} makes a fresh outbound HTTP POST to an
+endpoint the \emph{consumer} registered, making webhooks the only pattern
+that works server-to-server with no consumer-side listening socket.
+
+Figure~\ref{fig:ch11-patterns} draws the four shapes side by side.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      >=stealth,
+      lifeline/.style={draw=packtgray, dashed},
+      actor/.style={rectangle, draw=packtgray, fill=lightgray, minimum width=1.7cm, minimum height=0.7cm, align=center},
+      flow/.style={->, thick, packtgray},
+      pushflow/.style={->, thick, packtorange},
+    ]
+    % --- Panel 1: request/response ---
+    \begin{scope}
+      \node[actor] (c1) {Client};
+      \node[actor, right=2.2cm of c1] (s1) {Server};
+      \draw[lifeline] (c1.south) -- ++(0,-1.5);
+      \draw[lifeline] (s1.south) -- ++(0,-1.5);
+      \draw[flow] ([yshift=-0.35cm]c1.south) -- node[above, note]{request} ([yshift=-0.35cm]s1.south);
+      \draw[flow] ([yshift=-0.85cm]s1.south) -- node[above, note]{response} ([yshift=-0.85cm]c1.south);
+      \node[note, below=1.65cm of c1, align=center] {\textbf{Request/response}\\ one shot, client initiates};
+    \end{scope}
+    % --- Panel 2: short polling ---
+    \begin{scope}[xshift=6.2cm]
+      \node[actor] (c2) {Client};
+      \node[actor, right=2.2cm of c2] (s2) {Server};
+      \draw[lifeline] (c2.south) -- ++(0,-1.5);
+      \draw[lifeline] (s2.south) -- ++(0,-1.5);
+      \draw[flow] ([yshift=-0.25cm]c2.south) -- ([yshift=-0.25cm]s2.south);
+      \draw[flow] ([yshift=-0.55cm]s2.south) -- node[above, note]{204 / empty} ([yshift=-0.55cm]c2.south);
+      \draw[flow] ([yshift=-0.95cm]c2.south) -- ([yshift=-0.95cm]s2.south);
+      \draw[flow] ([yshift=-1.25cm]s2.south) -- node[above, note]{empty again} ([yshift=-1.25cm]c2.south);
+      \node[note, below=1.65cm of c2, align=center] {\textbf{Short polling}\\ interval $t$, mostly wasted};
+    \end{scope}
+    % --- Panel 3: long polling ---
+    \begin{scope}[yshift=-4.4cm]
+      \node[actor] (c3) {Client};
+      \node[actor, right=2.2cm of c3] (s3) {Server};
+      \draw[lifeline] (c3.south) -- ++(0,-1.7);
+      \draw[lifeline] (s3.south) -- ++(0,-1.7);
+      \draw[flow] ([yshift=-0.3cm]c3.south) -- node[above, note]{GET (held open)} ([yshift=-0.3cm]s3.south);
+      \draw[decorate, decoration={brace, amplitude=4pt}, packtgray] ([yshift=-0.45cm, xshift=0.1cm]s3.south) -- ([yshift=-1.05cm, xshift=0.1cm]s3.south) node[midway, right=4pt, note]{server waits};
+      \draw[pushflow] ([yshift=-1.15cm]s3.south) -- node[above, note]{event arrives} ([yshift=-1.15cm]c3.south);
+      \node[note, below=1.85cm of c3, align=center] {\textbf{Long polling}\\ held request, immediate re-issue};
+    \end{scope}
+    % --- Panel 4: server push ---
+    \begin{scope}[xshift=6.2cm, yshift=-4.4cm]
+      \node[actor] (c4) {Client};
+      \node[actor, right=2.2cm of c4] (s4) {Server};
+      \draw[lifeline] (c4.south) -- ++(0,-1.7);
+      \draw[lifeline] (s4.south) -- ++(0,-1.7);
+      \draw[flow] ([yshift=-0.3cm]c4.south) -- node[above, note]{open channel} ([yshift=-0.3cm]s4.south);
+      \draw[pushflow] ([yshift=-0.8cm]s4.south) -- node[above, note]{event 1} ([yshift=-0.8cm]c4.south);
+      \draw[pushflow] ([yshift=-1.2cm]s4.south) -- node[above, note]{event 2} ([yshift=-1.2cm]c4.south);
+      \node[note, below=1.85cm of c4, align=center] {\textbf{Server push (SSE / WS / webhook)}\\ one open channel, many events};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{The four interaction patterns. Request/response and short polling
+  put the client in charge of timing; long polling holds the request until
+  the server has something to say; push keeps a channel open (or calls back
+  out, for webhooks) so the server initiates delivery.}
+  \label{fig:ch11-patterns}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X X X}
+    \toprule
+    \textbf{Pattern} & \textbf{Typical latency} & \textbf{Fan-out cost} & \textbf{Infrastructure fit} & \textbf{Failure semantics} \\
+    \midrule
+    Request/response & one round trip & one request per consumer per read & universal; cacheable & clean: status code per call \\
+    Short polling & up to interval $t$ & $N$ consumers $\times$ $1/t$ requests, mostly empty & universal; cacheable in principle & clean; but load spikes \\
+    Long polling & near-instant per event & one held connection per consumer; reconnect stampede per event & excellent; passes any proxy & held-request timeouts; retry is client logic \\
+    SSE & near-instant, continuous & one socket per consumer; cheap frames & good; blocked by buffering proxies; HTTP/1.1 six-per-origin cap & automatic reconnect + \texttt{Last-Event-ID} \\
+    WebSocket & near-instant, both directions & one socket per consumer; frame overhead minimal & fair; Upgrade blocked by some proxies; not cacheable & manual reconnect; app-level heartbeat \\
+    Webhooks & seconds (queued, retried) & provider makes one outbound POST per subscriber per event & server-to-server only; consumer needs a public endpoint & at-least-once; DLQ after bounded retries \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Pattern selection matrix. ``Latency'' is data-arrival latency seen
+  by the consumer; ``fan-out cost'' is the marginal cost of the $N$-th
+  consumer.}
+  \label{tab:ch11-pattern-matrix}
+\end{table}
+
+Two cells of Table~\ref{tab:ch11-pattern-matrix} decide most real
+architectures. First: \emph{is the consumer a browser or a server?} Browsers
+cannot receive inbound connections, so server-to-server push (webhooks) is
+out; browsers speak SSE and WebSocket natively. Second: \emph{is the traffic
+one-way or two-way?} A telemetry dashboard is one-way --- SSE wins on
+simplicity, reconnection semantics, and proxy friendliness. A collaborative
+editor is two-way --- WebSocket is the only honest fit. Polling survives
+everywhere as the zero-infrastructure fallback, and Chapter~10's caching
+machinery can make short polling of \emph{cacheable} resources nearly free,
+which is why ``just poll with \texttt{ETag}'' remains the right answer more
+often than fashion suggests.
+
+\subsection{Webhooks: The Reverse-API Pattern}
+\label{sec:ch11-webhooks}
+
+\begin{definition}[Webhook]
+A \emph{webhook} is a provider-initiated HTTP callback: the consumer
+registers an endpoint URL with the provider; when a subscribed event occurs,
+the provider serializes the event and POSTs it to that URL. Delivery is
+\emph{at-least-once}: the provider retries until it receives a 2xx or
+exhausts its retry budget, so duplicates are a contractual certainty, not an
+edge case.
+\end{definition}
+
+Webhooks look trivial --- ``just POST JSON when something happens'' --- and
+that illusion is responsible for a disproportionate share of production
+incidents. The provider is now an HTTP client making unsolicited calls to
+arbitrary internet endpoints; the consumer is now an unauthenticated server
+accepting unsolicited calls from the internet. Every guarantee that plain
+REST gets for free must be rebuilt explicitly.
+
+\subsubsection{Delivery semantics and retry schedules}
+
+At-least-once delivery is not a lazy implementation choice; it is the only
+semantics compatible with unreliable networks. Exactly-once delivery over a
+network partition is provably impossible (the Two Generals problem); the
+provider cannot distinguish ``consumer crashed before processing'' from
+``consumer processed but the 200 was lost in transit.'' Since the second case
+\emph{must} be retried, the first case is retried too --- hence duplicates.
+The honest contract is: \emph{at-least-once transport, exactly-once
+processing}, where the consumer achieves the second half via idempotency
+(Chapter~10).
+
+A production retry schedule is bounded, exponential, and jittered. A typical
+shape: attempts at $0$, $1$, $2$, $4$, $8$ minutes, then hourly for up to 24
+or 72 hours, then dead-letter. Jitter (random $\pm 20\%$) prevents
+synchronized retry storms when a popular consumer recovers from an outage and
+ten thousand queued deliveries fire simultaneously. Crucially, the schedule
+distinguishes \emph{retryable} failures --- connection errors, timeouts, 408,
+409, 425, 429, and 5xx --- from \emph{permanent} ones: a 400 or 422 means the
+payload itself is rejected and retrying it ten thousand times is an
+own-goal DDoS (Section~\ref{sec:ch11-lab} tells that war story).
+
+\subsubsection{Signature verification: the \texttt{t=...,v1=...} scheme}
+
+A webhook endpoint is a public URL that accepts POSTs from anyone who finds
+it. Without authentication, whoever guesses the URL can inject fabricated
+``payment succeeded'' or ``robot docked'' events. Bearer tokens in a
+configured header help, but the industry standard --- popularized by Stripe
+and now near-universal --- is symmetric \textbf{HMAC-SHA256 message signing}:
+
+\begin{equation}
+  \sigma \;=\; \operatorname{HMAC\text{-}SHA256}\bigl(k,\; t \,\|\, \texttt{"."} \,\|\, b\bigr)
+  \label{eq:ch11-hmac}
+\end{equation}
+
+where $k$ is the per-endpoint signing secret, $t$ is the Unix timestamp at
+signing time, and $b$ is the \emph{raw, unparsed} request body. The provider
+sends the timestamp and signature together in one header:
+
+\begin{minted}{text}
+POST /webhooks/telemetry HTTP/1.1
+Host: ops.customer.example
+Content-Type: application/json
+X-Northwind-Signature: t=1700000000,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd
+                        \_________/ \____________________________________________________/
+                        timestamp   hex HMAC-SHA256 over "1700000000.<raw-body>"
+                        (replay     (proves possession of the shared secret k;
+                         anchor)     multiple v1= entries allowed during rotation)
+\end{minted}
+
+The receiver recomputes Equation~\eqref{eq:ch11-hmac} over the raw body and
+the header's own $t$, then compares with constant-time semantics
+(\texttt{hmac.compare\_digest}), because a naive \texttt{==} on hex strings
+leaks prefix-match timing that can be iterated into a forgery oracle. Three
+independent checks, three independent failure modes:
+
+\begin{enumerate}
+  \item \textbf{Freshness:} $|now - t| \leq$ tolerance (typically 300\,s).
+        This is the replay-protection window: a captured request replayed
+        later carries a stale $t$ and is rejected regardless of signature
+        validity. The tolerance exists only to absorb clock skew and delivery
+        latency; keep it tight.
+  \item \textbf{Authenticity:} at least one \texttt{v1} candidate matches the
+        recomputed HMAC. Multiple \texttt{v1} values in one header are the
+        secret-rotation mechanism: during rotation the provider signs with
+        both the old and new secret, and receivers configured with either
+        accept.
+  \item \textbf{Integrity:} the HMAC covers the timestamp and body together,
+        so neither can be altered without detection. Signing the raw bytes
+        --- not a re-serialized object --- matters: JSON re-serialization is
+        not byte-stable (key order, whitespace, Unicode escapes), so verify
+        \emph{before} parsing.
+\end{enumerate}
+
+\subsubsection{Endpoint verification, rotation, ordering, and the DLQ}
+
+Before a provider sends real events, it must prove the registrant actually
+controls the endpoint --- otherwise webhooks become an amplification vector
+for attacking third parties. The standard \emph{verification handshake}: at
+registration time the provider POSTs a challenge (a random token) and
+requires the endpoint to echo it back, or requires the registrant to complete
+an out-of-band confirmation. Slack-style \texttt{url\_verification}
+challenges and WebSub-style hub-challenge GETs are the canonical shapes.
+
+Secret rotation follows the overlap pattern above: issue $k'$, sign with both
+$k$ and $k'$ for one tolerance window, then retire $k$. Providers must also
+support consumer-triggered rotation with immediate effect --- when a consumer
+suspects a leak, ``rotate within 24 hours'' is not an answer.
+
+\textbf{Ordering is not part of the contract.} Retries, parallel delivery
+workers, and per-endpoint queues conspire to deliver \texttt{created} after
+\texttt{updated}, or to deliver the same event twice with a third event in
+between. Consumers must either be order-insensitive (each event carries full
+current state --- the \emph{state-transfer} style) or must buffer and reorder
+by a monotonic sequence number or \texttt{occurred\_at} timestamp the
+provider includes in every payload. Northwind Robotics events carry both an
+\texttt{id} and an \texttt{occurred\_at} for exactly this reason.
+
+Finally, the \textbf{dead-letter queue}: when the retry budget is exhausted,
+the event and its full attempt history must land somewhere durable and
+alerted, with a replay tool. A webhook provider without a DLQ silently loses
+customer data on the first extended consumer outage; a DLQ without alerting
+is a write-only graveyard.
+
+\begin{keyconceptbox}
+\textbf{Provider checklist:} verify endpoint ownership before first delivery;
+sign every delivery (HMAC-SHA256 over timestamp + raw body); retry only
+retryable failures, with bounded exponential backoff plus jitter; honor
+consumer-driven secret rotation immediately; include a unique event id and
+timestamp in every payload; dead-letter with alerting and a replay tool;
+document that ordering is best-effort.
+\textbf{Consumer checklist:} verify freshness \emph{then} signature, in
+constant time, over raw bytes, before parsing; respond 2xx only after the
+event is durably recorded (or 2xx-fast with a queue in front); make
+processing idempotent on event id; never log raw payloads or secrets;
+return 4xx for malformed requests so the provider stops retrying; monitor
+duplicate rates --- a spike means a retry storm is in progress.
+\end{keyconceptbox}
+
+Figure~\ref{fig:ch11-webhook-fsm} captures the provider-side delivery
+lifecycle as a state machine; the code in
+Section~\ref{sec:ch11-code-webhooks} implements it exactly.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      >=stealth,
+      state/.style={rectangle, rounded corners, draw=packtgray, fill=blue!5, minimum width=2.6cm, minimum height=0.85cm, align=center},
+      terminal/.style={rectangle, rounded corners, draw=packtgray, fill=green!10, minimum width=2.6cm, minimum height=0.85cm, align=center},
+      dead/.style={rectangle, rounded corners, draw=packtgray, fill=yellow!15, minimum width=2.6cm, minimum height=0.85cm, align=center},
+      edge/.style={->, thick, packtgray},
+      every label/.style={note},
+    ]
+    \node[state] (queued) {QUEUED};
+    \node[state, right=2.4cm of queued] (attempt) {ATTEMPTING};
+    \node[terminal, right=2.4cm of attempt] (delivered) {DELIVERED};
+    \node[state, below=1.5cm of attempt] (backoff) {BACKOFF-WAIT};
+    \node[dead, left=2.4cm of backoff] (dlq) {DEAD-LETTERED};
+
+    \draw[edge] (queued) -- node[above, note]{worker picks up} (attempt);
+    \draw[edge] (attempt) -- node[above, note]{2xx} (delivered);
+    \draw[edge] (attempt) -- node[right, note, align=left]{retryable failure\\ (5xx / 429 / timeout)\\ and attempts $<$ max} (backoff);
+    \draw[edge] (backoff) -- node[above, note]{delay $2^{n}$ expires} (attempt);
+    \draw[edge] (attempt) -| node[pos=0.25, below, note, align=center]{permanent 4xx\\ or attempts $=$ max} (dlq);
+    \draw[edge] (dlq) -- node[left, note, align=right]{operator replay\\ (re-enqueue)} (queued);
+  \end{tikzpicture}
+  \caption{Webhook delivery state machine. Every terminal failure is either a
+  permanent rejection (do not retry a payload the consumer has told you is
+  invalid) or budget exhaustion into the dead-letter queue, from which only
+  an explicit operator action restores the event.}
+  \label{fig:ch11-webhook-fsm}
+\end{figure}
+
+\subsection{Server-Sent Events: \texttt{text/event-stream} on the Wire}
+\label{sec:ch11-sse}
+
+Server-Sent Events are the most underrated mechanism in this chapter: a
+completely standard HTTP response whose body simply never ends, carrying a
+tiny text protocol that browsers parse natively via the \texttt{EventSource}
+API. There is no upgrade, no new framing layer, no new attack surface --- the
+stream is cache-control-compatible, CORS-compatible, cookie-authenticated,
+and readable with \texttt{curl}.
+
+\begin{definition}[Server-Sent Events]
+\emph{Server-Sent Events} (SSE) is a W3C/WHATWG protocol in which a server
+responds to a GET with \texttt{Content-Type: text/event-stream} and then
+writes a sequence of UTF-8 \emph{event blocks} separated by blank lines. Each
+block consists of \texttt{field: value} lines; the defined fields are
+\texttt{event} (named type, default \texttt{message}), \texttt{data} (the
+payload; multiple \texttt{data} lines are joined with \texttt{\textbackslash
+n}), \texttt{id} (the last-event-id cursor used for reconnection), and
+\texttt{retry} (reconnection delay in milliseconds). Lines beginning with a
+colon are comments and serve as keep-alives.
+\end{definition}
+
+The wire format, exactly as bytes on the connection:
+
+\begin{minted}{text}
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+X-Accel-Buffering: no
+
+: connected to northwind telemetry (comment line = keep-alive; proxies flush on bytes)
+
+event: telemetry
+data: {"robot": "NWR-07",
+data: "battery": 0.82}
+id: 128
+retry: 2000
+
+event: alert
+data: {"robot": "NWR-07", "alert": "dock requested"}
+id: 129
+
+: keep-alive (sent every ~15 s so idle proxies do not reap the connection)
+\end{minted}
+
+The grammar rules that bite in production: field name and value are separated
+by a colon plus one \emph{optional} leading space; a blank line
+\textbf{dispatches} the buffered event; a block with no \texttt{data} field
+is discarded; a \texttt{data} value split across lines is rejoined with
+newlines in order; \texttt{id} must not contain newlines and \emph{persists}
+--- the client's last-event-id is sticky until replaced; \texttt{retry} is
+parsed as ASCII digits only, everything else is ignored.
+
+\subsubsection{Reconnection and \texttt{Last-Event-ID}}
+
+SSE's killer feature is that reconnection is \emph{protocol}, not
+application code. When the TCP connection drops, the browser's
+\texttt{EventSource} waits the most recent \texttt{retry} interval (default
+three seconds), re-issues the GET, and automatically sets the
+\texttt{Last-Event-ID} request header to the id of the last dispatched event.
+A correct server reads that header and resumes the stream \emph{after} it ---
+from a ring buffer, an event log, or a broker offset. This gives SSE
+something WebSocket does not have: a standardized, zero-code resumability
+story. The contract has one sharp edge: the server decides how much history
+to retain, so ``resume'' is bounded by the retention window; a client that
+reconnects after the window has scrolled past must receive a signal (a
+\texttt{control} event, or an HTTP 204 telling \texttt{EventSource} to stop)
+and fall back to a full re-fetch.
+
+\begin{examplebox}
+The browser side is deliberately unremarkable --- that is the point:
+\begin{minted}{text}
+const source = new EventSource("/stream");          // cookies flow automatically
+source.addEventListener("telemetry", (e) => render(JSON.parse(e.data)));
+source.addEventListener("alert",     (e) => escalate(JSON.parse(e.data)));
+source.onerror = () => { /* browser retries automatically with Last-Event-ID */ };
+// e.lastEventId is the id: field; server-set "retry: 2000" controls the backoff
+\end{minted}
+No reconnection logic, no heartbeat logic, no framing logic. Everything that
+WebSocket leaves to you, the SSE user agent already does.
+\end{examplebox}
+
+\subsubsection{Proxy buffering and HTTP/2}
+
+Two infrastructure facts kill more SSE deployments than any protocol bug.
+First, \textbf{buffering intermediaries}: many reverse proxies (nginx in
+default proxy mode, some CDNs, some corporate egress proxies) buffer response
+bodies before forwarding --- which turns your real-time stream into a
+not-real-time dump delivered when the buffer fills or the connection closes.
+The defenses: set \texttt{X-Accel-Buffering: no} (honored by nginx and
+Envoy), send \texttt{Cache-Control: no-cache}, flush after every event, and
+emit comment keep-alives every 10--15 seconds so idle-timeout middleboxes see
+traffic. Second, \textbf{the HTTP/1.1 connection cap}: browsers allow only
+six concurrent connections per origin, and each \texttt{EventSource} holds
+one for its entire lifetime --- two open dashboard tabs can starve every
+other request to that origin. Over HTTP/2 the cap effectively disappears
+(streams are multiplexed over one connection), so SSE \emph{wants} HTTP/2 ---
+with the caveat that a single TCP connection's head-of-line blocking then
+applies to everything multiplexed on it.
+
+\subsection{WebSockets: RFC~6455 Precisely}
+\label{sec:ch11-websockets}
+
+WebSocket is not ``HTTP but faster.'' It is a distinct, frame-oriented,
+bidirectional protocol that borrows HTTP only for its opening handshake ---
+deliberately, so that the same port 80/443 infrastructure, TLS termination,
+and Upgrade machinery~\cite{rfc9110} can be reused.
+
+\subsubsection{The opening handshake}
+
+The client sends an ordinary HTTP/1.1 GET with \texttt{Upgrade: websocket},
+\texttt{Connection: Upgrade}, a protocol version (\texttt{Sec-WebSocket-
+Version: 13}), and a randomly generated 16-byte nonce, Base64-encoded, in
+\texttt{Sec-WebSocket-Key}. The server proves it understood the WebSocket
+upgrade --- and was not merely an HTTP server echoing headers --- by
+computing:
+
+\begin{equation}
+  \texttt{Sec-WebSocket-Accept} \;=\;
+  \operatorname{Base64}\Bigl(\operatorname{SHA\text{-}1}\bigl(\texttt{Sec-WebSocket-Key} \,\|\, \texttt{"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"}\bigr)\Bigr)
+  \label{eq:ch11-ws-accept}
+\end{equation}
+
+The magic GUID is fixed by RFC~6455 section~1.3; it guarantees the
+concatenated string can never be a plausible HTTP artifact, so a
+non-WebSocket server cannot accidentally produce a valid accept value. The
+worked example from the RFC itself --- which Listing~11.6
+reproduces and asserts in pure stdlib Python --- is:
+
+\begin{minted}{text}
+Client:  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Server:  SHA-1("dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+       = 0xb3 0x7a 0x4f 0x2c 0xc0 0x62 0x4f 0x16 0x90 0xf6
+         0x46 0x06 0xcf 0x38 0x59 0x45 0xb2 0xbe 0xc4 0xea
+       -> Base64 -> Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+\end{minted}
+
+The server answers \texttt{101 Switching Protocols}, and from that byte
+onward the connection speaks frames, not HTTP. Optional handshake headers
+negotiate \emph{subprotocols} (\texttt{Sec-WebSocket-Protocol:
+mqtt, chat.v2}) and extensions (\texttt{Sec-WebSocket-Extensions:
+permessage-deflate} for compression); the server picks at most one
+subprotocol, and a client that required one must fail the connection if the
+server's pick is absent.
+
+\subsubsection{Frame format}
+
+Every post-handshake message travels in frames with a 2--14 byte header:
+
+\begin{minted}{text}
+ byte 0                     byte 1                     extended length
++-+-+-+-+-+-+-+-----------+-+-----------+-----------------------------+
+|F|R|R|R|opcode|M| payload len (7 bits) |  0 / 16 / 64 extra bits     |
+|I|S|S|S|       |A|                       (126 -> 16-bit,             |
+|N|V|V|V|       |S|                        127 -> 64-bit big-endian)  |
++-+-+-+-+-+-+-+-----------+-+-----------+-----------------------------+
+| masking key (32 bits, present iff MASK=1; client->server MUST mask) |
++---------------------------------------------------------------------+
+| payload (XORed with masking key when masked)                        |
++---------------------------------------------------------------------+
+
+opcodes: 0x0 continuation  0x1 text (UTF-8)  0x2 binary
+         0x8 close         0x9 ping          0xA pong    (0x3-0x7, 0xB-0xF reserved)
+\end{minted}
+
+The header fields: \textbf{FIN} marks the final fragment of a message
+(messages may be fragmented into continuation frames, so receivers must
+reassemble); \textbf{RSV1--3} are zero unless an extension (e.g.\
+permessage-deflate) claims them; the 4-bit \textbf{opcode} selects data
+versus control; the \textbf{MASK} bit announces whether a masking key
+follows; and the payload length is \emph{self-describing} --- values 0--125
+are literal, 126 means ``read the next 2 bytes as a big-endian uint16,'' and
+127 means ``read the next 8 bytes as a big-endian uint63'' (the high bit must
+be zero). Control frames (close, ping, pong) must have FIN set and payloads
+$\leq 125$ bytes, and may be interleaved \emph{between} fragments of a data
+message.
+
+\textbf{Why masking exists} is the most-asked WebSocket interview question,
+and the answer is not confidentiality. Client-to-server frames are XOR-masked
+with a fresh random 32-bit key per frame to defend \emph{intermediaries}, not
+endpoints: researchers showed that a hostile script in a browser could
+otherwise craft bytes that, to a misbehaving transparent proxy, look like a
+smuggled HTTP request --- poisoning shared caches (the 2010 ``cache
+poisoning'' attack that motivated the mask). Because the key is chosen by the
+sender's stack after the application supplied the bytes, the attacker cannot
+predict what the masked output will look like on the wire. Masking costs a
+few cycles; server-to-client frames skip it.
+
+\textbf{Ping/pong} (opcodes 0x9/0xA) is protocol-level keep-alive and
+liveness detection: either peer may ping; the other must pong ``as soon as
+practical'' with identical payload. TCP itself will happily keep a dead
+connection ``open'' for hours, so applications that care about zombie
+connections ping every 20--30 seconds and close after a missed pong.
+\textbf{Close} (0x8) is a handshake, not a hang-up: the initiator sends a
+close frame with a 2-byte status code and optional UTF-8 reason; the peer
+echoes a close frame; then the TCP connection drops. Key codes: 1000 normal,
+1001 going away (server restart / page navigation), 1002 protocol error,
+1003 unsupported data, 1006 is \emph{reserved} for abnormal closure and must
+never appear on the wire, 1007 invalid payload, 1008 policy violation, 1009
+message too big, 1011 internal server error.
+
+\subsubsection{When WebSockets is the wrong choice}
+
+WebSocket's power is exactly its cost: it abandons HTTP semantics, so nothing
+in the HTTP toolchain applies --- no caching, no \texttt{ETag}, no
+idempotency vocabulary, no status codes, no content negotiation, no
+meaningful gateway routing. Reach for something else when:
+
+\begin{itemize}
+  \item \textbf{The work is stateless CRUD.} Create/read/update/delete with
+        request/response semantics wants REST: you get caching, retries,
+        tracing, and firewall friendliness for free~\cite{rfc9110}.
+  \item \textbf{The data is cacheable.} A WebSocket frame cannot be cached by
+        a CDN; an \texttt{ETag}-polled resource can be nearly free at scale.
+  \item \textbf{The traffic is one-way.} SSE is simpler, resumable, and
+        proxy-friendlier; WebSocket buys you a send channel you will never
+        use and bills you in connection-management code.
+  \item \textbf{Hostile intermediaries are in the path.} Some corporate
+        proxies and older load balancers mangle or refuse \texttt{Upgrade}.
+        SSE and long polling degrade gracefully; WebSocket just fails.
+  \item \textbf{You need horizontal statelessness.} Each WebSocket pins a
+        client to a server process; broadcast across a fleet requires a
+        backplane (broker fan-out, Redis pub/sub). SSE has the same pinning
+        but simpler recovery, because reconnection with
+        \texttt{Last-Event-ID} is built in.
+\end{itemize}
+
+Figure~\ref{fig:ch11-topology} contrasts the two push topologies directly.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\small,
+      >=stealth,
+      box/.style={rectangle, draw=packtgray, fill=lightgray, minimum width=2.0cm, minimum height=0.8cm, align=center},
+      srv/.style={rectangle, draw=packtgray, fill=blue!5, minimum width=2.2cm, minimum height=0.9cm, align=center},
+      conn/.style={<->, thick, packtorange},
+      uni/.style={->, thick, packtorange},
+      lbl/.style={note, align=center},
+    ]
+    % SSE panel
+    \node[srv] (sse) {SSE server\\ (plain HTTP)};
+    \node[box, above left=1.2cm and 1.6cm of sse] (b1) {Browser tab};
+    \node[box, above=1.2cm of sse] (b2) {Browser tab};
+    \node[box, above right=1.2cm and 1.6cm of sse] (b3) {\texttt{httpx} client};
+    \draw[uni] (sse) -- node[lbl, pos=0.55, above left=-2pt]{\texttt{GET} then \texttt{text/event-stream}\\ one-way; auto-reconnect + Last-Event-ID} (b1);
+    \draw[uni] (sse) -- (b2);
+    \draw[uni] (sse) -- (b3);
+    \node[lbl, below=0.35cm of sse] {\textbf{SSE topology:} $N$ long-lived HTTP responses, server $\to$ client only};
+
+    % WebSocket panel
+    \node[srv, right=6.8cm of sse] (ws) {WebSocket server\\ (post-Upgrade)};
+    \node[box, above left=1.2cm and 1.6cm of ws] (w1) {Browser tab};
+    \node[box, above=1.2cm of ws] (w2) {Browser tab};
+    \node[box, above right=1.2cm and 1.6cm of ws] (w3) {Robot console};
+    \draw[conn] (ws) -- node[lbl, pos=0.55, above left=-2pt]{full-duplex frames\\ text/binary, ping/pong} (w1);
+    \draw[conn] (ws) -- (w2);
+    \draw[conn] (ws) -- (w3);
+    \node[lbl, below=0.35cm of ws] {\textbf{WebSocket topology:} $N$ upgraded channels, both directions};
+  \end{tikzpicture}
+  \caption{SSE versus WebSocket topology. Both pin one socket per client;
+  SSE's channel is a plain HTTP response with standardized resume, while
+  WebSocket's is a symmetric frame channel requiring application-level
+  reconnection.}
+  \label{fig:ch11-topology}
+\end{figure}
+
+\subsection{AsyncAPI and the Governance of Event Contracts}
+\label{sec:ch11-asyncapi}
+
+REST APIs got their contract discipline from OpenAPI; event-driven APIs get
+theirs from \textbf{AsyncAPI}~\cite{asyncapi}. The conceptual mapping is
+direct: where OpenAPI has paths and operations, AsyncAPI has \emph{channels}
+(addressable destinations such as a Kafka topic
+\texttt{northwind.robots.\{robot\_id\}.telemetry}) and \emph{operations}
+(send/receive over a channel); where OpenAPI has request/response schemas,
+AsyncAPI has \emph{messages} with payload schemas; \emph{bindings} attach
+protocol-specific configuration (Kafka partitions, MQTT QoS, WebSocket
+subprotocols) without polluting the logical contract. Listing~11.8
+shows the Northwind Robotics telemetry contract in AsyncAPI~3.0.
+
+Governance is the point, not the YAML. Event schemas evolve under exactly the
+same compatibility algebra as REST representations (Chapter~9): additive
+changes are safe, removals and renamings break consumers you have never met
+--- and in event-driven systems you \emph{cannot} meet them, because the
+whole point of the broker is that producers do not know their consumers.
+Discipline therefore means: a schema registry or repository as the single
+source of truth, CI gates that reject breaking schema diffs, explicit
+compatibility modes (backward for consumers-first rollout), and a deprecation
+workflow for event types exactly as for endpoints. The consumer-side
+corollaries mirror the webhook contract from
+Section~\ref{sec:ch11-webhooks}: assume \textbf{at-least-once} delivery and
+make every consumer idempotent on the event id; treat \textbf{poison
+messages} --- events that crash or reject deterministically --- as a routing
+problem (quarantine to a dead-letter topic after $n$ attempts) rather than an
+infinite retry; and never trust the payload beyond the schema, because a
+broker is a trust boundary like any other~\cite{kleppmann2017ddia,
+newman2021microservices}.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch11-code}
+
+All listings run on Python~3.11+ (verified on 3.13) with the dependencies in
+Section~\ref{sec:ch11-deps}. Everything binds to \texttt{127.0.0.1} or uses
+in-process ASGI transport: no network, no credentials, no wall-clock
+dependence. PowerShell setup:
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pytest -q
+\end{minted}
+
+\subsection{Webhooks: Signed Receiver and Bounded-Retry Delivery Worker}
+\label{sec:ch11-code-webhooks}
+
+Listing~11.1 implements the consumer side of
+Section~\ref{sec:ch11-webhooks}: freshness check, constant-time signature
+comparison over the raw body, and an idempotency store that turns
+at-least-once delivery into exactly-once processing. The clock is injectable
+so tests are deterministic.
+
+\begin{minted}{python}
+"""Webhook receiver with Stripe-style HMAC-SHA256 signature verification."""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+SIGNATURE_HEADER = "x-northwind-signature"
+TOLERANCE_SECONDS = 300
+
+
+def compute_signature(secret: str, timestamp: int, body: bytes) -> str:
+    """Return the hex HMAC-SHA256 of "<timestamp>.<body>"."""
+    signed_payload = str(timestamp).encode("utf-8") + b"." + body
+    digest = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256)
+    return digest.hexdigest()
+
+
+def parse_signature_header(header: str) -> tuple[int, list[str]]:
+    """Parse "t=...,v1=..." into (timestamp, [signatures]); ValueError if malformed."""
+    timestamp: int | None = None
+    signatures: list[str] = []
+    for part in header.split(","):
+        key, _, value = part.partition("=")
+        if key.strip() == "t":
+            try:
+                timestamp = int(value)
+            except ValueError as exc:
+                raise ValueError("non-integer timestamp") from exc
+        elif key.strip() == "v1":
+            signatures.append(value.strip())
+    if timestamp is None or not signatures:
+        raise ValueError("malformed signature header")
+    return timestamp, signatures
+
+
+@dataclass
+class IdempotencyStore:
+    """In-memory set of processed event ids (swap for Redis/Postgres in prod)."""
+
+    processed: set[str] = field(default_factory=set)
+
+    def is_duplicate(self, event_id: str) -> bool:
+        return event_id in self.processed
+
+    def mark_processed(self, event_id: str) -> None:
+        self.processed.add(event_id)
+
+
+def _problem(status: int, title: str, detail: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        media_type="application/problem+json",
+        content={"type": "about:blank", "title": title,
+                 "status": status, "detail": detail},
+    )
+
+
+def create_app(
+    secret: str,
+    store: IdempotencyStore,
+    now: Callable[[], float] = time.time,
+    tolerance_seconds: int = TOLERANCE_SECONDS,
+) -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Webhook Receiver")
+
+    @app.post("/webhooks/telemetry")
+    async def receive_telemetry(request: Request) -> JSONResponse:
+        body = await request.body()
+        raw_header = request.headers.get(SIGNATURE_HEADER, "")
+        try:
+            timestamp, signatures = parse_signature_header(raw_header)
+        except ValueError:
+            return _problem(400, "Malformed Signature",
+                            "Signature header is missing or malformed.")
+
+        # Replay protection: refuse events signed too far from our clock.
+        if abs(now() - timestamp) > tolerance_seconds:
+            return _problem(400, "Stale Timestamp",
+                            "Signature timestamp outside tolerance window.")
+
+        expected = compute_signature(secret, timestamp, body)
+        if not any(hmac.compare_digest(expected, c) for c in signatures):
+            return _problem(400, "Invalid Signature",
+                            "No v1 signature matches the payload.")
+
+        try:
+            event: dict[str, Any] = json.loads(body)
+            event_id = str(event["id"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return _problem(400, "Malformed Event",
+                            "Body is not a JSON event with an id field.")
+
+        # Idempotent receiver: at-least-once delivery means duplicates WILL arrive.
+        if store.is_duplicate(event_id):
+            return JSONResponse(status_code=200,
+                                content={"status": "duplicate", "id": event_id})
+        store.mark_processed(event_id)
+        return JSONResponse(status_code=200,
+                            content={"status": "processed", "id": event_id})
+
+    return app
+\end{minted}
+
+Listing~11.2 is the provider side: the state machine of
+Figure~\ref{fig:ch11-webhook-fsm} in code. Transport, clock, and sleeper are
+injected; backoff delays are pure functions of the attempt number, so the
+test suite observes the schedule without sleeping.
+
+\begin{minted}{python}
+"""Webhook delivery worker: bounded retries, backoff, and a dead-letter log."""
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+from webhook_receiver import compute_signature
+
+RETRYABLE_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+class DeliveryOutcome(str, Enum):
+    DELIVERED = "delivered"
+    DEAD_LETTERED = "dead_lettered"
+    REJECTED_PERMANENT = "rejected_permanent"
+
+
+@dataclass(frozen=True)
+class WebhookEvent:
+    event_id: str
+    event_type: str
+    occurred_at: int
+    payload: dict[str, Any]
+
+    def body_bytes(self) -> bytes:
+        doc = {"id": self.event_id, "type": self.event_type,
+               "occurred_at": self.occurred_at, "data": self.payload}
+        return json.dumps(doc, sort_keys=True).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class Attempt:
+    number: int
+    status: int | None  # None => transport raised (connection refused, DNS, ...)
+    retryable: bool
+
+
+@dataclass(frozen=True)
+class DeadLetter:
+    event_id: str
+    endpoint: str
+    attempts: tuple[Attempt, ...]
+    reason: str
+
+
+Transport = Callable[[str, dict[str, str], bytes], int]
+
+
+class WebhookDeliverer:
+    def __init__(
+        self,
+        secret: str,
+        transport: Transport,
+        *,
+        max_attempts: int = 5,
+        base_delay_seconds: float = 1.0,
+        now: Callable[[], float] = time.time,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        self._secret = secret
+        self._transport = transport
+        self._max_attempts = max_attempts
+        self._base_delay = base_delay_seconds
+        self._now = now
+        self._sleeper = sleeper
+        self.dead_letters: list[DeadLetter] = []
+
+    def backoff_delay(self, attempt_number: int) -> float:
+        """Exponential backoff with a deterministic cap: 1, 2, 4, 8, ... capped at 60s."""
+        return min(self._base_delay * (2 ** (attempt_number - 1)), 60.0)
+
+    def deliver(self, endpoint: str, event: WebhookEvent) -> DeliveryOutcome:
+        body = event.body_bytes()
+        attempts: list[Attempt] = []
+        for number in range(1, self._max_attempts + 1):
+            timestamp = int(self._now())
+            headers = {
+                "content-type": "application/json",
+                "x-northwind-signature": (
+                    f"t={timestamp},v1={compute_signature(self._secret, timestamp, body)}"
+                ),
+            }
+            try:
+                status = self._transport(endpoint, headers, body)
+                retryable = status in RETRYABLE_STATUSES
+            except OSError:
+                status, retryable = None, True
+            attempts.append(Attempt(number=number, status=status, retryable=retryable))
+
+            if status is not None and 200 <= status < 300:
+                return DeliveryOutcome.DELIVERED
+            if status is not None and not retryable:
+                # 4xx (other than 408/409/425/429) means "stop calling me";
+                # retrying forever is how webhook loops turn into a DDoS.
+                self._dead_letter(event, endpoint, attempts, f"permanent {status}")
+                return DeliveryOutcome.REJECTED_PERMANENT
+            if number < self._max_attempts:
+                self._sleeper(self.backoff_delay(number))
+
+        self._dead_letter(event, endpoint, attempts, "max attempts exhausted")
+        return DeliveryOutcome.DEAD_LETTERED
+
+    def _dead_letter(
+        self, event: WebhookEvent, endpoint: str, attempts: list[Attempt], reason: str
+    ) -> None:
+        self.dead_letters.append(
+            DeadLetter(event.event_id, endpoint, tuple(attempts), reason)
+        )
+\end{minted}
+
+The test suite (Listing~11.3) covers the attacks and failure modes that
+matter: tampered bodies, stale timestamps, wrong secrets, replayed
+deliveries, retry-then-succeed, budget exhaustion into the DLQ, and the
+permanent-4xx short-circuit.
+
+\begin{minted}{python}
+"""Offline, deterministic tests for the webhook receiver and delivery worker."""
+from __future__ import annotations
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from webhook_delivery import DeliveryOutcome, WebhookDeliverer, WebhookEvent
+from webhook_receiver import (
+    IdempotencyStore, compute_signature, create_app, parse_signature_header,
+)
+
+SECRET = "whsec_northwind_test_only"
+NOW = 1_700_000_000  # fixed clock: no wall-time dependence
+
+
+def signed_headers(secret: str, timestamp: int, body: bytes) -> dict[str, str]:
+    sig = compute_signature(secret, timestamp, body)
+    return {"x-northwind-signature": f"t={timestamp},v1={sig}"}
+
+
+def event_body(event_id: str = "evt_1001") -> bytes:
+    return json.dumps({"id": event_id, "type": "robot.telemetry",
+                       "data": {"robot": "NWR-07", "battery": 0.82}}).encode()
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    app = create_app(SECRET, IdempotencyStore(), now=lambda: float(NOW))
+    return TestClient(app)
+
+
+def test_valid_signature_is_processed(client: TestClient) -> None:
+    body = event_body()
+    resp = client.post("/webhooks/telemetry", content=body,
+                       headers=signed_headers(SECRET, NOW, body))
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "processed", "id": "evt_1001"}
+
+
+def test_tampered_body_is_rejected(client: TestClient) -> None:
+    body = event_body()
+    headers = signed_headers(SECRET, NOW, body)
+    tampered = body.replace(b"0.82", b"0.01")  # attacker flips the battery level
+    resp = client.post("/webhooks/telemetry", content=tampered, headers=headers)
+    assert resp.status_code == 400
+    assert resp.json()["title"] == "Invalid Signature"
+
+
+def test_stale_timestamp_is_rejected(client: TestClient) -> None:
+    body = event_body()
+    old = NOW - 3600  # signed an hour ago: outside the 300 s tolerance
+    resp = client.post("/webhooks/telemetry", content=body,
+                       headers=signed_headers(SECRET, old, body))
+    assert resp.status_code == 400
+    assert resp.json()["title"] == "Stale Timestamp"
+
+
+def test_wrong_secret_is_rejected(client: TestClient) -> None:
+    body = event_body()
+    headers = signed_headers("whsec_attacker_guess", NOW, body)
+    resp = client.post("/webhooks/telemetry", content=body, headers=headers)
+    assert resp.status_code == 400
+
+
+def test_replayed_delivery_is_idempotent(client: TestClient) -> None:
+    body = event_body()
+    headers = signed_headers(SECRET, NOW, body)
+    first = client.post("/webhooks/telemetry", content=body, headers=headers)
+    replay = client.post("/webhooks/telemetry", content=body, headers=headers)
+    assert first.json()["status"] == "processed"
+    assert replay.status_code == 200  # ack again, but do not reprocess
+    assert replay.json()["status"] == "duplicate"
+
+
+def test_header_parsing_supports_rotation_overlap() -> None:
+    ts, sigs = parse_signature_header("t=1700000000,v1=aaa,v1=bbb")
+    assert ts == NOW
+    assert sigs == ["aaa", "bbb"]
+
+
+def make_event() -> WebhookEvent:
+    return WebhookEvent("evt_1001", "robot.telemetry", NOW, {"robot": "NWR-07"})
+
+
+class FakeTransport:
+    """Scripted statuses; records every call. OSError simulates connection failure."""
+
+    def __init__(self, script: list[int | type[OSError]]) -> None:
+        self.script = script
+        self.calls: list[tuple[str, dict[str, str], bytes]] = []
+
+    def __call__(self, url: str, headers: dict[str, str], body: bytes) -> int:
+        self.calls.append((url, headers, body))
+        outcome = self.script.pop(0)
+        if isinstance(outcome, type):
+            raise outcome("connection refused")
+        return outcome
+
+
+def make_deliverer(transport: FakeTransport) -> tuple[WebhookDeliverer, list[float]]:
+    sleeps: list[float] = []
+    deliverer = WebhookDeliverer(
+        SECRET, transport, max_attempts=5, base_delay_seconds=1.0,
+        now=lambda: float(NOW), sleeper=sleeps.append,
+    )
+    return deliverer, sleeps
+
+
+def test_delivery_succeeds_first_try() -> None:
+    transport = FakeTransport([200])
+    deliverer, sleeps = make_deliverer(transport)
+    outcome = deliverer.deliver("https://ops.northwind-robotics.example/hook", make_event())
+    assert outcome is DeliveryOutcome.DELIVERED
+    assert len(transport.calls) == 1 and sleeps == [] and deliverer.dead_letters == []
+
+
+def test_delivery_retries_5xx_with_backoff_then_succeeds() -> None:
+    transport = FakeTransport([500, 503, 200])
+    deliverer, sleeps = make_deliverer(transport)
+    outcome = deliverer.deliver("https://ops.northwind-robotics.example/hook", make_event())
+    assert outcome is DeliveryOutcome.DELIVERED
+    assert len(transport.calls) == 3
+    assert sleeps == [1.0, 2.0]  # deterministic exponential backoff, no real waiting
+
+
+def test_delivery_dead_letters_after_max_attempts() -> None:
+    transport = FakeTransport([500, 500, 500, 500, 500])
+    deliverer, sleeps = make_deliverer(transport)
+    outcome = deliverer.deliver("https://ops.northwind-robotics.example/hook", make_event())
+    assert outcome is DeliveryOutcome.DEAD_LETTERED
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+    assert len(deliverer.dead_letters) == 1
+    assert deliverer.dead_letters[0].reason == "max attempts exhausted"
+
+
+def test_delivery_does_not_retry_permanent_4xx() -> None:
+    transport = FakeTransport([422])
+    deliverer, sleeps = make_deliverer(transport)
+    outcome = deliverer.deliver("https://ops.northwind-robotics.example/hook", make_event())
+    assert outcome is DeliveryOutcome.REJECTED_PERMANENT
+    assert len(transport.calls) == 1 and sleeps == []
+    assert deliverer.dead_letters[0].reason == "permanent 422"
+
+
+def test_network_error_is_retryable() -> None:
+    transport = FakeTransport([OSError, 200])
+    deliverer, _ = make_deliverer(transport)
+    outcome = deliverer.deliver("https://ops.northwind-robotics.example/hook", make_event())
+    assert outcome is DeliveryOutcome.DELIVERED
+    assert transport.calls[0][1]["x-northwind-signature"].startswith(f"t={NOW},v1=")
+\end{minted}
+
+\subsection{Server-Sent Events: Producer, Parser, and Resume}
+\label{sec:ch11-code-sse}
+
+Listing~11.4 is both halves of the SSE contract. The producer is a FastAPI
+\texttt{StreamingResponse}~\cite{fastapidocs} emitting well-formed
+\texttt{text/event-stream} --- \texttt{event}/\texttt{data}/\texttt{id}/
+\texttt{retry} fields, multi-line data folding, comment keep-alives, the
+\texttt{X-Accel-Buffering: no} escape hatch --- and honoring
+\texttt{Last-Event-ID} resume from the scripted feed. The client parser is a
+pure generator over lines implementing the WHATWG dispatch rules, so it works
+over \texttt{httpx}~\cite{httpxdocs}, the stdlib, or a test fixture.
+
+\begin{minted}{python}
+"""Server-Sent Events: FastAPI producer + a dependency-free client parser."""
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Iterable, Iterator
+from dataclasses import dataclass
+
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+
+# The scripted Northwind Robotics telemetry feed (synthetic, deterministic).
+TELEMETRY_FEED: list[tuple[int, str, str]] = [
+    (1, "telemetry", '{"robot": "NWR-07", "battery": 0.82}'),
+    (2, "telemetry", '{"robot": "NWR-07", "battery": 0.79}'),
+    (3, "alert", '{"robot": "NWR-07", "alert": "dock requested"}'),
+]
+RETRY_MS = 2000
+
+
+def format_sse(data: str, *, event: str | None = None,
+               event_id: int | None = None, retry: int | None = None) -> str:
+    """Serialize one SSE event block. Multi-line data gets one "data:" per line."""
+    lines: list[str] = []
+    if event is not None:
+        lines.append(f"event: {event}")
+    for data_line in data.splitlines():
+        lines.append(f"data: {data_line}")
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    if retry is not None:
+        lines.append(f"retry: {retry}")
+    return "\n".join(lines) + "\n\n"
+
+
+@dataclass(frozen=True)
+class ServerSentEvent:
+    data: str
+    event: str = "message"
+    event_id: str | None = None
+    retry: int | None = None
+
+
+def parse_sse(lines: Iterable[str]) -> Iterator[ServerSentEvent]:
+    """Parse text/event-stream lines per the WHATWG dispatch rules.
+
+    A blank line dispatches the buffered event; lines starting with ":" are
+    comments (keep-alives) and are ignored.
+    """
+    data_parts: list[str] = []
+    event_type: str | None = None
+    event_id: str | None = None
+    retry: int | None = None
+
+    def dispatch() -> ServerSentEvent | None:
+        nonlocal data_parts, event_type
+        if not data_parts:
+            event_type = None
+            return None
+        parsed = ServerSentEvent("\n".join(data_parts),
+                                 event_type or "message", event_id, retry)
+        data_parts, event_type = [], None
+        return parsed
+
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if line == "":
+            dispatched = dispatch()
+            if dispatched is not None:
+                yield dispatched
+        elif line.startswith(":"):
+            continue
+        else:
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "data":
+                data_parts.append(value)
+            elif field == "event":
+                event_type = value
+            elif field == "id":
+                event_id = value
+            elif field == "retry":
+                if value.isdigit():
+                    retry = int(value)
+    dispatched = dispatch()
+    if dispatched is not None:
+        yield dispatched
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Telemetry Stream")
+
+    async def event_generator(last_event_id: int) -> AsyncIterator[str]:
+        # Announce the reconnection delay first, then resume AFTER last_event_id.
+        yield format_sse("connected", event="control", retry=RETRY_MS)
+        for event_id, event_type, data in TELEMETRY_FEED:
+            if event_id > last_event_id:
+                yield format_sse(data, event=event_type, event_id=event_id)
+        yield ": keep-alive\n\n"
+
+    @app.get("/stream")
+    async def stream(request: Request) -> StreamingResponse:
+        raw_last_id = request.headers.get("last-event-id", "0")
+        last_event_id = int(raw_last_id) if raw_last_id.isdigit() else 0
+        return StreamingResponse(
+            event_generator(last_event_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    return app
+\end{minted}
+
+The integration tests (Listing~11.5) exercise the full stack with FastAPI's
+in-process \texttt{TestClient} --- no sockets --- and prove the resume
+contract: reconnecting with \texttt{Last-Event-ID: 2} replays only event 3.
+
+\begin{minted}{python}
+"""Offline tests for the SSE producer, parser, and Last-Event-ID resume."""
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from sse_streams import RETRY_MS, create_app, format_sse, parse_sse
+
+FIXTURE_STREAM = (
+    ": this is a comment keep-alive\n"
+    "\n"
+    "event: telemetry\n"
+    "data: {\"robot\": \"NWR-07\",\n"
+    "data: \"battery\": 0.82}\n"
+    "id: 42\n"
+    "retry: 1500\n"
+    "\n"
+    "data: bare message with default event type\n"
+    "\n"
+)
+
+
+def test_parser_handles_comments_multiline_data_id_and_retry() -> None:
+    events = list(parse_sse(FIXTURE_STREAM.splitlines(keepends=True)))
+    assert len(events) == 2
+    first, second = events
+    assert first.event == "telemetry"
+    assert first.data == '{"robot": "NWR-07",\n"battery": 0.82}'  # multi-line join
+    assert first.event_id == "42"
+    assert first.retry == 1500
+    assert second.event == "message"  # default type
+    assert second.retry == 1500  # retry persists until replaced
+
+
+def test_format_sse_round_trips_through_parser() -> None:
+    wire = format_sse("line one\nline two", event="alert", event_id=7, retry=500)
+    (event,) = list(parse_sse(wire.splitlines(keepends=True)))
+    assert (event.data, event.event, event.event_id, event.retry) == (
+        "line one\nline two", "alert", "7", 500,
+    )
+
+
+def test_server_streams_all_events_with_ids() -> None:
+    client = TestClient(create_app())
+    with client.stream("GET", "/stream") as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.headers["x-accel-buffering"] == "no"
+        events = list(parse_sse(response.iter_lines()))
+    ids = [e.event_id for e in events if e.event_id is not None]
+    assert ids == ["1", "2", "3"]
+    assert events[0].retry == RETRY_MS
+    assert events[-1].event == "alert"
+
+
+def test_server_resumes_after_last_event_id() -> None:
+    """Reconnect with Last-Event-ID: 2 -> only event 3 is replayed."""
+    client = TestClient(create_app())
+    with client.stream("GET", "/stream", headers={"Last-Event-ID": "2"}) as response:
+        events = list(parse_sse(response.iter_lines()))
+    replayed = [e for e in events if e.event_id is not None]
+    assert [e.event_id for e in replayed] == ["3"]
+    assert replayed[0].event == "alert"
+\end{minted}
+
+\subsection{WebSockets: Handshake Math and an Echo/Broadcast Demo}
+\label{sec:ch11-code-ws}
+
+Listing~11.6 proves the handshake and then drives a real (localhost-only)
+WebSocket session with the \texttt{websockets} library: echo to the sender,
+broadcast to peers, protocol-level ping/pong, and a clean 1000 close.
+Synchronization is via \texttt{asyncio.Event}, never \texttt{sleep}-based
+timing assertions.
+
+\begin{minted}{python}
+"""Minimal WebSocket echo/broadcast demo + the RFC 6455 handshake math."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+from typing import Any
+
+from websockets.asyncio.client import connect
+from websockets.asyncio.server import ServerConnection, serve
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # fixed by RFC 6455 section 1.3
+
+
+def sec_websocket_accept(key: str) -> str:
+    """Derive Sec-WebSocket-Accept from the client's Sec-WebSocket-Key."""
+    sha1 = hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
+    return base64.b64encode(sha1).decode("ascii")
+
+
+class BroadcastHub:
+    """Tracks connected robot consoles; every message is echoed and broadcast."""
+
+    def __init__(self) -> None:
+        self.clients: set[ServerConnection] = set()
+
+    async def handler(self, ws: ServerConnection) -> None:
+        self.clients.add(ws)
+        try:
+            async for message in ws:
+                await ws.send(f"echo:{message}")  # direct echo to the sender
+                for peer in self.clients - {ws}:
+                    await peer.send(f"broadcast:{message}")
+        finally:
+            self.clients.discard(ws)
+
+
+async def run_server(hub: BroadcastHub) -> Any:
+    return await serve(hub.handler, "127.0.0.1", 0)  # port 0 => OS picks a free port
+
+
+async def demo() -> list[str]:
+    """Deterministic scripted session; asyncio.Event provides synchronization."""
+    hub = BroadcastHub()
+    received: list[str] = []
+    peer_ready = asyncio.Event()
+
+    async with await run_server(hub) as server:
+        port = server.sockets[0].getsockname()[1]
+
+        async def peer() -> None:
+            async with connect(f"ws://127.0.0.1:{port}") as ws:
+                peer_ready.set()
+                async for message in ws:
+                    received.append(f"peer got {message}")
+
+        peer_task = asyncio.create_task(peer())
+        await peer_ready.wait()  # explicit synchronization, never sleep-based
+
+        async with connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send("NWR-07 online")
+            received.append(await ws.recv())  # our own echo
+
+            pong = await ws.ping()  # protocol-level keep-alive (opcode 0x9/0xA)
+            await asyncio.wait_for(pong, timeout=5)
+            received.append("pong received")
+
+            await ws.close(code=1000, reason="demo complete")  # clean close
+        peer_task.cancel()
+
+    return received
+
+
+if __name__ == "__main__":
+    print(sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="))  # RFC 6455 example
+    for line in asyncio.run(demo()):
+        print(line)
+\end{minted}
+
+Running \texttt{python ws\_demo.py} prints
+\texttt{s3pPLMBiTxaQ9kYGzzhZRbK+xOo=} --- the exact accept value from the
+RFC~6455 worked example --- followed by the echo, the peer's broadcast
+receipt, and the pong. The tests (Listing~11.7) assert all of it.
+
+\begin{minted}{python}
+"""Offline tests for the WebSocket demo and the RFC 6455 handshake math."""
+from __future__ import annotations
+
+import asyncio
+
+from ws_demo import BroadcastHub, demo, sec_websocket_accept
+
+
+def test_sec_websocket_accept_matches_rfc6455_example() -> None:
+    # Worked example straight from RFC 6455 section 1.3.
+    assert sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ==") == \
+        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+
+def test_echo_broadcast_ping_and_clean_close() -> None:
+    received = asyncio.run(demo())
+    assert "echo:NWR-07 online" in received
+    assert "peer got broadcast:NWR-07 online" in received  # delivered to the peer
+    assert "pong received" in received
+
+
+def test_hub_disconnect_cleans_registry() -> None:
+    async def scenario() -> BroadcastHub:
+        from websockets.asyncio.client import connect
+        from websockets.asyncio.server import serve
+
+        hub = BroadcastHub()
+        async with await serve(hub.handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with connect(f"ws://127.0.0.1:{port}"):
+                assert len(hub.clients) == 1
+            # allow the server task to run its finally block deterministically
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if not hub.clients:
+                    break
+        return hub
+
+    hub = asyncio.run(scenario())
+    assert hub.clients == set()
+\end{minted}
+
+\subsection{The Event Contract in AsyncAPI}
+\label{sec:ch11-code-asyncapi}
+
+Listing~11.8 is the AsyncAPI~3.0 description of the same Northwind Robotics
+telemetry contract~\cite{asyncapi}. Note what the document buys you beyond
+prose: the channel \emph{address} is a templated topic string with named
+parameters; \emph{operations} declare direction explicitly (\texttt{send}
+from the fleet's perspective, \texttt{receive} for consumers); message
+payloads carry JSON Schemas with patterns and ranges, so a CI gate can reject
+a producer that starts emitting \texttt{battery\_level: 12}; and the
+\texttt{servers} block documents the binding (Kafka, port 9092) without the
+logical contract depending on it. The same document drives code generation,
+documentation portals, and contract-diff gates --- the OpenAPI toolchain's
+event-driven mirror.
+
+\begin{minted}{yaml}
+asyncapi: "3.0.0"
+info:
+  title: Northwind Robotics Telemetry Events
+  version: "1.0.0"
+  description: >-
+    Synthetic event contract for the Northwind Robotics fleet. Consumed by
+    the operations dashboard (SSE) and by customer webhook endpoints.
+servers:
+  production:
+    host: broker.northwind-robotics.example:9092
+    protocol: kafka
+    description: Fictional in-cluster broker (documentation only; tests stay offline).
+channels:
+  robotTelemetry:
+    address: northwind.robots.{robot_id}.telemetry
+    messages:
+      telemetryReading:
+        $ref: "#/components/messages/TelemetryReading"
+      batteryAlert:
+        $ref: "#/components/messages/BatteryAlert"
+operations:
+  publishTelemetry:
+    action: send
+    channel:
+      $ref: "#/channels/robotTelemetry"
+  consumeTelemetry:
+    action: receive
+    channel:
+      $ref: "#/channels/robotTelemetry"
+components:
+  messages:
+    TelemetryReading:
+      payload:
+        type: object
+        required: [id, robot_id, battery_level, recorded_at]
+        properties:
+          id: { type: string, pattern: "^evt_[0-9]+$" }
+          robot_id: { type: string, pattern: "^NWR-[0-9]{2}$" }
+          battery_level: { type: number, minimum: 0, maximum: 1 }
+          recorded_at: { type: string, format: date-time }
+    BatteryAlert:
+      payload:
+        type: object
+        required: [id, robot_id, threshold, recorded_at]
+        properties:
+          id: { type: string }
+          robot_id: { type: string }
+          threshold: { type: number, minimum: 0, maximum: 1 }
+          recorded_at: { type: string, format: date-time }
+\end{minted}
+
+\subsection{Contrast: Long Polling in Twelve Lines}
+\label{sec:ch11-code-longpoll}
+
+Listing~11.9 is the long-poll alternative to Listing~11.4, kept deliberately
+small. The client issues \texttt{GET /notifications/next?after=N}; the server
+holds the request until a notification is published or a server-side deadline
+(always below the proxy idle timeout) expires, then answers a normal JSON
+document --- possibly \texttt{null} --- and the client immediately re-asks.
+Every request is an ordinary, cacheable-in-principle, auth-compatible HTTP
+exchange; the cost is a held worker per waiting client and a reconnect after
+every single event.
+
+\begin{minted}{python}
+"""Long polling, for contrast with SSE: hold the request until data or deadline."""
+from __future__ import annotations
+
+import asyncio
+
+from fastapi import FastAPI, Query
+from pydantic import BaseModel
+
+HOLD_SECONDS = 15.0  # server-side deadline, always below the proxy idle timeout
+
+
+class Notification(BaseModel):
+    notification_id: int
+    robot: str
+    message: str
+
+
+class NotificationBus:
+    def __init__(self) -> None:
+        self._waiters: list[asyncio.Queue[Notification]] = []
+
+    def subscribe(self) -> asyncio.Queue[Notification]:
+        queue: asyncio.Queue[Notification] = asyncio.Queue()
+        self._waiters.append(queue)
+        return queue
+
+    def publish(self, note: Notification) -> None:
+        for queue in self._waiters:
+            queue.put_nowait(note)
+
+
+def create_app(bus: NotificationBus) -> FastAPI:
+    app = FastAPI(title="Northwind Robotics Long-Poll Notifications")
+
+    @app.get("/notifications/next", response_model=Notification | None)
+    async def next_notification(after: int = Query(0, ge=0)) -> Notification | None:
+        queue = bus.subscribe()
+        try:
+            return await asyncio.wait_for(queue.get(), timeout=HOLD_SECONDS)
+        except TimeoutError:
+            return None  # 200 with null body: client reconnects immediately
+
+    return app
+\end{minted}
+
+\begin{examplebox}
+\textbf{Execution evidence.} All listings in this section were executed
+offline on Python~3.13 (Windows, PowerShell) before inclusion:
+\texttt{pytest -q} reports \textbf{18 passed} --- eleven webhook tests
+(tamper, stale timestamp, wrong secret, replay idempotency, rotation-header
+parsing, delivery success, backoff schedule, DLQ exhaustion, permanent-4xx
+short-circuit, transport-error retry), four SSE tests (parser grammar,
+round-trip, full stream, \texttt{Last-Event-ID} resume), and three WebSocket
+tests (RFC~6455 accept vector, echo/broadcast/ping/close, registry cleanup).
+\texttt{python ws\_demo.py} prints the RFC accept value
+\texttt{s3pPLMBiTxaQ9kYGzzhZRbK+xOo=} followed by the scripted session
+transcript. The AsyncAPI document parses cleanly as YAML~3.0.
+\end{examplebox}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch11-pitfalls}
+
+Each entry below is a production scar, not a hypothetical.
+
+\subsection{Unsigned webhooks}
+The single most exploited webhook bug. An endpoint with no signature check is
+an unauthenticated ``do anything'' API reachable by anyone who scrapes the
+URL from client-side code, DNS logs, or a support forum post. Even a
+configured-but-unenforced check (``verify if the header is present'') fails:
+attackers simply omit the header. The fix is fail-closed verification ---
+missing, malformed, stale, or mismatched all reject --- as in Listing~11.1.
+
+\subsection{Retrying permanent failures forever}
+A delivery worker that retries 4xx responses indistinguishably from 5xx turns
+every consumer bug into an amplification loop: the consumer deploys a schema
+change, starts rejecting with 422, and the provider hammers it at full retry
+rate for days. Bound the budget, separate retryable from permanent statuses,
+and dead-letter the rest (Listing~11.2). The mirror-image consumer bug is
+returning 500 for a \emph{payload} problem --- which invites retries that can
+never succeed --- instead of a crisp 4xx.
+
+\subsection{Assuming ordering}
+Consumers that apply events blindly in arrival order corrupt state under
+retries and parallelism: \texttt{robot.updated} (battery 0.79) arrives after
+\texttt{robot.updated} (battery 0.82) and the dashboard regresses. Either
+send full state per event and make consumers last-write-wins on a
+higher-is-newer cursor (\texttt{occurred\_at} or a sequence number), or
+buffer and reorder. ``Our provider delivers in order'' is a claim about
+today's implementation, not the contract.
+
+\subsection{SSE through buffering proxies}
+The stream works on the developer's machine and stalls in production because
+nginx's default \texttt{proxy\_buffering on} accumulates events before
+forwarding. Symptoms: clients receive nothing for minutes, then a burst.
+Defenses: \texttt{X-Accel-Buffering: no}, \texttt{Cache-Control: no-cache},
+flush per event, comment keep-alives, and --- the real fix --- an end-to-end
+test that runs \emph{through} the production proxy path, not around it.
+
+\subsection{WebSocket for plain CRUD}
+Rebuilding \texttt{POST /robots} as a WebSocket message throws away caching,
+idempotency keys, status codes, tracing, and every gateway feature your
+organization already paid for --- and adds connection lifecycle, reconnection,
+and backpressure code you now own. Bidirectional channels earn their keep
+only when both directions carry meaningful, latency-sensitive traffic.
+
+\subsection{Non-idempotent receivers}
+Processing a webhook before acknowledging it --- \texttt{charge\_card()} then
+return 200 --- means every lost response re-charges the customer. Record the
+event id transactionally with the effect, or queue-then-ack, so redelivery is
+a no-op. Note the ordering subtlety: ack \emph{before} durable recording and
+a crash loses the event; process \emph{before} durable recording and a crash
+repeats it. Idempotency is what makes the second ordering safe.
+
+\subsection{Leaking event payloads in logs}
+Webhook payloads routinely carry PII-adjacent operational data; delivery
+services that log full bodies at INFO, or receivers that log the raw request
+``for debugging,'' build an ungoverned replica of the event stream inside the
+log pipeline. Log event ids, types, sizes, and outcomes --- never bodies,
+never signature secrets, never full headers.
+
+\subsection{Sleep-based async tests}
+\texttt{await asyncio.sleep(0.3)} as a synchronization mechanism makes tests
+flaky under CI load and slow when generous. Use \texttt{asyncio.Event},
+queues, and \texttt{wait\_for} with explicit timeouts
+(Listings~11.6--11.7): the test passes the instant the condition holds and
+fails loudly when it never will.
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch11-lab}
+
+\subsection{Lab: The Northwind Robotics Real-Time Notifications Service}
+
+You will assemble this chapter's components into one coherent service: a
+\emph{notification fan-out} for the Northwind Robotics fleet that (a) serves
+an SSE feed to browser dashboards and (b) delivers signed webhooks to two
+registered customer endpoints, one of which is deliberately flaky.
+
+\textbf{Setup} (PowerShell):
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi httpx uvicorn pydantic websockets pytest
+mkdir lab_ch11; cd lab_ch11
+\end{minted}
+
+\textbf{Step 1 --- the receiver.} Save Listing~11.1 as
+\texttt{webhook\_receiver.py}. This is the \emph{customer's} endpoint;
+you will run two copies in-process via \texttt{TestClient}: one configured
+with the correct secret, one misconfigured (wrong secret) to act as the
+flaky endpoint.
+
+\textbf{Step 2 --- the delivery worker.} Save Listing~11.2 as
+\texttt{webhook\_delivery.py}. Replace \texttt{FakeTransport} with a real
+transport built on \texttt{httpx}~\cite{httpxdocs}: a function
+\texttt{(url, headers, body) -> int} that POSTs with a 5\,s timeout and
+returns the status code, translating \texttt{httpx.TransportError} to
+\texttt{OSError}. Register it against the healthy receiver's URL and observe
+\texttt{DELIVERED}; register the misconfigured one and observe
+\texttt{REJECTED\_PERMANENT} (the receiver's 400) with exactly one attempt.
+
+\textbf{Step 3 --- the SSE feed.} Save Listing~11.4 as
+\texttt{sse\_streams.py} and serve it with the app factory:
+\texttt{uvicorn "sse\_streams:create\_app" {-}{-}factory}. In a second
+terminal, consume it with \texttt{curl -N http://127.0.0.1:8000/stream} and
+watch events arrive with ids; kill and re-run curl with
+\texttt{-H "Last-Event-ID: 2"} and confirm only event 3 replays.
+
+\textbf{Step 4 --- wire the fan-out.} Write a thin orchestrator: each event
+in \texttt{TELEMETRY\_FEED} is both appended to the SSE feed \emph{and}
+handed to the \texttt{WebhookDeliverer} for each registered endpoint. Run the
+deterministic test suite (Listings~11.3, 11.5) as the acceptance gate.
+
+\textbf{Acceptance checks:} healthy endpoint receives all three events with
+valid signatures; misconfigured endpoint is dead-lettered with reason
+\texttt{permanent 400}; SSE clients resume correctly; \texttt{pytest -q} is
+green with no network access (unplug it and prove it).
+
+\subsection{War Story 1: The Retry Loop That DDoSed a Customer}
+
+A fleet-management provider (the fictionalized composite is Northwind
+Robotics, the pattern is industry-common) shipped webhook delivery with a
+single flaw: the retry predicate was \texttt{status != 200}. A customer's
+receiver began rejecting deliveries with 422 after a schema change on their
+side. The provider's worker retried --- immediately, then on a short fixed
+interval, with no cap. Queued events accumulated during the customer's
+maintenance window; when the window closed, forty thousand queued deliveries
+retried in near-synchrony against an endpoint that rejected each one in
+milliseconds. From the customer's load balancer the traffic was
+indistinguishable from an application-layer DDoS; their WAF rate-limited the
+provider's egress IPs, which made \emph{every} customer's deliveries to that
+domain fail, which queued more events, which deepened the storm.
+
+The postmortem produced exactly the rules encoded in Listing~11.2: classify
+statuses (permanent 4xx $\Rightarrow$ stop immediately), bound attempts,
+exponential backoff \emph{with jitter} so recovering queues do not fire in
+lockstep, per-endpoint circuit breaking, and a DLQ with paging alerts. The
+metric that would have caught it in minutes --- deliveries-per-endpoint-per-
+minute and 4xx ratio --- became a standing dashboard.
+
+\subsection{War Story 2: The Unsigned-Webhook Spoofing Incident}
+
+A robotics-operations startup exposed \texttt{POST /hooks/fleet} to receive
+``maintenance completed'' events from its CMMS vendor. The endpoint was
+``protected'' by obscurity: a long random path. A former contractor, who knew
+the path from integration work, POSTed a fabricated \texttt{maintenance.
+completed} event for a robot that was, in reality, still faulted; the
+dispatcher cleared the work order automatically and the robot was scheduled
+back into a production shift. The resulting equipment damage was modest; the
+audit finding was not --- the endpoint had accepted a forged state transition
+with zero authentication, and logs showed the vendor's ``integration guide''
+had suggested signature verification as \emph{optional}.
+
+The remediation was Listing~11.1 verbatim: shared-secret HMAC over
+timestamp-plus-body, a 300-second tolerance window, constant-time comparison,
+idempotency on event id, and --- organizationally --- a policy that no
+webhook endpoint merges without a red-team test that submits an unsigned
+payload and asserts rejection. Obscurity of a URL is not a control; it is a
+hope.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch11-exercises}
+
+\begin{enumerate}[label=\textbf{E11.\arabic*.}, leftmargin=2.2cm]
+  \item \textbf{Pattern triage.} For each requirement, pick exactly one
+        pattern from Table~\ref{tab:ch11-pattern-matrix} and defend the pick:
+        (a) a stock-ticker widget on a public marketing page; (b) a
+        two-player browser chess game; (c) ``notify our ERP when an invoice
+        is approved''; (d) a mobile app's badge count on a metered
+        connection; (e) a SOC wallboard that must survive the corporate
+        proxy.
+  \item \textbf{Signature forensics.} A receiver logs show a burst of
+        deliveries with valid signatures but timestamps 40 minutes old. All
+        were rejected. What two explanations fit, and what one-line config
+        change on the provider side would distinguish them?
+  \item \textbf{Rotation drill.} Extend Listing~11.2 so the deliverer signs
+        each attempt with \emph{two} secrets during a rotation window
+        (\texttt{t=...,v1=...,v1=...}). Prove with a test that receivers
+        holding either secret accept.
+  \item \textbf{SSE grammar fuzz.} The parser in Listing~11.4 ignores fields
+        it does not know. Per the WHATWG rules, what should happen for:
+        a line with no colon; a \texttt{data} field with an empty value; an
+        \texttt{id} containing a NUL; \texttt{retry: abc}? Encode your
+        answers as four new tests.
+  \item \textbf{Frame dissection.} By hand, write the two header bytes of:
+        an unmasked final text frame with a 60-byte payload; a masked final
+        binary frame with a 300-byte payload; an unfragmented ping with
+        payload \texttt{"hi"}. Then verify byte two's mask bit in each.
+  \item \textbf{Masking math.} Client payload byte \texttt{0x48} (`H'),
+        masking-key byte \texttt{0x37}. What goes on the wire? Why could the
+        attacker-in-the-browser not simply choose payload bytes that survive
+        masking unchanged?
+  \item \textbf{Backoff analysis.} Listing~11.2 uses delays
+        $\min(b \cdot 2^{n-1}, 60)$. For $b=1$, $n_{\max}=8$: total worst-
+        case wait? Now add $\pm 20\%$ jitter: what failure mode does jitter
+        prevent, and why is \texttt{random} seeded in the test suite if you
+        implement it?
+  \item \textbf{Resume-window design.} Your SSE server keeps a 500-event ring
+        buffer. A dashboard disconnects for an hour during which 2\,000
+        events pass. Design the reconnection behavior: what does the server
+        send, what should the client do, and how does the user experience
+        degrade gracefully?
+  \item \textbf{DLQ triage runbook.} Write the on-call runbook entry for the
+        alert ``dead-letter rate $>$ 10/hour'': first three diagnostic
+        queries, the decision tree for replay-versus-discard, and the
+        customer-communication trigger point.
+  \item \textbf{Contract gate.} Add a CI check (a short Python script) that
+        loads Listing~11.8 and fails the build if any message payload
+        property is removed or retyped relative to a checked-in previous
+        version. Which compatibility mode does your check implement?
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch11-interview}
+
+\paragraph{Junior tier}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm]
+  \item \textbf{What is the difference between polling and webhooks?}
+        Polling: the consumer repeatedly asks ``anything new?'' on its own
+        schedule --- simple, but most responses are empty and latency is
+        bounded by the interval. A webhook inverts it: the consumer registers
+        a URL and the \emph{provider} POSTs each event as it happens.
+        Polling costs requests; webhooks cost you a public, secured endpoint.
+  \item \textbf{What does SSE stand for and what is it?}
+        Server-Sent Events: a server responds to a GET with
+        \texttt{Content-Type: text/event-stream} and keeps the response open,
+        appending \texttt{field: value} event blocks separated by blank
+        lines. One-directional, server-to-client, text-only, native in
+        browsers via \texttt{EventSource}.
+  \item \textbf{Name the four SSE fields and what each does.}
+        \texttt{data} (payload; multiple lines join with newlines),
+        \texttt{event} (named type; default \texttt{message}),
+        \texttt{id} (cursor used for \texttt{Last-Event-ID} resume),
+        \texttt{retry} (client reconnection delay in ms). Colon-prefixed
+        lines are comment keep-alives.
+  \item \textbf{What HTTP status begins a WebSocket connection, and what
+        headers matter?}
+        \texttt{101 Switching Protocols}. The client sends
+        \texttt{Upgrade: websocket}, \texttt{Connection: Upgrade},
+        \texttt{Sec-WebSocket-Key}, \texttt{Sec-WebSocket-Version: 13}; the
+        server replies with \texttt{Sec-WebSocket-Accept}.
+  \item \textbf{Is SSE one-way or two-way? What about WebSocket?}
+        SSE is strictly server-to-client; clients respond over ordinary HTTP
+        requests if needed. WebSocket is full-duplex: both peers send frames
+        at any time after the upgrade.
+  \item \textbf{Why do webhooks usually sign their payloads?}
+        The receiver's URL is public; anyone who finds it could POST forged
+        events. An HMAC over the body with a shared secret proves the sender
+        holds the secret and the body is unaltered.
+  \item \textbf{What is an idempotent webhook receiver and why does it need
+        to be one?}
+        One where processing the same event twice has the same effect as
+        once --- typically by recording the event id and skipping duplicates.
+        Needed because delivery is at-least-once: providers retry whenever
+        the 2xx is lost, so duplicates are guaranteed.
+  \item \textbf{What happens when an SSE connection drops?}
+        \texttt{EventSource} waits the last \texttt{retry} interval (default
+        3\,s), reconnects, and sends \texttt{Last-Event-ID} with the last
+        received \texttt{id} so the server can resume the stream.
+  \item \textbf{Give two close codes you would actually use and their
+        meanings.}
+        1000 normal closure (work complete); 1001 going away (server restart
+        or page navigation). Mentioning that 1006 is reserved for
+        \emph{abnormal} closure and must never be sent earns extra credit.
+  \item \textbf{Webhooks versus a message queue --- when which?}
+        Webhooks cross organizational boundaries over public HTTP with zero
+        consumer infrastructure beyond an endpoint. Queues (Kafka, SQS) are
+        inside one trust/domain boundary, give stronger ordering/retention
+        tooling, and require consumer connectivity to the broker.
+\end{enumerate}
+
+\paragraph{Mid tier}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=11]
+  \item \textbf{Derive \texttt{Sec-WebSocket-Accept}.}
+        Concatenate the client's \texttt{Sec-WebSocket-Key} with the fixed
+        GUID \texttt{258EAFA5-...-C5AB0DC85B11}, take SHA-1, Base64-encode.
+        RFC vector: \texttt{dGhlIHNhbXBsZSBub25jZQ==} $\rightarrow$
+        \texttt{s3pPLMBiTxaQ9kYGzzhZRbK+xOo=}. Purpose: prove the server
+        implemented WebSocket, not just header echo.
+  \item \textbf{Why are client-to-server WebSocket frames masked?}
+        Not confidentiality --- intermediaries. A hostile browser script
+        could otherwise shape outbound bytes into something a misbehaving
+        transparent proxy parses as a smuggled HTTP request, poisoning shared
+        caches. A per-frame random 32-bit XOR key chosen \emph{after} the
+        app supplies bytes makes the wire bytes unpredictable to the
+        attacker.
+  \item \textbf{Walk me through the Stripe-style \texttt{t=...,v1=...}
+        verification.}
+        Parse timestamp and signature(s); check $|now - t| \le$ tolerance
+        (replay window); recompute HMAC-SHA256 over
+        ``$t$~\texttt{.}~raw-body'' with the endpoint secret; constant-time
+        compare against every \texttt{v1}; only then parse the JSON. Verify
+        raw bytes because re-serialization is not byte-stable.
+  \item \textbf{Why multiple \texttt{v1=} values in one header?}
+        Secret rotation: during the overlap window the provider signs with
+        old and new secrets; receivers configured with either still verify,
+        so rotation needs no synchronized flag day.
+  \item \textbf{Design webhook delivery guarantees.}
+        Durable queue per endpoint; at-least-once delivery with unique event
+        ids; retry only retryable statuses (5xx, 429, timeouts, connection
+        errors) with capped exponential backoff plus jitter; permanent 4xx
+        dead-letters immediately; DLQ with alerting and replay; document
+        best-effort ordering; consumer side: idempotent processing on event
+        id.
+  \item \textbf{SSE versus WebSockets for a live operations dashboard ---
+        decide.}
+        Dashboards are one-way server-to-client: SSE. You get automatic
+        reconnection with \texttt{Last-Event-ID} resume, plain-HTTP infra
+        compatibility (CORS, cookies, auth), trivial debugging with
+        \texttt{curl}. Choose WebSocket only if operators must also
+        \emph{send} low-latency commands on the same channel.
+  \item \textbf{Your SSE stream works locally but not behind nginx. Diagnose.}
+        Proxy buffering. Fix with \texttt{X-Accel-Buffering: no},
+        \texttt{Cache-Control: no-cache}, per-event flush, comment
+        keep-alives every 10--15\,s. Verify through the real proxy path.
+  \item \textbf{HTTP/1.1 versus HTTP/2 for SSE?}
+        HTTP/1.1: browsers cap at six connections per origin; two
+        long-lived streams can starve other requests --- use a separate
+        origin or HTTP/2. HTTP/2 multiplexes many streams over one
+        connection, removing the cap, at the cost of shared TCP head-of-line
+        blocking.
+  \item \textbf{How does \texttt{Last-Event-ID} resume work, and what is its
+        limit?}
+        The client replays the last seen \texttt{id} on reconnect; the
+        server replays events after it from a buffer/log. The limit is the
+        retention window: if the client fell further behind than the buffer,
+        the server must signal a resync (control event or 204) and the client
+        re-fetches current state.
+  \item \textbf{Exactly-once webhook delivery --- possible?}
+        No; over an unreliable network the sender cannot distinguish
+        ``receiver crashed before processing'' from ``processed but ack
+        lost'' (Two Generals). Honest design: at-least-once transport plus
+        idempotent consumers for effectively-once processing.
+  \item \textbf{Why does SSE get CORS/cookie auth ``for free'' while
+        \texttt{EventSource} cannot set custom headers?}
+        SSE \emph{is} an HTTP response, so CORS and cookies apply natively;
+        but the \texttt{EventSource} API exposes no header API, so bearer
+        tokens must ride as cookies or (carefully) query
+        parameters~\cite{rfc6749}. WebSocket's constructor accepts
+        subprotocols but not arbitrary headers either; token-in-first-message
+        or ticket endpoints are the usual patterns.
+  \item \textbf{What is a subprotocol and how is it chosen?}
+        An application-level protocol layered on WebSocket framing (e.g.\
+        \texttt{mqtt}, \texttt{graphql-ws}), offered by the client in
+        \texttt{Sec-WebSocket-Protocol} as a preference list; the server
+        picks at most one and returns it; a client that required one must
+        close if the pick is absent.
+\end{enumerate}
+
+\paragraph{Senior tier}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=23]
+  \item \textbf{Dissect a WebSocket frame header.}
+        Byte 0: FIN bit, RSV1--3, 4-bit opcode. Byte 1: MASK bit, 7-bit
+        length. Length 0--125 literal; 126 $\Rightarrow$ next 2 bytes are a
+        uint16; 127 $\Rightarrow$ next 8 bytes uint63 (big-endian). Then a
+        4-byte masking key iff MASK. Control frames (8/9/A) must be FIN with
+        $\le$125-byte payloads and may interleave between data fragments.
+  \item \textbf{Design a webhook system for one million endpoints.}
+        Partitioned durable queue (per-endpoint FIFO only if ordering is
+        promised); worker pool with per-endpoint concurrency limits and
+        circuit breakers; status classification; capped jittered backoff;
+        DLQ per endpoint with replay tooling; signed delivery with rotation;
+        endpoint verification at registration; SSRF defenses (egress proxy,
+        DNS-pinning, private-range blocking); metrics: attempts, latency,
+        4xx/5xx ratio, queue depth per endpoint.
+  \item \textbf{How do you scale SSE/WebSocket fan-out horizontally?}
+        Connections pin to a process, so introduce a backplane: each node
+        subscribes to a broker (Kafka/Redis pub/sub) and forwards to its
+        local sockets; sticky routing is unnecessary if every node can serve
+        every client; resume state (SSE) must live in the shared log, not
+        node memory.
+  \item \textbf{Backpressure: a slow SSE consumer and a slow WebSocket
+        consumer --- what happens in each, and what do you do?}
+        TCP flow control eventually stalls both; the server's send buffer
+        grows. SSE: bound a per-client queue, drop with a ``resync'' control
+        event (the client can resume via \texttt{Last-Event-ID}). WebSocket:
+        monitor buffered amount, apply app-level policies (drop deltas, send
+        snapshots, close with 1008/1013); never let unbounded buffering
+        become a memory-exhaustion vector.
+  \item \textbf{Ordering and deduplication strategy for a webhook consumer
+        processing financial events.}
+        At-least-once plus possible reordering demands: store event id and
+        \texttt{occurred\_at}/sequence transactionally with the effect;
+        dedupe on id; make effects last-write-wins on a monotonic cursor or
+        buffer-and-reorder within a window; reconcile periodically against
+        the provider's pull API (events you \emph{missed} are the silent
+        failure mode).
+  \item \textbf{Threat-model a public webhook receiver.}
+        Forgery (mitigate: HMAC verification), replay (timestamp tolerance +
+        idempotency store), tampering (HMAC over raw body), secret leak
+        (instant rotation, multiple \texttt{v1}), log injection / PII leak
+        (no payload logging), DoS via body size (limit bytes read before
+        verifying), timing oracle on compare (constant-time comparison).
+  \item \textbf{When would you pick long polling over SSE in 2026?}
+        Behind aggressive intermediaries that buffer or kill long-lived
+        streams; when every response must be a complete, cacheable HTTP
+        document; for very low event rates where held sockets cost more than
+        periodic requests; or where the client platform lacks
+        \texttt{EventSource} and you refuse a dependency.
+  \item \textbf{How do CloudEvents and AsyncAPI complement each other?}
+        CloudEvents standardizes the \emph{envelope} of a single event
+        (id, source, type, time, subject) so tooling is portable; AsyncAPI
+        standardizes the \emph{contract} of the whole API (channels,
+        operations, message schemas, bindings). You document channels and
+        payloads with AsyncAPI and shape each message's metadata as a
+        CloudEvent~\cite{asyncapi}.
+  \item \textbf{What is a poison message and how does your pipeline survive
+        one?}
+        An event that deterministically crashes or rejects every processing
+        attempt. Unhandled, it blocks or spins the consumer forever
+        (head-of-line). Handling: bounded attempts with backoff, then
+        quarantine to a dead-letter topic \emph{with the error context},
+        alert, and continue with the next event; replay after a fix.
+  \item \textbf{The provider's clock and yours disagree by ten minutes ---
+        what breaks and how do you design for it?}
+        The freshness check rejects every delivery. Design: tolerance windows
+        sized to expected skew (300\,s), NTP discipline on both fleets,
+        monitoring on rejection-by-staleness rate, and --- because the
+        signature \emph{covers} the timestamp --- attackers cannot simply
+        rewrite $t$, so the window is the only knob; keep it tight.
+\end{enumerate}
+
+\paragraph{Staff tier}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.6cm, start=33]
+  \item \textbf{Your org runs REST, webhooks, SSE, WebSockets, and gRPC
+        streams. What governance keeps this coherent?}
+        One contract repository (OpenAPI + AsyncAPI) with CI diff gates;
+        one envelope convention (CloudEvents-style id/source/type/time);
+        one signing/auth scheme reused across webhook providers; pattern-
+        selection review at design time (the taxonomy matrix) so teams
+        justify push channels; uniform consumer obligations (idempotency,
+        DLQ handling) in a shared library; deprecation policy identical for
+        endpoints and event types~\cite{newman2021microservices,asyncapi}.
+  \item \textbf{Multi-region webhook delivery: what changes?}
+        Deliver from the region nearest the endpoint to cut latency, but the
+        queue and DLQ must survive region loss (replicated log); per-endpoint
+        state (circuit breakers, backoff cursors) needs global consistency or
+        bounded divergence; secrets replicate with the same rotation overlap;
+        fail-open regions must not double-deliver \emph{without} the
+        consumer's idempotency absorbing it --- which is why the contract
+        promises at-least-once even in steady state.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch11-further}
+
+\begin{itemize}
+  \item \textbf{AsyncAPI Initiative}, \emph{AsyncAPI Specification 3.0} ---
+        the contract format for channels, messages, operations, and bindings
+        used in Listing~11.8~\cite{asyncapi}.
+  \item \textbf{IETF RFC~6455}, Fette \& Melnikov, \emph{The WebSocket
+        Protocol} --- the handshake, the SHA-1/GUID accept derivation, frame
+        format, masking rationale, opcodes, and close-code registry.
+  \item \textbf{WHATWG}, \emph{Server-Sent Events} (EventSource) living
+        standard --- the authoritative \texttt{text/event-stream} parsing
+        and reconnection algorithm implemented in Listing~11.4.
+  \item \textbf{MDN Web Docs}, \emph{Server-Sent Events / EventSource} ---
+        the browser API surface: named event listeners, \texttt{readyState},
+        \texttt{lastEventId}, and error handling.
+  \item \textbf{Stripe}, \emph{Webhooks documentation} --- the reference
+        implementation of the \texttt{t=...,v1=...} HMAC scheme, tolerance
+        windows, and endpoint secret rotation this chapter mirrors.
+  \item \textbf{IETF RFC~9110}, \emph{HTTP Semantics} --- methods, status
+        codes, content negotiation, and the Upgrade mechanism both SSE and
+        WebSocket rely on~\cite{rfc9110}.
+  \item \textbf{Adam Bellemare}, \emph{Designing Event-Driven Systems}
+        (O'Reilly, 2018) --- event log fundamentals, consumer semantics, and
+        the data-on-the-outside discipline behind
+        Section~\ref{sec:ch11-asyncapi}.
+  \item \textbf{CloudEvents (CNCF)}, \emph{CloudEvents Specification 1.0} ---
+        the vendor-neutral event envelope (id, source, type, time) worth
+        adopting before your event catalog outgrows ad-hoc JSON.
+  \item \textbf{Martin Kleppmann}, \emph{Designing Data-Intensive
+        Applications} (O'Reilly, 2017) --- the messaging-systems chapters
+        behind at-least-once semantics and the Two Generals framing
+        \cite{kleppmann2017ddia}.
+  \item \textbf{Sam Newman}, \emph{Building Microservices}, 2nd ed.
+        (O'Reilly, 2021) --- event-driven collaboration patterns and their
+        operational costs~\cite{newman2021microservices}.
+  \item \textbf{FastAPI} and \textbf{httpx} documentation ---
+        \texttt{StreamingResponse}, \texttt{WebSocket} routes, and streaming
+        client usage used throughout Section~\ref{sec:ch11-code}
+        \cite{fastapidocs,httpxdocs}.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch11-capstones}
+
+\subsection{Capstone 11.1 [junior] --- Signed Webhook Receiver for Robot Alerts}
+
+\textbf{Objective:} Build the consumer half of a webhook contract from
+scratch and prove it hostile-input-safe.
+
+\textbf{Inputs/Datasets:} A fixed synthetic feed of 12 Northwind Robotics
+alert events (JSON files, provided); one valid signing secret; a tampered
+variant of three events; two events signed with a stale timestamp.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Implement the \texttt{t=...,v1=...} verifier (reuse
+        Listing~11.1's primitives) with a 300-second tolerance and
+        constant-time comparison.
+  \item Add an idempotency store keyed on event id with a durability story
+        you can explain (a SQLite table is fine).
+  \item Write tests for: valid, tampered, stale, wrong-secret, replayed, and
+        missing-header deliveries.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}[label=$\square$]
+  \item All 12 valid events processed exactly once; all hostile variants
+        rejected with 4xx problem-details bodies.
+  \item Duplicate deliveries return 200 with \texttt{"status": "duplicate"}
+        and cause no side effects.
+  \item Test suite passes offline with a fixed injected clock.
+\end{itemize}
+
+\textbf{Stretch Goals:} support a two-secret rotation window; emit a
+Prometheus-style counter of accepted/rejected/duplicate deliveries.
+
+\subsection{Capstone 11.2 [mid] --- Webhook Delivery Service with DLQ and Replay}
+
+\textbf{Objective:} Build the provider half: queue, bounded jittered retries,
+status classification, dead-letter store, and an operator replay command.
+
+\textbf{Inputs/Datasets:} A registry of five synthetic customer endpoints
+(simulated by scripted fake transports: healthy, flaky-500, permanent-422,
+timeout-then-healthy, always-down); the Capstone~11.1 event feed.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Extend Listing~11.2 with seeded jitter and a persistent DLQ
+        (SQLite or JSONL) capturing event, endpoint, and attempt history.
+  \item Add a per-endpoint circuit breaker: after five consecutive exhausted
+        deliveries, pause the endpoint for a cooldown.
+  \item Implement \texttt{replay <event\_id>} re-enqueueing a dead-lettered
+        event; prove a replayed event is delivered (and the receiver's
+        idempotency absorbs the earlier partial processing).
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}[label=$\square$]
+  \item The permanent-422 endpoint receives exactly one attempt per event.
+  \item The always-down endpoint dead-letters every event; \texttt{replay}
+        restores delivery once its transport recovers.
+  \item Backoff schedule is asserted deterministically (injected clock and
+        sleeper); no test sleeps.
+  \item A one-page delivery-semantics document (at-least-once, ordering
+        caveats) ships with the service.
+\end{itemize}
+
+\textbf{Stretch Goals:} SSRF guardrails on endpoint registration (scheme
+allowlist, private-range rejection); per-endpoint delivery metrics endpoint.
+
+\subsection{Capstone 11.3 [mid] --- Resumable SSE Fleet Dashboard Backend}
+
+\textbf{Objective:} Serve a multi-channel SSE feed with correct
+\texttt{Last-Event-ID} resume from a bounded retention buffer, and survive a
+buffering proxy.
+
+\textbf{Inputs/Datasets:} A deterministic event generator (seeded) emitting
+per-robot telemetry for five robots at scripted intervals.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Generalize Listing~11.4: per-robot channels
+        (\texttt{/stream?robot=NWR-07}) plus a combined channel, each with
+        \texttt{id}, \texttt{retry}, and comment keep-alives every 15
+        seconds.
+  \item Implement a 500-event ring buffer per channel; resume serves the
+        buffer after \texttt{Last-Event-ID}, and answers a
+        \texttt{control: resync-required} event when the cursor has scrolled
+        out.
+  \item Put nginx (or a small buffering reverse proxy you write yourself) in
+        front and demonstrate the fix: \texttt{X-Accel-Buffering: no} plus
+        flushes, verified by a client that asserts inter-event arrival gaps.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}[label=$\square$]
+  \item A client disconnecting and resuming within the retention window
+        misses zero events; one resuming outside it receives the resync
+        signal.
+  \item Through the proxy, events arrive within one second of emission.
+  \item Grammar tests cover comments, multi-line data, unknown fields, and
+        empty-data blocks.
+\end{itemize}
+
+\textbf{Stretch Goals:} HTTP/2 serving; per-channel \texttt{retry} tuning;
+EventSource-compatible JavaScript demo page served by the same app.
+
+\subsection{Capstone 11.4 [senior] --- Bidirectional Robot Control Channel over WebSockets}
+
+\textbf{Objective:} Build a production-shaped WebSocket service: subprotocol
+negotiation, per-connection auth via first-message ticket, heartbeat policy,
+and graceful fleet-wide shutdown.
+
+\textbf{Inputs/Datasets:} The synthetic fleet (five robots); a scripted
+command set (dock, undock, set-speed) with per-command acknowledgements;
+a chaos harness that kills connections at scripted moments.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Define a subprotocol \texttt{northwind.control.v1} (JSON
+        request/response frames with correlation ids) and negotiate it in
+        the handshake; reject connections that require an unknown
+        subprotocol.
+  \item Implement ticket auth: client sends a one-time ticket in the first
+        frame; server closes with 1008 on failure.
+  \item Server pings every 20\,s; two missed pongs $\Rightarrow$ close 1011
+        and reap. Client reconnects with exponential backoff and replays
+        unacknowledged commands (deduped server-side by correlation id).
+  \item Fleet shutdown: server sends close 1001 (\texttt{going away}) to all
+        connections, waits for echoes, and exits before the deploy deadline.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}[label=$\square$]
+  \item Commands survive connection kills exactly-once (asserted via the
+        chaos harness with seeded scheduling).
+  \item Zombie connections are reaped within two heartbeat intervals.
+  \item Shutdown completes with zero unclean closes (no 1006) in the happy
+        path.
+  \item A short design note explains why this use case justifies WebSockets
+        over SSE + REST commands.
+\end{itemize}
+
+\textbf{Stretch Goals:} permessage-deflate negotiation; a Redis-style
+backplane interface (stubbed in-memory) proving the design scales to $N$
+server nodes.
+
+\subsection{Capstone 11.5 [staff] --- Event-Contract Governance Platform}
+
+\textbf{Objective:} Stand up the contract-governance layer for Northwind's
+entire event surface: AsyncAPI documents, compatibility gates, and a
+consumer-obligation library shared by all receivers.
+
+\textbf{Inputs/Datasets:} Three AsyncAPI documents (telemetry, alerts,
+maintenance) at two versions each, including one deliberately breaking change
+(property retype) and one compatible change (optional property added).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Write an AsyncAPI diff tool classifying channel/message/schema
+        changes as breaking or non-breaking (removal, retype, narrowing
+        $\Rightarrow$ breaking; additive-optional $\Rightarrow$ safe), exit
+        code non-zero on breakage.
+  \item Build the shared receiver library: signature verification,
+        idempotency store, poison-message quarantine, and structured
+        (payload-free) logging --- packaged so Capstone~11.1's receiver can
+        adopt it in five lines.
+  \item Produce a governance one-pager: compatibility modes, deprecation
+        workflow, version-support policy, and the consumer obligations every
+        team signs up for.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}[label=$\square$]
+  \item The diff gate passes the compatible evolution and fails the breaking
+        one, with human-readable diagnostics naming the offending property.
+  \item The shared library passes this chapter's full webhook test suite
+        unmodified.
+  \item The governance document covers schema evolution, secret rotation,
+        DLQ ownership, and event-retirement criteria.
+\end{itemize}
+
+\textbf{Stretch Goals:} CloudEvents envelope adoption across all three
+contracts; a generated Markdown catalog of channels and messages from the
+AsyncAPI sources.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch11-deps}
+
+The chapter's \texttt{requirements.txt}:
+
+\begin{minted}{text}
+fastapi>=0.110
+websockets>=12
+httpx>=0.27
+pydantic>=2.7
+pytest>=8
+\end{minted}
+
+Install under PowerShell (offline machines: pre-stage a wheelhouse with
+\texttt{pip download -d wheelhouse -r requirements.txt} on a connected host,
+then \texttt{pip install {-}{-}no-index {-}{-}find-links wheelhouse -r
+requirements.txt}):
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{fastapi}
+\textbf{Description:} The ASGI framework used for the webhook receiver
+(Listing~11.1), the SSE producer (Listing~11.4), and the long-poll contrast
+(Listing~11.9), including \texttt{StreamingResponse} and the in-process
+\texttt{TestClient} that keeps every test offline~\cite{fastapidocs}.
+\textbf{Why included:} it is the book's established server framework
+(Chapter~6) and its response/streaming primitives map one-to-one onto the
+protocols in this chapter without magic.
+\textbf{Alternatives:} Starlette directly (FastAPI's base; fewer batteries);
+SSE-Starlette (adds a dedicated \texttt{EventSourceResponse} --- convenient,
+but Listing~11.4 deliberately shows the wire format by hand, which is the
+pedagogical point); aiohttp or Django Channels if your organization already
+standardized there.
+\textbf{Installation:} \texttt{pip install "fastapi>=0.110"} in the activated
+venv; serving listings interactively additionally needs \texttt{uvicorn}.
+
+\subsection{websockets}
+\textbf{Description:} The reference-quality Python WebSocket library;
+Listing~11.6 uses its \texttt{websockets.asyncio} implementation (available
+since version~12) for both server and client sides of the echo/broadcast
+demo, ping/pong, and clean close.
+\textbf{Why included:} RFC~6455 correctness (handshake, masking, control
+frames, close handshake) is handled for you, letting the chapter focus on
+semantics while still exposing the wire details where they matter.
+\textbf{Alternatives:} python-socketio (higher-level rooms/namespaces with
+automatic fallbacks --- pick it for product chat features, not for learning
+the protocol); FastAPI/Starlette's built-in WebSocket routes (fine for
+ASGI-hosted endpoints); aiohttp's WS support.
+\textbf{Installation:} \texttt{pip install "websockets>=12"}.
+
+\subsection{httpx}
+\textbf{Description:} The HTTP client used as the delivery transport in the
+lab and as the streaming client paired with the SSE parser; powers
+\texttt{TestClient} under the hood~\cite{httpxdocs}.
+\textbf{Why included:} one API for sync and async, first-class streaming
+response iteration (\texttt{client.stream(...).iter\_lines()}), explicit
+timeout configuration --- the three properties webhook delivery and SSE
+consumption actually need.
+\textbf{Alternatives:} \texttt{urllib.request} (stdlib; workable for the
+delivery worker but no ergonomic streaming); \texttt{requests} (no async, no
+HTTP/2); \texttt{aiohttp} (async-only).
+\textbf{Installation:} \texttt{pip install "httpx>=0.27"}.
+
+\subsection{pydantic}
+\textbf{Description:} The validation layer behind FastAPI models (used
+directly for the long-poll \texttt{Notification} model in Listing~11.9).
+\textbf{Why included:} event payloads are contracts; validating them at the
+boundary with typed models is the same discipline Chapter~4 established for
+REST representations.
+\textbf{Alternatives:} \texttt{dataclasses} plus hand-rolled validation
+(what Listings~11.1--11.2 use deliberately, to keep signature logic
+dependency-visible); msgspec or attrs for performance-sensitive paths.
+\textbf{Installation:} \texttt{pip install "pydantic>=2.7"} (pulled in
+transitively by FastAPI).
+
+\subsection{pytest}
+\textbf{Description:} The test runner for all eighteen tests in this
+chapter.
+\textbf{Why included:} fixtures and parametrization keep the hostile-input
+matrix (tampered, stale, replayed) declarative; async behavior is tested
+through \texttt{asyncio.run} inside synchronous tests, so no pytest-asyncio
+plugin is required and scheduling stays explicit.
+\textbf{Alternatives:} \texttt{unittest} (stdlib, zero install; more
+boilerplate); nose2 (largely superseded).
+\textbf{Installation:} \texttt{pip install "pytest>=8"}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch11-summary}
+
+\begin{itemize}
+  \item \textbf{Pattern before protocol.} Choose by initiation and direction:
+        server-to-server push $\Rightarrow$ webhooks; one-way server-to-client
+        $\Rightarrow$ SSE; genuine two-way interaction $\Rightarrow$
+        WebSockets; everything else $\Rightarrow$ request/response, possibly
+        with long polling or \texttt{ETag}-assisted short polling.
+  \item \textbf{Webhooks are reverse APIs.} At-least-once delivery is the
+        only honest semantics; the contract is signed HMAC over
+        timestamp-plus-body, a tight tolerance window, bounded jittered
+        retries that distinguish permanent from transient failure, idempotent
+        receivers, and a dead-letter queue with a replay path.
+  \item \textbf{SSE is plain HTTP with a grammar.} Four fields, comment
+        keep-alives, blank-line dispatch; \texttt{EventSource} reconnects and
+        resumes via \texttt{Last-Event-ID} for free. Respect buffering
+        proxies (\texttt{X-Accel-Buffering: no}) and the HTTP/1.1
+        connection cap (prefer HTTP/2).
+  \item \textbf{WebSocket abandons HTTP after the handshake.} The accept
+        value is $\mathrm{Base64}(\mathrm{SHA\text{-}1}(key \,\|\,
+        \mathrm{GUID}))$; frames carry FIN/opcode/mask/length; client masking
+        protects intermediaries, not secrecy; ping/pong and the close
+        handshake are your liveness and shutdown machinery. Do not pay those
+        costs for stateless CRUD or cacheable reads.
+  \item \textbf{Contracts govern events too.} AsyncAPI documents channels,
+        operations, messages, and bindings; compatibility gates and
+        idempotent, poison-tolerant consumers are as mandatory as for REST.
+  \item \textbf{Test the failure modes, deterministically.} Injected clocks
+        and sleepers, scripted transports, \texttt{asyncio.Event}
+        synchronization --- never wall-clock assertions --- make tamper,
+        replay, retry-storm, and resume behavior provable offline.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch11-quickref}
+
+\subsection*{Pattern selection matrix (pocket version)}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Need} & \textbf{Pick} & \textbf{Remember} \\
+    \midrule
+    Server $\to$ server event & Webhook & sign, retry-bounded, DLQ, idempotent receiver \\
+    Server $\to$ browser, one-way & SSE & resume via \texttt{Last-Event-ID}; kill proxy buffering \\
+    Two-way low-latency & WebSocket & own reconnection, heartbeat, backpressure \\
+    Occasional freshness, cacheable & Short poll + \texttt{ETag} & nearly free at scale \\
+    Simple push through hostile proxies & Long polling & hold deadline $<$ proxy idle timeout \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection*{SSE field reference}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X}
+    \toprule
+    \textbf{Line form} & \textbf{Meaning} \\
+    \midrule
+    \texttt{data: <text>} & payload; repeated lines joined with newlines \\
+    \texttt{event: <name>} & dispatch type (default \texttt{message}) \\
+    \texttt{id: <text>} & sets the client's last-event-id cursor \\
+    \texttt{retry: <ms>} & reconnection delay (digits only) \\
+    \texttt{: <anything>} & comment; use as keep-alive every 10--15\,s \\
+    (blank line) & dispatch the buffered event \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection*{WebSocket close codes}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l l X}
+    \toprule
+    \textbf{Code} & \textbf{Name} & \textbf{Use} \\
+    \midrule
+    1000 & normal & work complete; default clean close \\
+    1001 & going away & server restart, page navigation \\
+    1002 & protocol error & peer violated framing rules \\
+    1003 & unsupported data & received a type you cannot accept \\
+    1006 & (abnormal) & reserved; never sent on the wire \\
+    1007 & invalid payload & e.g.\ non-UTF-8 in a text frame \\
+    1008 & policy violation & authz failure, generic policy refusal \\
+    1009 & too big & message exceeded your limit \\
+    1011 & internal error & server-side unexpected condition \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection*{Webhook header anatomy}
+\begin{minted}{text}
+X-Northwind-Signature: t=<unix-seconds>,v1=<hex HMAC-SHA256(secret, "t.body")>
+verify order: parse -> freshness (|now - t| <= 300 s) -> HMAC (constant time)
+              -> parse JSON -> idempotency check -> process -> 200
+retry policy: 2xx = done; 408/409/425/429/5xx/network = retry (bounded,
+              jittered exponential); other 4xx = dead-letter immediately
+\end{minted}
+
+\input{chapters/_standard_addendum}

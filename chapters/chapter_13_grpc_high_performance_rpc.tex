@@ -1,0 +1,2614 @@
+%% ============================================================================
+%% Chapter 13: gRPC & High-Performance RPC
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{gRPC \& High-Performance RPC}
+\label{ch:grpc}
+
+%% ----------------------------------------------------------------------------
+%% Executive Summary
+%% ----------------------------------------------------------------------------
+Every API style you have studied so far --- REST over JSON, GraphQL, event-driven
+messaging --- ultimately pays the same two taxes on every call: the cost of turning
+an in-memory request into bytes, and the cost of moving those bytes across the
+network. On public, browser-facing, low-frequency paths those taxes are noise. On
+\emph{hot internal paths} --- service-to-service calls inside a data center,
+fan-out queries that touch fifty microservices per user request, telemetry streams
+emitting thousands of frames per second --- they dominate. gRPC exists to minimize
+both taxes simultaneously: it pairs a compact binary serialization format
+(Protocol Buffers, Chapter~4) with a multiplexed binary transport (HTTP/2,
+Chapter~1) and generates the client and server plumbing from a single
+language-neutral interface definition~\cite{grpcdocs,protobufdocs}.
+
+This chapter treats gRPC with the same wire-level rigor we applied to HTTP in
+Chapter~1. You will learn the RPC conceptual model --- stubs, skeletons,
+marshalling, interface definition --- and precisely why REST+JSON loses on hot
+internal paths: payload size, text parsing cost, weak contracts, and the absence
+of first-class streaming. You will study gRPC's exact message framing: every
+message on an HTTP/2 stream is prefixed with five bytes --- a one-byte compression
+flag and a four-byte big-endian length --- followed by the protobuf payload, with
+the method identified by \texttt{:path} of the form
+\texttt{/package.Service/Method} and the outcome reported in the
+\texttt{grpc-status} trailer~\cite{rfc9113,grpcdocs}. You will master Protocol
+Buffers as an IDL, all four RPC modes (unary, server streaming, client streaming,
+bidirectional streaming), deadline propagation across hops, metadata and
+interceptors, the seventeen canonical status codes with rich error details, and
+the operational realities that textbooks love to skip: load balancing long-lived
+HTTP/2 connections, connection aging, keepalive, server reflection, browser
+exposure via grpc-web and JSON transcoding, and the health-checking protocol.
+
+All code is offline-first and deterministic: a synthetic \emph{Northwind
+Robotics} telemetry service exercised entirely on localhost and in-process, with
+a pytest suite covering deadline exceeded, cancellation, and stream error paths.
+
+\begin{keyconceptbox}
+gRPC is not ``REST but faster.'' It is a different \emph{contract discipline}: a
+single \texttt{.proto} file is the source of truth from which typed clients and
+servers are generated in a dozen languages, the wire format is self-describing by
+tag number rather than by field name, and the transport multiplexes many
+concurrent streams over one TCP connection. You adopt gRPC to buy contract
+safety, streaming semantics, and wire efficiency on internal paths --- and you
+pay for it with browser hostility, opaque-on-the-wire debugging, and load
+balancing subtleties that REST never had.
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch13-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Explain the RPC conceptual model --- client stub, server skeleton,
+        marshalling, interface definition language --- and articulate precisely why
+        REST+JSON is the wrong tool for hot internal paths (payload size, parse
+        cost, codegen, streaming)~\cite{kleppmann2017ddia,newman2021microservices}.
+  \item Decode gRPC's wire format by hand: the 5-byte message prefix (1-byte
+        compressed flag + 4-byte big-endian length), the
+        \texttt{/package.Service/Method} \texttt{:path}, the
+        \texttt{application/grpc} content type, trailers-only responses, and the
+        \texttt{grpc-status} / \texttt{grpc-message} trailers~\cite{rfc9113,grpcdocs}.
+  \item Author Protocol Buffers IDL with messages, services, field rules,
+        well-known types, \texttt{oneof}, and \texttt{map}; drive the
+        \texttt{protoc} / \texttt{grpcio-tools} codegen pipeline; and apply the
+        schema-evolution rules (tag-number discipline, \texttt{reserved}) from
+        Chapter~4~\cite{protobufdocs}.
+  \item Select and implement the correct RPC mode --- unary, server streaming,
+        client streaming, bidirectional streaming --- including the cancellation
+        semantics of each.
+  \item Engineer deadlines correctly: propagate remaining budget across hops via
+        the \texttt{grpc-timeout} header, distinguish per-attempt from overall
+        deadlines, and defend servers with \texttt{context.time\_remaining()}
+        checks.
+  \item Use metadata (headers, trailers, binary \texttt{-bin} keys) and
+        client/server interceptors for auth, logging, metrics, and retry policy.
+  \item Apply the seventeen canonical gRPC status codes with sound judgment,
+        attach rich error details (\texttt{google.rpc.Status}-style payloads in
+        binary trailers), and map codes to HTTP statuses when transcoding.
+  \item Operate gRPC in production: diagnose the L4 load-balancer hotspot,
+        configure client-side and lookaside balancing, tune connection age and
+        keepalive, use server reflection with \texttt{grpcurl}, expose services
+        to browsers via grpc-web or JSON transcoding, and implement the standard
+        health-checking protocol.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed:
+
+\begin{itemize}
+  \item \textbf{Chapters 0--2} --- Python 3.11+ environment, virtual environments,
+        \texttt{pip}/\texttt{pytest} from PowerShell, and consuming HTTP APIs.
+  \item \textbf{Chapter 1} --- the HTTP wire protocol, \emph{especially} the
+        HTTP/2 material: streams, frames, HPACK-compressed header blocks,
+        \texttt{:path} and other pseudo-headers, flow control, and
+        \texttt{RST\_STREAM}. We reuse that vocabulary without re-deriving it.
+  \item \textbf{Chapter 3} --- REST's constraints, as the point of contrast.
+  \item \textbf{Chapter 4} --- serialization and data contracts: the Protocol
+        Buffers wire format (varints, wire types, tag computation), and the
+        schema-evolution rules. This chapter assumes them and adds the IDL and
+        service layer on top.
+\end{itemize}
+
+No network access is required anywhere: every listing binds to
+\texttt{localhost} or runs fully in-process, and all data is synthetic, drawn
+from the fictional Northwind Robotics warehouse-fleet universe.
+
+\begin{warningbox}
+gRPC's performance reputation is real but conditional. The wins come from
+binary framing, HPACK header compression, connection reuse, and codegen --- all
+of which you can squander with per-call channels, unbounded streams, missing
+deadlines, or a naive L4 load balancer. Read Section~\ref{sec:ch13-pitfalls}
+before you benchmark.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch13-mechanics}
+
+\subsection{The RPC Conceptual Model: Stubs, Skeletons, Marshalling}
+\label{subsec:ch13-rpc-model}
+
+\begin{definition}[Remote Procedure Call]
+A \emph{remote procedure call} is an invocation that \emph{looks} like a local
+function call at the call site but whose execution crosses a process or machine
+boundary. The illusion is constructed from four pieces: an \textbf{interface
+definition} that names the procedures and their parameter/return types; a
+\textbf{client stub} that exposes those signatures locally and converts
+arguments to bytes (\emph{marshalling}); a \textbf{server skeleton} (or
+\emph{servicer}) that converts bytes back to arguments and invokes the real
+implementation; and a \textbf{transport} that moves the bytes.
+\end{definition}
+
+The model dates to the early 1980s and has been reincarnated as ONC RPC, DCE/RPC,
+CORBA, Java RMI, XML-RPC, SOAP/WSDL, Apache Thrift, and now gRPC. Every
+incarnation converges on the same architecture because the problem is invariant:
+two processes need a \emph{shared, machine-checkable contract} and a
+\emph{mechanical translation} between the contract and each language's native
+types. Where the generations differ is in the quality of the contract (IDL
+expressiveness and evolution rules), the efficiency of the encoding, and the
+semantics of the transport. gRPC's particular bet is: proto3 as the IDL,
+protobuf binary as the encoding, HTTP/2 as the transport, and code generation as
+the only supported consumption style~\cite{grpcdocs,protobufdocs}.
+
+Two consequences of the stub model deserve emphasis. First, \textbf{the contract
+precedes the implementation}: you write \texttt{telemetry.proto} before you
+write Python, and both sides generate from it, so client and server cannot
+silently disagree about field types. Second, \textbf{the call is not local}: the
+stub hides the network but not its physics --- latency, partial failure,
+deadlines, and cancellation are first-class in the generated API precisely
+because pretending they do not exist is the classic RPC fallacy
+\cite{kleppmann2017ddia,newman2021microservices}.
+
+\subsection{Why REST+JSON Loses on Hot Internal Paths}
+\label{subsec:ch13-why-not-rest}
+
+REST over JSON is the right default for public APIs --- Chapter~3 argued this at
+length --- but on hot internal paths it concedes four compounding
+disadvantages:
+
+\begin{enumerate}
+  \item \textbf{Payload size.} JSON repeats every field name in every message,
+        encodes numbers as decimal text, and base64-inflates binary data. A
+        protobuf \texttt{TelemetryFrame} carries field tags as single varint
+        bytes (Chapter~4) and is routinely $3$--$10\times$ smaller than the
+        equivalent JSON, which translates directly into bandwidth and
+        serialization CPU.
+  \item \textbf{Parse cost.} JSON parsing is text scanning; protobuf decoding is
+        varint reads and memory copies. At tens of thousands of messages per
+        second per core, the difference is measurable in tail latency.
+  \item \textbf{No enforced contract.} OpenAPI describes REST contracts, but
+        nothing forces both sides to generate from it; drift is routine. With
+        gRPC the \texttt{.proto} \emph{is} the API: both sides are generated
+        artifacts of one file, so drift is a compile error, not an incident.
+  \item \textbf{No first-class streaming.} REST has one request and one
+        response; streaming is bolted on (SSE, chunked bodies, WebSockets) with
+        per-framework semantics. gRPC's four modes make streaming part of the
+        contract, with uniform cancellation, flow control, and error semantics.
+\end{enumerate}
+
+The honest counterpoint --- developed in Section~\ref{sec:ch13-pitfalls} and the
+interview vault --- is that gRPC's advantages are \emph{internal-path}
+advantages. Browsers cannot speak raw gRPC, humans cannot read protobuf on the
+wire, and the ecosystem of caches, gateways, and tooling built for HTTP/1.1+JSON
+mostly does not apply. Choose per path, not per organization.
+
+\subsection{HTTP/2 as the Transport}
+\label{subsec:ch13-http2}
+
+Chapter~1 covered HTTP/2's mechanics: one TCP connection carries many
+concurrent \emph{streams}; each stream is a sequence of \emph{frames}
+(\texttt{HEADERS}, \texttt{DATA}, \texttt{RST\_STREAM}, \texttt{WINDOW\_UPDATE},
+\ldots); header blocks are HPACK-compressed; flow control is per-stream and
+per-connection via credit windows~\cite{rfc9113}. gRPC maps onto this cleanly:
+
+\begin{center}
+\emph{one RPC} $\longleftrightarrow$ \emph{one HTTP/2 stream}.
+\end{center}
+
+That single sentence explains most of gRPC's performance profile. Many RPCs
+share one TCP connection (no head-of-line blocking between calls, no
+connection-pool gymnastics), streams are cheap so unary calls and long-lived
+bidi streams coexist, and flow control plus \texttt{RST\_STREAM} give every RPC
+independent backpressure and cancellation.
+
+\subsubsection{gRPC Message Framing: The 5-Byte Prefix}
+\label{subsubsec:ch13-framing}
+
+HTTP/2 \texttt{DATA} frames are arbitrary byte containers; gRPC imposes its own
+message boundary inside them. Each protobuf message --- request or response ---
+is serialized on the wire as a \textbf{Length-Prefixed Message}:
+
+\begin{minted}{text}
+ byte 0        : Compressed-Flag   (0 = uncompressed, 1 = compressed)
+ bytes 1..4    : Message-Length    (uint32, BIG-ENDIAN, network byte order)
+ bytes 5..N    : Message           (serialized protobuf, exactly Length bytes)
+\end{minted}
+
+For example, a request message that serializes to the 3 protobuf bytes
+\texttt{0A 07 ... } of length \texttt{0x0000000B} would appear on the wire as:
+
+\begin{minted}{text}
+ 00 00 00 00 0B 0A 07 ...   <- flag=0, length=11, then 11 protobuf bytes
+\end{minted}
+
+Three properties follow. First, framing is \emph{length-delimited}, so a single
+HTTP/2 stream can carry any number of messages in order --- this is what makes
+the three streaming modes possible with zero additional machinery. Second, the
+compression flag is per-message, so a server may compress opportunistically.
+Third, a message may span many HTTP/2 \texttt{DATA} frames, or many messages may
+share one frame: the 5-byte prefix, not the frame boundary, is the unit of
+meaning.
+
+\subsubsection{Request and Response Anatomy on the Wire}
+\label{subsubsec:ch13-anatomy}
+
+A gRPC call is an HTTP/2 \emph{POST} with specific pseudo-headers and a specific
+life cycle~\cite{grpcdocs,rfc9113}:
+
+\begin{minted}{text}
+ HEADERS (stream 7, flags: END_HEADERS)
+   :method    = POST
+   :scheme    = https
+   :path      = /northwind.telemetry.v1.TelemetryService/GetRobotStatus
+   :authority = telemetry.northwind.example
+   content-type = application/grpc
+   grpc-timeout = 100m
+   authorization = Bearer ...
+   x-correlation-id = corr-000001
+ DATA    (stream 7, flags: END_STREAM)   <- 5-byte prefix + protobuf request
+\end{minted}
+
+The \texttt{:path} is exactly \texttt{/}\emph{package.Service}\texttt{/}%
+\emph{Method} --- the fully qualified proto name. \texttt{content-type} begins
+with \texttt{application/grpc} (commonly \texttt{application/grpc+proto};
+\texttt{+json} exists for exotic deployments). The response:
+
+\begin{minted}{text}
+ HEADERS (stream 7)               <- "initial metadata"
+   :status = 200
+   content-type = application/grpc
+ DATA    (stream 7)               <- 5-byte prefix + protobuf response(s)
+ HEADERS (stream 7, flags: END_STREAM)   <- "trailers"
+   grpc-status = 0
+   grpc-message = ...
+   error-details-bin = <base64>
+\end{minted}
+
+Note the asymmetry that surprises every newcomer: \textbf{the HTTP status is
+always 200 OK} (barring transport-level failures), and the \emph{real} outcome
+of the RPC arrives in the \texttt{grpc-status} \textbf{trailer}. It must be a
+trailer because streaming responses may have already emitted dozens of DATA
+frames before the failure that determines the final status. When a call fails
+before any response message is produced, servers may collapse the whole response
+into a single \texttt{HEADERS} frame carrying \texttt{:status 200},
+\texttt{grpc-status}, and \texttt{END\_STREAM} --- the \textbf{trailers-only
+response}, which is what most error responses look like on the wire.
+Figure~\ref{fig:ch13-call-anatomy} shows the complete anatomy.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small, >=stealth,
+    life/.style={draw=packtgray, dashed},
+    box/.style={draw, fill=blue!8, minimum width=3.6cm, inner sep=4pt},
+    req/.style={->, thick, packtorange},
+    res/.style={->, thick, darkblue},
+    lbl/.style={midway, align=left, font=\footnotesize\ttfamily, fill=white, inner sep=1.5pt}]
+  \node[box] (client) {Client stub};
+  \node[box, right=8.6cm of client] (server) {gRPC server};
+  \draw[life] (client.south) -- ++(0,-8.3) coordinate (cbot);
+  \draw[life] (server.south) -- ++(0,-8.3) coordinate (sbot);
+
+  \draw[req] ($(client.south)+(0,-0.6)$) -- node[lbl]
+      {HEADERS :path=/pkg.Svc/Method, content-type=application/grpc,\\ grpc-timeout=100m, authorization, x-correlation-id}
+      ($(server.south)+(0,-0.6)$);
+  \draw[req] ($(client.south)+(0,-1.9)$) -- node[lbl]
+      {DATA [00 | 00 00 00 0B | protobuf request] END\_STREAM}
+      ($(server.south)+(0,-1.9)$);
+  \node[note, anchor=west] at ($(server.south)+(0.25,-2.6)$)
+      {unmarshal, invoke servicer, marshal};
+
+  \draw[res] ($(server.south)+(0,-3.5)$) -- node[lbl]
+      {HEADERS :status=200, content-type=application/grpc}
+      ($(client.south)+(0,-3.5)$);
+  \draw[res] ($(server.south)+(0,-4.6)$) -- node[lbl]
+      {DATA [00 | 00 00 00 21 | protobuf response]}
+      ($(client.south)+(0,-4.6)$);
+  \draw[res] ($(server.south)+(0,-5.7)$) -- node[lbl]
+      {HEADERS grpc-status=0 END\_STREAM (trailers)}
+      ($(client.south)+(0,-5.7)$);
+
+  \draw[decorate, decoration={brace, amplitude=5pt}, packtgray]
+      ($(sbot)+(0.35,-0.15)$) -- ($(sbot)+(0.35,7.5)$)
+      node[note, midway, right=8pt, align=left]
+      {one HTTP/2 stream = one RPC\\ (many streams share one\\ TCP connection)};
+\end{tikzpicture}
+\caption{Anatomy of a unary gRPC call over one HTTP/2 stream. Client frames in
+orange, server frames in blue. Every protobuf message is preceded by the 5-byte
+prefix (compression flag + big-endian length); the definitive outcome arrives in
+the \texttt{grpc-status} trailer.}
+\label{fig:ch13-call-anatomy}
+\end{figure}
+\subsection{Protocol Buffers as the Interface Definition Language}
+\label{subsec:ch13-proto-idl}
+
+Chapter~4 covered the protobuf \emph{wire format}; here we cover the protobuf
+\emph{language} as the IDL from which gRPC services are
+built~\cite{protobufdocs}. The elements you will use daily:
+
+\begin{itemize}
+  \item \textbf{Messages and field rules.} In proto3 every field is optional in
+        the serialization sense --- absent fields decode to type defaults
+        (\texttt{0}, \texttt{""}, \texttt{false}, empty) --- and
+        \texttt{repeated} marks a list. proto3 deliberately removed
+        \texttt{required}: a required field is a schema-evolution trap, because
+        no consumer can ever stop populating it.
+  \item \textbf{Tag numbers.} The integer after \texttt{=} is the field's
+        identity on the wire (the name is for humans and codegen). Numbers
+        1--15 cost one byte of tag; 16--2047 cost two. \emph{Never reuse a
+        retired tag number} --- a stale peer will silently reinterpret old bytes
+        as the new field. Retire with \texttt{reserved 9, 10;} and
+        \texttt{reserved "heading\_deg";} so the compiler enforces the ban
+        (Chapter~4's evolution rules, now load-bearing).
+  \item \textbf{Well-known types.} \texttt{google.protobuf.Timestamp},
+        \texttt{Duration}, \texttt{Struct}, \texttt{Any}, and wrappers like
+        \texttt{DoubleValue} ship with protoc. Prefer \texttt{Timestamp} over
+        ``epoch seconds in an int64 named \texttt{time}'' --- it is
+        self-describing and range-checked.
+  \item \textbf{\texttt{oneof}.} At most one branch is set at a time; setting a
+        branch clears the others, and presence is preserved on the wire
+        (\texttt{WhichOneof("action")} in Python). Use it for genuine
+        alternatives --- our \texttt{location} and \texttt{action} fields ---
+        not as a general union type.
+  \item \textbf{\texttt{map<K,V>}.} Sugar for a repeated entry message; keys may
+        be integral or string types. Map ordering is \emph{not} guaranteed on
+        the wire --- never key application logic on it.
+  \item \textbf{Services.} A \texttt{service} block names RPCs and their
+        cardinality: \texttt{rpc M(Req) returns (Resp)} for unary, with
+        \texttt{stream} on either side for the streaming modes. This is the
+        only part of the file protoc's gRPC plugin consumes.
+\end{itemize}
+
+The codegen pipeline is mechanical and hermetic:
+
+\begin{minted}{text}
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. telemetry.proto
+\end{minted}
+
+\texttt{grpc\_tools.protoc} bundles the protoc compiler and the well-known
+proto files (so the \texttt{google/protobuf/timestamp.proto} import resolves
+offline). It emits two modules: \texttt{telemetry\_pb2.py} (message classes:
+builders, accessors, \texttt{SerializeToString}/\texttt{ParseFromString},
+\texttt{WhichOneof}, map containers) and \texttt{telemetry\_pb2\_grpc.py}
+(the \texttt{TelemetryServiceStub} client class, the
+\texttt{TelemetryServiceServicer} base class you subclass, and the
+\texttt{add\_TelemetryServiceServicer\_to\_server} registration function).
+\textbf{Generated files are build artifacts}: regenerate, never hand-edit, and
+regenerate in CI so stubs can never drift from the \texttt{.proto}.
+
+\begin{examplebox}
+Schema evolution, one paragraph: you may add fields with \emph{fresh} tag
+numbers (old peers ignore unknown tags; new peers see defaults), remove fields
+only by reserving their tags and names first, widen \texttt{int32} to
+\texttt{int64} (same wire type), and add \texttt{oneof} branches. You may never
+reuse tag numbers, change a field's wire type, or move an existing field into a
+\texttt{oneof}. Our \texttt{TelemetryFrame} reserves tags 9--10 and the names
+\texttt{heading\_deg}/\texttt{speed\_mps}, retired in v1.1 --- the reservation
+makes a v1.2 reintroduction a \emph{compile error} instead of a production data
+corruption (Chapter~4, Section on tag discipline)~\cite{protobufdocs}.
+\end{examplebox}
+
+\subsection{The Four RPC Modes}
+\label{subsec:ch13-modes}
+
+Cardinality is declared in the IDL and fixed at compile time; each mode has a
+canonical use case and its own cancellation semantics
+(Figure~\ref{fig:ch13-four-modes}):
+
+\begin{enumerate}
+  \item \textbf{Unary} --- one request, one response. The default for
+        command/query shapes (\texttt{GetRobotStatus}). Cancellation: client
+        abort sends \texttt{RST\_STREAM}; server observes
+        \texttt{context.is\_active() == False}.
+  \item \textbf{Server streaming} --- one request, many responses
+        (\texttt{StreamTelemetry}: ``subscribe to this robot's frames'').
+        Canonical for change feeds, tailing, and large result sets consumed
+        incrementally. Cancellation matters most here: an unbounded stream the
+        client abandoned is a server-side resource leak unless the handler
+        checks \texttt{is\_active()} between yields.
+  \item \textbf{Client streaming} --- many requests, one response
+        (\texttt{UploadTelemetry}: bulk ingestion). The server reads until
+        end-of-stream, then computes one summary. Errors discovered mid-stream
+        should abort with status and details, not be silently tallied.
+  \item \textbf{Bidirectional streaming} --- two independent message sequences
+        on one stream (\texttt{ControlLoop}: commands down, acknowledgements
+        up). The sequences are \emph{not} request/response pairs unless your
+        protocol makes them so; ordering is guaranteed within each direction
+        only. This is the mode for control planes, chat-like protocols, and
+        interactive sessions.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize, >=stealth,
+    life/.style={draw=packtgray, dashed},
+    peer/.style={draw, fill=blue!8, inner sep=2pt, font=\footnotesize\bfseries},
+    req/.style={->, thick, packtorange},
+    res/.style={->, thick, darkblue},
+    cap/.style={font=\footnotesize\bfseries}]
+
+  % ---- Unary (top-left) ----
+  \begin{scope}
+    \node[modcap] at (1.5,0.3) {Unary};
+    \node[peer] (c1) at (0,0) {C};
+    \node[peer] (s1) at (3,0) {S};
+    \draw[life] (c1.south) -- ++(0,-2.4);
+    \draw[life] (s1.south) -- ++(0,-2.4);
+    \draw[req] ($(c1.south)+(0,-0.5)$) -- node[above]{1 req} ($(s1.south)+(0,-0.5)$);
+    \draw[res] ($(s1.south)+(0,-1.7)$) -- node[above]{1 resp} ($(c1.south)+(0,-1.7)$);
+  \end{scope}
+
+  % ---- Server streaming (top-right) ----
+  \begin{scope}[xshift=7.2cm]
+    \node[modcap] at (1.5,0.3) {Server streaming};
+    \node[peer] (c2) at (0,0) {C};
+    \node[peer] (s2) at (3,0) {S};
+    \draw[life] (c2.south) -- ++(0,-2.4);
+    \draw[life] (s2.south) -- ++(0,-2.4);
+    \draw[req] ($(c2.south)+(0,-0.5)$) -- node[above]{1 req} ($(s2.south)+(0,-0.5)$);
+    \draw[res] ($(s2.south)+(0,-1.1)$) -- ($(c2.south)+(0,-1.1)$);
+    \draw[res] ($(s2.south)+(0,-1.6)$) -- node[below]{n resp} ($(c2.south)+(0,-1.6)$);
+    \draw[res] ($(s2.south)+(0,-2.1)$) -- ($(c2.south)+(0,-2.1)$);
+  \end{scope}
+
+  % ---- Client streaming (bottom-left) ----
+  \begin{scope}[yshift=-3.6cm]
+    \node[modcap] at (1.5,0.3) {Client streaming};
+    \node[peer] (c3) at (0,0) {C};
+    \node[peer] (s3) at (3,0) {S};
+    \draw[life] (c3.south) -- ++(0,-2.4);
+    \draw[life] (s3.south) -- ++(0,-2.4);
+    \draw[req] ($(c3.south)+(0,-0.6)$) -- ($(s3.south)+(0,-0.6)$);
+    \draw[req] ($(c3.south)+(0,-1.1)$) -- node[below]{n req} ($(s3.south)+(0,-1.1)$);
+    \draw[req] ($(c3.south)+(0,-1.6)$) -- ($(s3.south)+(0,-1.6)$);
+    \draw[res] ($(s3.south)+(0,-2.2)$) -- node[above]{1 resp} ($(c3.south)+(0,-2.2)$);
+  \end{scope}
+
+  % ---- Bidirectional (bottom-right) ----
+  \begin{scope}[xshift=7.2cm, yshift=-3.6cm]
+    \node[modcap] at (1.5,0.3) {Bidirectional};
+    \node[peer] (c4) at (0,0) {C};
+    \node[peer] (s4) at (3,0) {S};
+    \draw[life] (c4.south) -- ++(0,-2.4);
+    \draw[life] (s4.south) -- ++(0,-2.4);
+    \draw[req] ($(c4.south)+(0,-0.5)$) -- ($(s4.south)+(0,-0.5)$);
+    \draw[res] ($(s4.south)+(0,-0.9)$) -- ($(c4.south)+(0,-0.9)$);
+    \draw[req] ($(c4.south)+(0,-1.4)$) -- ($(s4.south)+(0,-1.4)$);
+    \draw[res] ($(s4.south)+(0,-1.8)$) -- ($(c4.south)+(0,-1.8)$);
+    \node[note, anchor=west] at ($(c4.south)+(0.1,-2.3)$) {interleaved, in-order per direction};
+  \end{scope}
+\end{tikzpicture}
+\caption{Message timelines for the four RPC modes. Client-to-server messages in
+orange, server-to-client in blue. Every arrow is a length-prefixed message on
+the same HTTP/2 stream; the stream closes with the \texttt{grpc-status}
+trailer.}
+\label{fig:ch13-four-modes}
+\end{figure}
+
+\subsection{Deadlines, Cancellation, and Metadata}
+\label{subsec:ch13-deadlines}
+
+\textbf{Deadline mechanics.} When a Python client passes
+\texttt{timeout=0.1}, the gRPC core computes an absolute deadline
+(\emph{now} + 100 ms) and transmits the \emph{remaining} budget in the
+\texttt{grpc-timeout} header as an integer with a unit suffix ---
+\texttt{H} hours, \texttt{M} minutes, \texttt{S} seconds, \texttt{m}
+milliseconds, \texttt{u} microseconds, \texttt{n} nanoseconds, at most eight
+digits (e.g. \texttt{grpc-timeout: 99950u} after 50 $\mu$s of transit). The
+server's \texttt{context.time\_remaining()} is derived from that header minus
+observed transit time --- so \textbf{the budget propagates}: when your handler
+fans out to a downstream gRPC service, forwarding \texttt{time\_remaining()} as
+the downstream timeout means the whole call tree shares one end-to-end budget
+instead of each hop inventing its own. This is the single most important
+resilience behavior in the chapter; the lab exercises it.
+
+\textbf{Per-attempt vs.\ overall.} Retries (Section~\ref{subsec:ch13-code-client})
+spend \emph{attempts} from the \emph{same} overall deadline; the service config's
+\texttt{timeout} field caps each RPC, while per-attempt budgets are bounded by
+backoff configuration. A call that needs 3 attempts $\times$ 300 ms must be
+given an overall deadline well above 900 ms, or the retries are decoration.
+
+\textbf{Cancellation.} Client cancellation emits \texttt{RST\_STREAM} (Chapter
+1); the server must poll \texttt{context.is\_active()} in loops and generators
+and stop producing. Cancellation is advisory and cooperative --- a server that
+never checks will happily compute into the void.
+
+\textbf{Metadata.} Request headers and response trailers are both
+\emph{metadata}: lowercase ASCII keys, string values --- \emph{except} keys
+suffixed \texttt{-bin}, which carry raw binary (base64-encoded on the HTTP/2
+wire, exposed as bytes in the API). Auth rides in metadata ---
+\texttt{authorization: Bearer \ldots} on every call, attached by an interceptor,
+never hand-threaded through business logic --- and rich error details ride in
+\texttt{-bin} trailers (Section~\ref{subsec:ch13-errors}). Metadata keys
+beginning with \texttt{grpc-} are reserved for the framework.
+
+\subsection{Interceptors: The Cross-Cutting Layer}
+\label{subsec:ch13-interceptors}
+
+Interceptors are gRPC's middleware: functions that wrap every call on a channel
+(client side) or every handler on a server, for concerns that must be uniform
+--- authentication, correlation IDs, logging, metrics, retry hedging, error
+mapping. They come in client/server $\times$ unary/stream varieties; Python
+models the client ones as the four abstract classes
+\texttt{grpc.UnaryUnaryClientInterceptor} \ldots{}
+\texttt{grpc.StreamStreamClientInterceptor}, composed with
+\texttt{grpc.intercept\_channel}, and the server side as
+\texttt{grpc.ServerInterceptor.intercept\_service}, which receives the
+not-yet-bound handler and returns a (wrapped) handler.
+Figure~\ref{fig:ch13-interceptors} shows the chain; Section~\ref{sec:ch13-code}
+implements both ends.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize, >=stealth,
+    node distance=0.45cm,
+    box/.style={draw, rounded corners=2pt, fill=blue!8, minimum height=0.85cm, inner sep=4pt},
+    ibox/.style={box, fill=packtorange!12},
+    tport/.style={box, fill=green!10, minimum width=4.4cm},
+    flow/.style={->, thick, packtgray}]
+  % outbound chain
+  \node[box] (app) {Client app};
+  \node[ibox, right=of app] (c1) {auth + correlation ID};
+  \node[ibox, right=of c1] (c2) {logging / metrics};
+  \node[ibox, right=of c2] (c3) {retry policy};
+  \node[tport, right=of c3] (chan) {channel (HTTP/2)};
+  \draw[flow] (app) -- (c1);
+  \draw[flow] (c1) -- (c2);
+  \draw[flow] (c2) -- (c3);
+  \draw[flow] (c3) -- (chan);
+
+  % inbound chain
+  \node[tport, below=1.1cm of chan] (lst) {listener (HTTP/2)};
+  \node[ibox, left=of lst] (s1) {error mapping};
+  \node[ibox, left=of s1] (s2) {authz check};
+  \node[ibox, left=of s2] (s3) {logging / metrics};
+  \node[box, left=of s3] (svc) {Service impl};
+  \draw[flow] (lst) -- (s1);
+  \draw[flow] (s1) -- (s2);
+  \draw[flow] (s2) -- (s3);
+  \draw[flow] (s3) -- (svc);
+
+  \draw[flow] (chan) -- node[right, note]{one TCP connection, many streams} (lst);
+  \draw[flow, dashed] (svc.north) .. controls +(0,0.7) and +(-2.4,0.4) ..
+      node[above, note]{response path unwinds the chain in reverse} (app.north -| c1);
+\end{tikzpicture}
+\caption{Interceptor chain. Client interceptors wrap outbound calls (attach
+metadata, observe latency, drive retries); server interceptors wrap inbound
+handlers (enforce authz, map domain errors to status codes, emit metrics).}
+\label{fig:ch13-interceptors}
+\end{figure}
+
+\subsection{The Error Model}
+\label{subsec:ch13-errors}
+
+gRPC replaces HTTP's flat status taxonomy with seventeen canonical codes carried
+in the \texttt{grpc-status} trailer~\cite{grpcdocs}. The full set, with usage
+guidance:
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{c l X c}
+    \toprule
+    \textbf{\#} & \textbf{Code} & \textbf{Use when} & \textbf{HTTP map} \\
+    \midrule
+    0  & OK & Success (not an error). & 200 \\
+    1  & CANCELLED & Caller cancelled (or deadline-adjacent abort). & 499 \\
+    2  & UNKNOWN & Error from another namespace / unclassified. & 500 \\
+    3  & INVALID\_ARGUMENT & Client sent malformed input; retry unchanged will fail. & 400 \\
+    4  & DEADLINE\_EXCEEDED & Budget expired (note: server-set, vs.\ CANCELLED for client abort). & 504 \\
+    5  & NOT\_FOUND & Named resource does not exist. & 404 \\
+    6  & ALREADY\_EXISTS & Create collided with existing resource. & 409 \\
+    7  & PERMISSION\_DENIED & Authenticated, but not allowed. & 403 \\
+    8  & RESOURCE\_EXHAUSTED & Quota / rate limit / disk full. & 429 \\
+    9  & FAILED\_PRECONDITION & System state forbids the op (e.g.\ non-empty dir delete). & 400 \\
+    10 & ABORTED & Concurrency conflict; safe to retry whole op (transactions). & 409 \\
+    11 & OUT\_OF\_RANGE & Value outside valid range (seek past end). & 400 \\
+    12 & UNIMPLEMENTED & Method unknown to this server. & 501 \\
+    13 & INTERNAL & Server bug / invariant violation. & 500 \\
+    14 & UNAVAILABLE & Transient: server down, overloaded, restarting. \emph{Retryable.} & 503 \\
+    15 & DATA\_LOSS & Unrecoverable data corruption. & 500 \\
+    16 & UNAUTHENTICATED & Missing/invalid credentials. & 401 \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The 17 canonical gRPC status codes and their conventional HTTP
+  mapping when transcoding to JSON APIs (the mapping used by Google's
+  \texttt{google/rpc/code.proto} conventions).}
+  \label{tab:ch13-status}
+\end{table}
+
+Three judgment calls trip up even senior engineers. \textbf{INVALID\_ARGUMENT
+vs.\ FAILED\_PRECONDITION vs.\ OUT\_OF\_RANGE}: the first means the request is
+malformed no matter the system state; the second means the request is fine but
+the system's state forbids it; the third is for values outside a defined range
+(e.g.\ seeking past the end of a stream). \textbf{UNAUTHENTICATED
+vs.\ PERMISSION\_DENIED}: the first means ``we don't know who you are''
+(credentials missing/invalid --- re-auth may fix it); the second means ``we know
+who you are and the answer is no'' (re-auth will not help).
+\textbf{NOT\_FOUND vs.\ PERMISSION\_DENIED}: when revealing existence would
+leak information, return PERMISSION\_DENIED (or even NOT\_FOUND) uniformly ---
+but pick one policy per resource class and document it.
+
+\textbf{Rich error details.} A status code plus a string is not an error
+\emph{model}. Google APIs standardize a richer payload: a
+\texttt{google.rpc.Status} message --- code, message, and \texttt{repeated
+google.protobuf.Any details} carrying typed payloads such as
+\texttt{BadRequest} (per-field violations), \texttt{QuotaFailure},
+\texttt{RetryInfo}, and \texttt{ErrorInfo} (stable machine-readable
+\texttt{reason} + \texttt{domain}) --- serialized into the binary trailer
+\texttt{grpc-status-details-bin}. Our listing implements the same pattern with a
+first-class \texttt{ErrorDetails} message in the chapter proto and an
+\texttt{error-details-bin} trailer, so it runs with only
+\texttt{grpcio}/\texttt{protobuf} installed; swapping in
+\texttt{googleapis-common-protos} and the standard key is a drop-in upgrade.
+
+\textbf{Transcoding.} When a gateway translates gRPC to HTTP+JSON
+(Section~\ref{subsec:ch13-operational}), each status code maps to one HTTP
+status (Table~\ref{tab:ch13-status}); details typically serialize into the
+response body as a JSON \texttt{error} object. Design your codes and details so
+both audiences --- native gRPC clients and transcoded REST clients --- can act
+on them.
+
+\subsection{Operational gRPC: Load Balancing, Connections, Tooling}
+\label{subsec:ch13-operational}
+
+\textbf{The L4 problem.} gRPC multiplexes \emph{many RPCs over one long-lived
+TCP connection}. A Layer-4 (TCP) load balancer balances \emph{connections}, so
+once a client connects to a pod, every RPC it ever makes lands on that pod ---
+autoscaling adds idle pods while one pod melts (the war story in
+Section~\ref{sec:ch13-lab} tells it with numbers). The standard remedies:
+\textbf{(a) client-side LB} --- the client resolves all backends (DNS) and
+load-balances per-RPC with \texttt{round\_robin} (or per-connection with the
+default \texttt{pick\_first}); \textbf{(b) lookaside LB} --- a control plane
+(the historical \texttt{grpclb} protocol) hands the client a curated server
+list, keeping data-plane traffic direct; \textbf{(c) xDS} --- the CNCF/Envoy
+service-discovery API family (LDS/CDS/RDS/EDS) that modern meshes and gRPC's
+``proxyless service mesh'' mode use to push routing, LB policy, and config to
+clients; and \textbf{(d) L7 proxies} (Envoy, Linkerd) that terminate HTTP/2 and
+rebalance per-stream~\cite{grpcdocs,newman2021microservices}.
+
+\textbf{Connection management.} Two server options prevent the pathologies of
+immortal connections: \texttt{grpc.max\_connection\_age\_ms} forces periodic
+reconnects (clients transparently redial, landing on a rebalanced backend ---
+set \texttt{max\_connection\_age\_grace\_ms} to drain in-flight RPCs), and
+\texttt{grpc.keepalive\_time\_ms} sends HTTP/2 PINGs so dead peers and idle
+connections through NATs/firewalls are detected. Client-side
+\texttt{grpc.keepalive\_time\_ms} must exceed the server's
+\texttt{min\_ping\_interval} policy or the server will throttle you with
+GOAWAYs.
+
+\textbf{Server reflection and grpcurl.} A server opting into the reflection
+service can enumerate its services and descriptors at runtime, which powers
+\texttt{grpcurl} --- ``curl for gRPC'' --- with no local \texttt{.proto} copy.
+In Python, enable it with the \texttt{grpcio-reflection} package; the lab shows
+the exact invocations.
+
+\textbf{Browsers: grpc-web and JSON transcoding.} Browsers cannot open raw
+HTTP/2 streams with trailer access, so two bridges exist: \textbf{grpc-web}
+speaks a framed variant of the protocol through a proxy (Envoy has a native
+filter), giving web clients generated stubs and unary/server-streaming calls;
+\textbf{HTTP/JSON transcoding} annotates the proto
+(\texttt{google.api.http}) so a gateway (Envoy's gRPC-JSON transcoder,
+gRPC-Gateway) exposes each RPC as a conventional REST endpoint --- the standard
+way to keep one internal gRPC contract while publishing a public JSON API.
+
+\textbf{Health checking.} The \texttt{grpc.health.v1.Health} service
+(\texttt{Check}, \texttt{Watch}) is the standard liveness/readiness contract:
+orchestrators and LBs query it per service name, and servers flip
+\texttt{SERVING}/\texttt{NOT\_SERVING} during drains. Implement it from day one
+--- a load balancer that cannot distinguish ``up'' from ``serving'' will route
+traffic into your deploys.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch13-code}
+The running example is the \emph{Northwind Robotics Telemetry Service}: a fleet
+of warehouse robots emits telemetry frames, operators query status, and a
+control loop steers individual units. All six listings below were executed
+against Python 3.11+ with \texttt{grpcio}, \texttt{grpcio-tools},
+\texttt{protobuf}, and \texttt{pytest} (Appendix, Section~%
+\ref{sec:ch13-deps}), entirely offline on \texttt{localhost}. Data is synthetic
+and deterministic: frames derive from a fixed seed and a fixed base epoch,
+never from the wall clock.
+
+\subsection{Listing 1 --- Interface Definition: \texttt{telemetry.proto}}
+\label{subsec:ch13-code-proto}
+
+One file is the whole contract: messages with well-known types
+(\texttt{Timestamp}), a \texttt{map}, two \texttt{oneof}s, \texttt{reserved}
+tags for retired fields, and a service declaring all four RPC modes.
+
+\begin{minted}{text}
+syntax = "proto3";
+
+package northwind.telemetry.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Operating mode reported by a Northwind Robotics warehouse robot.
+enum RobotMode {
+  ROBOT_MODE_UNSPECIFIED = 0;
+  ROBOT_MODE_IDLE = 1;
+  ROBOT_MODE_MOVING = 2;
+  ROBOT_MODE_CHARGING = 3;
+  ROBOT_MODE_FAULT = 4;
+}
+
+message AislePosition {
+  string aisle_id = 1;
+  double offset_m = 2;
+}
+
+message GpsFix {
+  double latitude = 1;
+  double longitude = 2;
+  double hdop = 3;
+}
+
+// One telemetry sample emitted by a robot.
+message TelemetryFrame {
+  string robot_id = 1;
+  google.protobuf.Timestamp observed_at = 2;  // well-known type
+  double battery_pct = 3;                     // 0.0 .. 100.0
+  double chassis_temp_celsius = 4;
+  map<string, double> joint_positions_rad = 5;
+  RobotMode mode = 6;
+
+  oneof location {                            // exactly one branch is set
+    AislePosition aisle = 7;
+    GpsFix gps = 8;
+  }
+
+  // Tag numbers and names retired in v1.1; never reuse them (see Chapter 4).
+  reserved 9, 10;
+  reserved "heading_deg", "speed_mps";
+}
+
+message RobotStatusRequest {
+  string robot_id = 1;
+}
+
+message RobotStatusReply {
+  string robot_id = 1;
+  RobotMode mode = 2;
+  double battery_pct = 3;
+  google.protobuf.Timestamp firmware_built_at = 4;
+  TelemetryFrame last_frame = 5;
+}
+
+message StreamTelemetryRequest {
+  string robot_id = 1;
+  uint32 max_frames = 2;  // hard bound; the server never exceeds it
+  uint32 period_ms = 3;   // pacing between frames
+}
+
+message UploadSummary {
+  uint32 accepted = 1;
+  uint32 rejected = 2;
+  double min_battery_pct = 3;
+  double max_battery_pct = 4;
+}
+
+message ControlCommand {
+  string robot_id = 1;
+  uint64 sequence = 2;
+
+  oneof action {
+    RobotMode set_mode = 3;
+    bool estop = 4;
+    double set_speed_mps = 5;
+  }
+}
+
+// Structured error payload, carried in the "error-details-bin" trailer.
+// Mirrors the shape of google.rpc.Status details used by Google APIs.
+message ErrorDetails {
+  string reason = 1;
+  string domain = 2;  // e.g. "telemetry.northwind.example"
+  repeated FieldViolation violations = 3;
+  string correlation_id = 4;
+}
+
+message FieldViolation {
+  string field = 1;
+  string description = 2;
+}
+
+// The four RPC modes, one of each kind.
+service TelemetryService {
+  rpc GetRobotStatus(RobotStatusRequest) returns (RobotStatusReply);  // unary
+  rpc StreamTelemetry(StreamTelemetryRequest) returns (stream TelemetryFrame);
+  rpc UploadTelemetry(stream TelemetryFrame) returns (UploadSummary);
+  rpc ControlLoop(stream ControlCommand) returns (stream TelemetryFrame);
+}
+\end{minted}
+
+Generate the stubs from PowerShell (the bundled \texttt{grpc\_tools.protoc}
+resolves the well-known-type import offline):
+
+\begin{minted}{text}
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. telemetry.proto
+\end{minted}
+
+This emits \texttt{telemetry\_pb2.py} (messages) and
+\texttt{telemetry\_pb2\_grpc.py} (stub, servicer base, registration). The
+generated-stub usage pattern is always the same three moves:
+\emph{subclass} the servicer and implement the RPCs (Listing~2);
+\emph{register} the servicer on a \texttt{grpc.server}; on the client,
+\emph{instantiate the stub} against a channel and call methods as if local
+(Listing~3).
+
+\subsection{Listing 2 --- Server: All Four Modes with Deadline and Cancellation Discipline}
+\label{subsec:ch13-code-server}
+
+Note the defensive habits: every handler checks \texttt{context.is\_active()}
+in its loop, re-checks \texttt{context.time\_remaining()} after any stall, and
+raises typed \texttt{DomainError}s that Listing~4 maps to status codes with
+rich details. \texttt{RB-SLOW} simulates a slow dependency so the deadline test
+has something to bite.
+
+\begin{minted}{python}
+"""Northwind Robotics telemetry service -- gRPC server implementation.
+
+Chapter 13 listing. Offline-first: binds to localhost only; every payload is
+synthetic and derived from a fixed seed, never from the wall clock.
+"""
+from __future__ import annotations
+
+import argparse
+import random
+import time
+from concurrent import futures
+from typing import Iterable, Iterator
+
+import grpc
+
+import telemetry_pb2
+import telemetry_pb2_grpc
+
+BASE_EPOCH_S = 1_700_000_000  # fixed synthetic epoch for deterministic payloads
+KNOWN_ROBOTS = ("RB-1001", "RB-1002", "RB-1003", "RB-SLOW")
+MIN_BUDGET_S = 0.005
+
+
+class DomainError(Exception):
+    """Application error carrying its intended gRPC status mapping."""
+
+    status_code: grpc.StatusCode = grpc.StatusCode.INTERNAL
+    reason: str = "INTERNAL"
+
+    def __init__(
+        self,
+        message: str,
+        violations: list[telemetry_pb2.FieldViolation] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.violations = violations or []
+
+
+class UnknownRobotError(DomainError):
+    status_code = grpc.StatusCode.NOT_FOUND
+    reason = "ROBOT_NOT_FOUND"
+
+
+class FrameValidationError(DomainError):
+    status_code = grpc.StatusCode.INVALID_ARGUMENT
+    reason = "FRAME_VALIDATION_FAILED"
+
+
+def _check_known(robot_id: str) -> None:
+    if robot_id not in KNOWN_ROBOTS:
+        raise UnknownRobotError(f"unknown robot_id {robot_id!r}")
+
+
+def _require_budget(
+    context: grpc.ServicerContext, min_s: float = MIN_BUDGET_S
+) -> None:
+    """Fail fast if the propagated deadline leaves no useful budget."""
+    remaining = context.time_remaining()
+    if remaining < min_s:
+        context.abort(
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            f"budget exhausted: {remaining * 1000:.2f} ms remaining",
+        )
+
+
+class TelemetryService(telemetry_pb2_grpc.TelemetryServiceServicer):
+    """All four RPC modes with explicit deadline and cancellation checks."""
+
+    def __init__(self, seed: int = 1337) -> None:
+        self._seed = seed
+
+    def _frame(
+        self,
+        robot_id: str,
+        seq: int,
+        mode: telemetry_pb2.RobotMode | None = None,
+    ) -> telemetry_pb2.TelemetryFrame:
+        # Per-frame seeded RNG keeps payloads deterministic and reproducible.
+        rng = random.Random(f"{self._seed}:{robot_id}:{seq}")
+        frame = telemetry_pb2.TelemetryFrame(
+            robot_id=robot_id,
+            battery_pct=round(95.0 - 0.01 * seq + rng.uniform(-0.25, 0.25), 3),
+            chassis_temp_celsius=round(32.0 + rng.uniform(-1.0, 1.0), 2),
+            mode=(
+                telemetry_pb2.ROBOT_MODE_MOVING if mode is None else mode
+            ),
+        )
+        frame.observed_at.FromSeconds(BASE_EPOCH_S + seq * 5)
+        frame.joint_positions_rad["shoulder"] = round(rng.uniform(-1.0, 1.0), 4)
+        frame.joint_positions_rad["elbow"] = round(rng.uniform(0.0, 2.0), 4)
+        frame.aisle.CopyFrom(
+            telemetry_pb2.AislePosition(
+                aisle_id="A-07", offset_m=round(rng.uniform(0.0, 120.0), 2)
+            )
+        )
+        return frame
+
+    # -- Mode 1: unary ----------------------------------------------------
+    def GetRobotStatus(
+        self,
+        request: telemetry_pb2.RobotStatusRequest,
+        context: grpc.ServicerContext,
+    ) -> telemetry_pb2.RobotStatusReply:
+        _require_budget(context)
+        _check_known(request.robot_id)
+        if request.robot_id == "RB-SLOW":
+            time.sleep(0.200)  # simulated slow dependency
+            _require_budget(context, min_s=0.100)  # re-check after the stall
+        last = self._frame(request.robot_id, seq=0)
+        reply = telemetry_pb2.RobotStatusReply(
+            robot_id=request.robot_id,
+            mode=last.mode,
+            battery_pct=last.battery_pct,
+        )
+        reply.firmware_built_at.FromSeconds(BASE_EPOCH_S - 86_400)
+        reply.last_frame.CopyFrom(last)
+        return reply
+
+    # -- Mode 2: server streaming ------------------------------------------
+    def StreamTelemetry(
+        self,
+        request: telemetry_pb2.StreamTelemetryRequest,
+        context: grpc.ServicerContext,
+    ) -> Iterator[telemetry_pb2.TelemetryFrame]:
+        _check_known(request.robot_id)
+        if request.max_frames == 0:
+            raise FrameValidationError(
+                "max_frames must be >= 1",
+                [
+                    telemetry_pb2.FieldViolation(
+                        field="max_frames", description="must be >= 1"
+                    )
+                ],
+            )
+        period_s = max(request.period_ms, 1) / 1000.0
+        for seq in range(request.max_frames):
+            if not context.is_active():
+                return  # client cancelled: stop producing promptly
+            _require_budget(context)
+            time.sleep(period_s)
+            yield self._frame(request.robot_id, seq)
+
+    # -- Mode 3: client streaming -------------------------------------------
+    def UploadTelemetry(
+        self,
+        request_iterator: Iterable[telemetry_pb2.TelemetryFrame],
+        context: grpc.ServicerContext,
+    ) -> telemetry_pb2.UploadSummary:
+        accepted = 0
+        rejected = 0
+        min_battery = float("inf")
+        max_battery = float("-inf")
+        for frame in request_iterator:
+            if not context.is_active():
+                break
+            if frame.robot_id not in KNOWN_ROBOTS:
+                raise FrameValidationError(
+                    "frame references unknown robot",
+                    [
+                        telemetry_pb2.FieldViolation(
+                            field="robot_id",
+                            description="must be a known robot",
+                        )
+                    ],
+                )
+            if not 0.0 <= frame.battery_pct <= 100.0:
+                rejected += 1
+                continue
+            accepted += 1
+            min_battery = min(min_battery, frame.battery_pct)
+            max_battery = max(max_battery, frame.battery_pct)
+        return telemetry_pb2.UploadSummary(
+            accepted=accepted,
+            rejected=rejected,
+            min_battery_pct=round(min_battery, 3) if accepted else 0.0,
+            max_battery_pct=round(max_battery, 3) if accepted else 0.0,
+        )
+
+    # -- Mode 4: bidirectional streaming -------------------------------------
+    def ControlLoop(
+        self,
+        request_iterator: Iterable[telemetry_pb2.ControlCommand],
+        context: grpc.ServicerContext,
+    ) -> Iterator[telemetry_pb2.TelemetryFrame]:
+        for command in request_iterator:
+            if not context.is_active():
+                return
+            _require_budget(context)
+            _check_known(command.robot_id)
+            action = command.WhichOneof("action")
+            if action == "set_mode":
+                mode = command.set_mode
+            elif action == "estop":
+                mode = (
+                    telemetry_pb2.ROBOT_MODE_FAULT
+                    if command.estop
+                    else telemetry_pb2.ROBOT_MODE_IDLE
+                )
+            elif action == "set_speed_mps":
+                mode = telemetry_pb2.ROBOT_MODE_MOVING
+            else:
+                raise FrameValidationError(
+                    "command has no action set",
+                    [
+                        telemetry_pb2.FieldViolation(
+                            field="action", description="oneof must be set"
+                        )
+                    ],
+                )
+            yield self._frame(command.robot_id, seq=command.sequence, mode=mode)
+
+
+def make_server(
+    interceptors: tuple[grpc.ServerInterceptor, ...] = (),
+    max_workers: int = 8,
+) -> grpc.Server:
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=max_workers),
+        interceptors=interceptors,
+        options=[
+            ("grpc.max_connection_age_ms", 300_000),  # let L4/L7 LBs rebalance
+            ("grpc.keepalive_time_ms", 60_000),
+            ("grpc.keepalive_permit_without_calls", 0),
+        ],
+    )
+    telemetry_pb2_grpc.add_TelemetryServiceServicer_to_server(
+        TelemetryService(), server
+    )
+    return server
+
+
+def main() -> None:
+    from error_middleware import ErrorMappingInterceptor
+
+    parser = argparse.ArgumentParser(description="Telemetry gRPC server")
+    parser.add_argument("--port", type=int, default=50051)
+    args = parser.parse_args()
+    server = make_server(interceptors=(ErrorMappingInterceptor(),))
+    bound = server.add_insecure_port(f"localhost:{args.port}")
+    server.start()
+    print(f"telemetry server listening on localhost:{bound}")
+    server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 3 --- Error-Mapping Middleware with Rich Details}
+\label{subsec:ch13-code-middleware}
+
+A \texttt{grpc.ServerInterceptor} rebuilds each handler so that any
+\texttt{DomainError} becomes the right status code plus a serialized
+\texttt{ErrorDetails} message in the binary \texttt{error-details-bin} trailer
+--- the same transport trick Google APIs use for \texttt{google.rpc.Status} in
+\texttt{grpc-status-details-bin}. \texttt{decode\_error\_details} is the client
+half; the test suite asserts the round trip, including correlation-ID
+propagation from inbound metadata into the error payload.
+
+\begin{minted}{python}
+"""Server interceptor: map domain errors to gRPC status + rich details.
+
+Rich details ride in the binary trailing-metadata key "error-details-bin",
+the same transport trick Google APIs use for google.rpc.Status in
+"grpc-status-details-bin". A client helper decodes them back.
+"""
+from __future__ import annotations
+
+from typing import Any, Callable
+
+import grpc
+
+import telemetry_pb2
+from telemetry_server import DomainError
+
+TRAILER_KEY = "error-details-bin"
+
+
+def _correlation_id(context: grpc.ServicerContext) -> str:
+    for key, value in context.invocation_metadata():
+        if key == "x-correlation-id":
+            return str(value)
+    return ""
+
+
+def _abort_with_details(
+    context: grpc.ServicerContext, err: DomainError
+) -> None:
+    details = telemetry_pb2.ErrorDetails(
+        reason=err.reason,
+        domain="telemetry.northwind.example",
+        correlation_id=_correlation_id(context),
+    )
+    details.violations.extend(err.violations)
+    context.set_trailing_metadata(
+        ((TRAILER_KEY, details.SerializeToString()),)
+    )
+    context.abort(err.status_code, err.message)
+
+
+def _wrap_unary(behavior: Callable) -> Callable:
+    def handler(request: Any, context: grpc.ServicerContext) -> Any:
+        try:
+            return behavior(request, context)
+        except DomainError as err:
+            _abort_with_details(context, err)
+
+    return handler
+
+
+def _wrap_stream(behavior: Callable) -> Callable:
+    def handler(request_or_iter: Any, context: grpc.ServicerContext) -> Any:
+        try:
+            yield from behavior(request_or_iter, context)
+        except DomainError as err:
+            _abort_with_details(context, err)
+
+    return handler
+
+
+class ErrorMappingInterceptor(grpc.ServerInterceptor):
+    """Rebuilds each handler so DomainError becomes status + rich details."""
+
+    def intercept_service(self, continuation, handler_call_details):
+        handler = continuation(handler_call_details)
+        if handler is None:
+            return None
+        deserializer = handler.request_deserializer
+        serializer = handler.response_serializer
+        if handler.request_streaming and handler.response_streaming:
+            return grpc.stream_stream_rpc_method_handler(
+                _wrap_stream(handler.stream_stream),
+                request_deserializer=deserializer,
+                response_serializer=serializer,
+            )
+        if handler.request_streaming:
+            return grpc.stream_unary_rpc_method_handler(
+                _wrap_unary(handler.stream_unary),
+                request_deserializer=deserializer,
+                response_serializer=serializer,
+            )
+        if handler.response_streaming:
+            return grpc.unary_stream_rpc_method_handler(
+                _wrap_stream(handler.unary_stream),
+                request_deserializer=deserializer,
+                response_serializer=serializer,
+            )
+        return grpc.unary_unary_rpc_method_handler(
+            _wrap_unary(handler.unary_unary),
+            request_deserializer=deserializer,
+            response_serializer=serializer,
+        )
+
+
+def decode_error_details(
+    call_or_error: Any,
+) -> telemetry_pb2.ErrorDetails | None:
+    """Client side: pull ErrorDetails out of a failed call's trailers."""
+    metadata = call_or_error.trailing_metadata() or ()
+    for key, value in metadata:
+        if key == TRAILER_KEY:
+            details = telemetry_pb2.ErrorDetails()
+            details.ParseFromString(value)
+            return details
+    return None
+\end{minted}
+
+\subsection{Listing 4 --- Client: Metadata, Deadline Budgets, Interceptor, Retry Policy}
+\label{subsec:ch13-code-client}
+
+The interceptor attaches \texttt{authorization} and \texttt{x-correlation-id}
+to \emph{every} call, of every cardinality; the channel carries a retry policy
+as a JSON \emph{service config} (bounded attempts, exponential backoff,
+\texttt{UNAVAILABLE} only --- retrying a non-idempotent method that may have
+reached the server is how you double-charge a customer).
+
+\begin{minted}{python}
+"""Client for the Northwind Robotics telemetry service (Chapter 13).
+
+Shows metadata, per-call deadline budgets, an auth + correlation-ID
+interceptor, and a retry policy installed via gRPC service config.
+Offline-first: localhost only.
+"""
+from __future__ import annotations
+
+import itertools
+import json
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Iterator
+
+import grpc
+
+import telemetry_pb2
+import telemetry_pb2_grpc
+
+# Retry policy delivered through the channel's service config. Retries are
+# bounded (maxAttempts) and restricted to UNAVAILABLE -- the only status here
+# that is provably safe to retry for these non-idempotent methods when the
+# attempt never reached the server.
+RETRY_SERVICE_CONFIG = json.dumps(
+    {
+        "methodConfig": [
+            {
+                "name": [{"service": "northwind.telemetry.v1.TelemetryService"}],
+                "retryPolicy": {
+                    "maxAttempts": 3,
+                    "initialBackoff": "0.050s",
+                    "maxBackoff": "0.500s",
+                    "backoffMultiplier": 2.0,
+                    "retryableStatusCodes": ["UNAVAILABLE"],
+                },
+                # Overall per-RPC timeout when the caller sets none.
+                "timeout": "2.000s",
+            }
+        ]
+    }
+)
+
+
+@dataclass(frozen=True)
+class _ClientCallDetails:
+    """grpc.ClientCallDetails is an interface; this is our concrete copy."""
+
+    method: str
+    timeout: float | None
+    metadata: tuple[tuple[str, Any], ...]
+    credentials: Any
+    wait_for_ready: bool | None
+    compression: Any
+
+
+class AuthMetadataInterceptor(
+    grpc.UnaryUnaryClientInterceptor,
+    grpc.UnaryStreamClientInterceptor,
+    grpc.StreamUnaryClientInterceptor,
+    grpc.StreamStreamClientInterceptor,
+):
+    """Attaches auth and correlation metadata to every outgoing RPC."""
+
+    def __init__(
+        self, token: str, correlation_factory: Callable[[], str]
+    ) -> None:
+        self._token = token
+        self._correlation_factory = correlation_factory
+
+    def _augment(
+        self, details: grpc.ClientCallDetails
+    ) -> _ClientCallDetails:
+        metadata = tuple(details.metadata or ()) + (
+            ("authorization", f"Bearer {self._token}"),
+            ("x-correlation-id", self._correlation_factory()),
+        )
+        return _ClientCallDetails(
+            method=details.method,
+            timeout=details.timeout,
+            metadata=metadata,
+            credentials=details.credentials,
+            wait_for_ready=details.wait_for_ready,
+            compression=details.compression,
+        )
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        return continuation(self._augment(client_call_details), request)
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        return continuation(self._augment(client_call_details), request)
+
+    def intercept_stream_unary(
+        self, continuation, client_call_details, request_iterator
+    ):
+        return continuation(self._augment(client_call_details), request_iterator)
+
+    def intercept_stream_stream(
+        self, continuation, client_call_details, request_iterator
+    ):
+        return continuation(self._augment(client_call_details), request_iterator)
+
+
+def make_channel(
+    address: str,
+    token: str = "synthetic-dev-token",
+    correlation_factory: Callable[[], str] | None = None,
+) -> grpc.Channel:
+    """Channel with retries (service config) and the auth interceptor."""
+    if correlation_factory is None:
+        counter = itertools.count(1)
+
+        def _next_id() -> str:
+            return f"corr-{next(counter):06d}"
+
+        correlation_factory = _next_id
+    options = [
+        ("grpc.enable_retries", 1),
+        ("grpc.service_config", RETRY_SERVICE_CONFIG),
+        ("grpc.keepalive_time_ms", 60_000),
+    ]
+    raw = grpc.insecure_channel(address, options=options)
+    return grpc.intercept_channel(
+        raw, AuthMetadataInterceptor(token, correlation_factory)
+    )
+
+
+def fetch_status(
+    stub: telemetry_pb2_grpc.TelemetryServiceStub,
+    robot_id: str,
+    deadline_s: float = 1.0,
+) -> telemetry_pb2.RobotStatusReply:
+    """Unary call with an explicit deadline budget."""
+    request = telemetry_pb2.RobotStatusRequest(robot_id=robot_id)
+    return stub.GetRobotStatus(request, timeout=deadline_s)
+
+
+def stream_frames(
+    stub: telemetry_pb2_grpc.TelemetryServiceStub,
+    robot_id: str,
+    max_frames: int,
+    deadline_s: float = 5.0,
+) -> Iterator[telemetry_pb2.TelemetryFrame]:
+    request = telemetry_pb2.StreamTelemetryRequest(
+        robot_id=robot_id, max_frames=max_frames, period_ms=20
+    )
+    yield from stub.StreamTelemetry(request, timeout=deadline_s)
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Telemetry gRPC client demo")
+    parser.add_argument("--port", type=int, default=50051)
+    args = parser.parse_args()
+    channel = make_channel(f"localhost:{args.port}")
+    stub = telemetry_pb2_grpc.TelemetryServiceStub(channel)
+
+    reply = fetch_status(stub, "RB-1001", deadline_s=1.0)
+    mode = telemetry_pb2.RobotMode.Name(reply.mode)
+    print(f"status: {reply.robot_id} mode={mode} battery={reply.battery_pct:.2f}%")
+
+    print("stream:")
+    for frame in stream_frames(stub, "RB-1001", max_frames=3):
+        print(f"  frame battery={frame.battery_pct:.2f} mode={frame.mode}")
+
+    frames = [
+        telemetry_pb2.TelemetryFrame(robot_id="RB-1001", battery_pct=b)
+        for b in (91.5, 90.8, 88.2)
+    ]
+    summary = stub.UploadTelemetry(iter(frames), timeout=2.0)
+    print(f"upload: accepted={summary.accepted} rejected={summary.rejected}")
+    channel.close()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 5 --- Bidirectional Streaming with Flow-Control-Aware Production}
+\label{subsec:ch13-code-bidi}
+
+A producer thread writes commands into a \emph{bounded} queue; the gRPC request
+generator drains it. When the window is full, \texttt{put()} blocks ---
+application-level backpressure stacked on top of HTTP/2's per-stream flow
+control. This is the canonical shape for any bidi producer fed from a source
+that outruns the network.
+
+\begin{minted}{python}
+"""Bidirectional control-loop demo with flow-control-aware production.
+
+A producer thread writes commands into a bounded queue; the gRPC request
+generator drains it. When the queue is full the producer blocks, giving the
+application its own backpressure on top of HTTP/2 flow control. Offline:
+localhost only, synthetic commands, deterministic pacing.
+"""
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from typing import Iterator
+
+import grpc
+
+import telemetry_pb2
+import telemetry_pb2_grpc
+
+_DONE: object = object()  # sentinel closing the command stream
+
+
+def _producer(
+    outbox: queue.Queue,
+    robot_id: str,
+    count: int,
+    interval_s: float,
+) -> None:
+    try:
+        for seq in range(count):
+            if seq % 5 == 4:
+                command = telemetry_pb2.ControlCommand(
+                    robot_id=robot_id, sequence=seq, estop=False
+                )
+            else:
+                command = telemetry_pb2.ControlCommand(
+                    robot_id=robot_id,
+                    sequence=seq,
+                    set_mode=telemetry_pb2.ROBOT_MODE_MOVING,
+                )
+            # put() blocks while the window is full: application backpressure.
+            outbox.put(command)
+            time.sleep(interval_s)
+    finally:
+        outbox.put(_DONE)
+
+
+def _commands(
+    inbox: queue.Queue,
+) -> Iterator[telemetry_pb2.ControlCommand]:
+    while True:
+        item = inbox.get()
+        if item is _DONE:
+            return
+        yield item
+
+
+def run_control_loop(
+    stub: telemetry_pb2_grpc.TelemetryServiceStub,
+    robot_id: str,
+    count: int,
+    interval_s: float = 0.005,
+    window: int = 8,
+    deadline_s: float = 10.0,
+) -> list[telemetry_pb2.TelemetryFrame]:
+    """Drive a bidi ControlLoop; returns every frame the server echoed."""
+    outbox: queue.Queue = queue.Queue(maxsize=window)
+    producer = threading.Thread(
+        target=_producer,
+        args=(outbox, robot_id, count, interval_s),
+        daemon=True,
+    )
+    producer.start()
+    frames: list[telemetry_pb2.TelemetryFrame] = []
+    try:
+        for frame in stub.ControlLoop(_commands(outbox), timeout=deadline_s):
+            frames.append(frame)
+    finally:
+        producer.join(timeout=2.0)
+    return frames
+
+
+def main() -> None:
+    import argparse
+
+    from telemetry_client import make_channel
+
+    parser = argparse.ArgumentParser(description="Bidirectional control-loop demo")
+    parser.add_argument("--port", type=int, default=50051)
+    args = parser.parse_args()
+    channel = make_channel(f"localhost:{args.port}")
+    stub = telemetry_pb2_grpc.TelemetryServiceStub(channel)
+    frames = run_control_loop(stub, robot_id="RB-1001", count=10)
+    for frame in frames:
+        mode = telemetry_pb2.RobotMode.Name(frame.mode)
+        print(f"ack robot={frame.robot_id} mode={mode} t={frame.observed_at.seconds}")
+    channel.close()
+
+
+if __name__ == "__main__":
+    main()
+\end{minted}
+
+\subsection{Listing 6 --- Offline Test Suite: Deadline, Cancellation, and Stream Error Paths}
+\label{subsec:ch13-code-tests}
+
+The fixture binds the in-process server to port \texttt{0} (the OS assigns a
+free \texttt{localhost} port) --- no fixed port collisions, no network, no
+credentials. Eight tests cover: unary happy path, rich-error round trip,
+deadline exceeded against the deliberately slow robot, server-stream bounds,
+client cancellation observed as \texttt{CANCELLED}, mid-stream validation
+abort, and the bidi round trip with fully deterministic timestamp assertions.
+
+\begin{minted}{python}
+"""Offline pytest suite for the Chapter 13 telemetry service.
+
+The server runs in-process on an ephemeral localhost port (port 0); no
+network, no credentials, deterministic data. Covers all four RPC modes,
+deadline propagation, cancellation, and stream error paths.
+"""
+from __future__ import annotations
+
+import grpc
+import pytest
+
+import telemetry_pb2
+import telemetry_pb2_grpc
+from bidi_demo import run_control_loop
+from error_middleware import ErrorMappingInterceptor, decode_error_details
+from telemetry_client import make_channel
+from telemetry_server import BASE_EPOCH_S, make_server
+
+
+@pytest.fixture()
+def stub():
+    server = make_server(interceptors=(ErrorMappingInterceptor(),))
+    port = server.add_insecure_port("localhost:0")
+    server.start()
+    channel = make_channel(
+        f"localhost:{port}", correlation_factory=lambda: "corr-test-0001"
+    )
+    yield telemetry_pb2_grpc.TelemetryServiceStub(channel)
+    channel.close()
+    server.stop(None)
+
+
+def _frame(robot_id: str, battery: float) -> telemetry_pb2.TelemetryFrame:
+    frame = telemetry_pb2.TelemetryFrame(robot_id=robot_id, battery_pct=battery)
+    frame.observed_at.FromSeconds(BASE_EPOCH_S)
+    return frame
+
+
+def test_unary_status_happy_path(stub) -> None:
+    reply = stub.GetRobotStatus(
+        telemetry_pb2.RobotStatusRequest(robot_id="RB-1001"), timeout=5.0
+    )
+    assert reply.robot_id == "RB-1001"
+    assert reply.mode == telemetry_pb2.ROBOT_MODE_MOVING
+    assert 0.0 <= reply.battery_pct <= 100.0
+    assert reply.last_frame.joint_positions_rad["shoulder"] != 0.0
+
+
+def test_unknown_robot_maps_to_not_found_with_rich_details(stub) -> None:
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetRobotStatus(
+            telemetry_pb2.RobotStatusRequest(robot_id="RB-9999"), timeout=5.0
+        )
+    err = excinfo.value
+    assert err.code() == grpc.StatusCode.NOT_FOUND
+    details = decode_error_details(err)
+    assert details is not None
+    assert details.reason == "ROBOT_NOT_FOUND"
+    assert details.correlation_id == "corr-test-0001"
+
+
+def test_deadline_exceeded_propagates(stub) -> None:
+    # RB-SLOW stalls 200 ms server-side; the 50 ms client deadline wins.
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetRobotStatus(
+            telemetry_pb2.RobotStatusRequest(robot_id="RB-SLOW"), timeout=0.05
+        )
+    assert excinfo.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+
+
+def test_server_stream_respects_max_frames(stub) -> None:
+    request = telemetry_pb2.StreamTelemetryRequest(
+        robot_id="RB-1002", max_frames=4, period_ms=5
+    )
+    frames = list(stub.StreamTelemetry(request, timeout=5.0))
+    assert len(frames) == 4
+    assert [f.observed_at.seconds for f in frames] == [
+        BASE_EPOCH_S + i * 5 for i in range(4)
+    ]
+
+
+def test_client_cancellation_stops_server_stream(stub) -> None:
+    request = telemetry_pb2.StreamTelemetryRequest(
+        robot_id="RB-1001", max_frames=100_000, period_ms=5
+    )
+    call = stub.StreamTelemetry(request, timeout=30.0)
+    first = next(call)
+    assert first.robot_id == "RB-1001"
+    call.cancel()
+    with pytest.raises(grpc.RpcError) as excinfo:
+        next(call)
+    assert excinfo.value.code() == grpc.StatusCode.CANCELLED
+
+
+def test_upload_rejects_out_of_range_battery(stub) -> None:
+    frames = [_frame("RB-1001", 90.0), _frame("RB-1001", 140.0), _frame("RB-1001", 50.0)]
+    call = stub.UploadTelemetry.future(iter(frames), timeout=5.0)
+    summary = call.result()
+    assert (summary.accepted, summary.rejected) == (2, 1)
+    assert summary.min_battery_pct == pytest.approx(50.0)
+    assert summary.max_battery_pct == pytest.approx(90.0)
+
+
+def test_upload_unknown_robot_aborts_mid_stream_with_details(stub) -> None:
+    frames = [_frame("RB-1001", 90.0), _frame("RB-9999", 10.0)]
+    call = stub.UploadTelemetry.future(iter(frames), timeout=5.0)
+    with pytest.raises(grpc.RpcError) as excinfo:
+        call.result()
+    err = excinfo.value
+    assert err.code() == grpc.StatusCode.INVALID_ARGUMENT
+    details = decode_error_details(err)
+    assert details is not None
+    assert details.reason == "FRAME_VALIDATION_FAILED"
+    assert details.violations[0].field == "robot_id"
+    assert details.correlation_id == "corr-test-0001"
+
+
+def test_control_loop_bidi_round_trip(stub) -> None:
+    frames = run_control_loop(
+        stub, robot_id="RB-1001", count=10, interval_s=0.001, deadline_s=10.0
+    )
+    assert len(frames) == 10
+    # Sequence numbers echo through to deterministic timestamps.
+    assert [f.observed_at.seconds for f in frames] == [
+        BASE_EPOCH_S + i * 5 for i in range(10)
+    ]
+    # seq % 5 == 4 carries estop=False -> IDLE; everything else MOVING.
+    assert frames[4].mode == telemetry_pb2.ROBOT_MODE_IDLE
+    assert frames[0].mode == telemetry_pb2.ROBOT_MODE_MOVING
+\end{minted}
+
+Verified output (Python 3.13, grpcio 1.83): all eight tests pass, and the
+client and bidi demos print the deterministic battery and mode sequences shown
+in the lab (Section~\ref{sec:ch13-lab}).
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch13-pitfalls}
+\begin{enumerate}
+  \item \textbf{Missing deadlines.} The default gRPC deadline is
+        \emph{infinity}. A client without \texttt{timeout=} will wait forever
+        on a wedged server, and the leaked threads/sockets accumulate into an
+        outage. Rule: \emph{every call site sets a deadline}, and servers
+        re-check \texttt{time\_remaining()} after any blocking step. gRPC's
+        infinity default is the single most dangerous default in the stack.
+  \item \textbf{Ignoring cancellation.} A server-streaming handler that never
+        polls \texttt{context.is\_active()} keeps serializing and sending to a
+        client that left minutes ago, burning CPU and holding locks. Treat
+        \texttt{is\_active()} checks as loop hygiene, exactly like the
+        \texttt{StreamTelemetry} listing.
+  \item \textbf{The L4 load-balancer hotspot.} Putting a classic TCP load
+        balancer in front of gRPC and declaring victory. Connections, not
+        RPCs, get balanced; see the war story in Section~\ref{sec:ch13-lab}.
+        Mitigate with client-side \texttt{round\_robin}, xDS/lookaside, an L7
+        proxy, or at minimum \texttt{max\_connection\_age} so clients redial.
+  \item \textbf{Unbounded streams.} \texttt{rpc Watch(X) returns (stream Y)}
+        with no pagination, no max count, no heartbeat, and a consumer slower
+        than the producer. HTTP/2 flow control will pause the sender, and your
+        server's send buffers grow until OOM. Bound every stream
+        (\texttt{max\_frames} in our IDL), add application-level backpressure
+        (the bounded queue in Listing~5), and set deadlines on streams too.
+  \item \textbf{Leaking proto field numbers.} Deleting a field and letting the
+        next engineer reuse its tag. A stale peer then decodes old bytes as the
+        new field --- silent corruption, no error. Always \texttt{reserve} the
+        tag and name first (Listing~1), and review \texttt{.proto} diffs like
+        schema migrations (Chapter~4).
+  \item \textbf{Catching \texttt{grpc.RpcError} without reading
+        \texttt{.code()}.} \texttt{except grpc.RpcError: retry()} conflates
+        INVALID\_ARGUMENT (your bug --- retrying is a hot loop) with
+        UNAVAILABLE (transient --- retrying is correct). Branch on
+        \texttt{err.code()}; consult Table~\ref{tab:ch13-status}; only
+        UNAVAILABLE (and ABORTED for transactional ops) is generically
+        retryable.
+  \item \textbf{Treating gRPC as a drop-in REST replacement for public APIs.}
+        No browser support without a proxy, no human-readable payloads, no CDN
+        caching, unfamiliar error surface for third parties, and payload
+        inspection tooling that assumes JSON. Keep public edges on HTTP/JSON
+        (transcode if you must share a contract); use gRPC where you control
+        both ends.
+  \item \textbf{Per-call channels.} Creating a channel (TCP + HTTP/2 setup)
+        per RPC throws away multiplexing and adds handshake latency to every
+        call. Channels are heavyweight and thread-safe: build one per target,
+        share it, close it at shutdown.
+  \item \textbf{Retried streaming calls without thinking.} A retry policy on a
+        streaming RPC replays the request iterator --- fine for idempotent
+        reads, catastrophic for ``append these events.'' Scope
+        \texttt{retryPolicy} per method in the service config, and prefer
+        hedging/retries only on methods you have marked idempotent.
+  \item \textbf{Overstuffed metadata.} Metadata is HPACK-compressed but not
+        free; multi-kilabyte headers on every call defeat the point. Keep
+        metadata to credentials, correlation IDs, and small routing hints ---
+        payloads belong in messages.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch13-lab}
+
+\subsection{Lab: The Telemetry Service End to End}
+
+All commands are PowerShell, offline, from a working directory containing the
+six listings.
+
+\textbf{Step 1 --- environment and codegen.}
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install grpcio grpcio-tools protobuf pytest
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. telemetry.proto
+\end{minted}
+
+\textbf{Step 2 --- run the suite.} \texttt{python -m pytest -q} should report
+\texttt{8 passed}. Read the tests as executable specifications of the deadline,
+cancellation, and error-path semantics.
+
+\textbf{Step 3 --- exercise all four modes against a live server.} In one
+terminal: \texttt{python telemetry\_server.py --port 50051}. In a second
+terminal: \texttt{python telemetry\_client.py --port 50051} (unary +
+server-streaming + client-streaming) and \texttt{python bidi\_demo.py --port
+50051} (bidirectional). Expected client output:
+
+\begin{minted}{text}
+status: RB-1001 mode=ROBOT_MODE_MOVING battery=95.00%
+stream:
+  frame battery=95.00 mode=2
+  frame battery=94.97 mode=2
+  frame battery=94.96 mode=2
+upload: accepted=3 rejected=0
+\end{minted}
+
+\textbf{Step 4 --- grpcurl (optional but instructive).} Reflection requires
+\texttt{pip install grpcio-reflection} and two lines of server setup
+(\texttt{reflection.enable\_server\_reflection}); then:
+
+\begin{minted}{text}
+grpcurl -plaintext localhost:50051 list
+grpcurl -plaintext -d "{\"robot_id\": \"RB-1001\"}" localhost:50051 `
+  northwind.telemetry.v1.TelemetryService/GetRobotStatus
+grpcurl -plaintext -d "{\"robot_id\": \"RB-9999\"}" localhost:50051 `
+  northwind.telemetry.v1.TelemetryService/GetRobotStatus   # NOT_FOUND (code 5)
+\end{minted}
+
+\textbf{Step 5 --- observe deadline propagation.} Call the slow robot with a
+generous then a tight budget and compare outcomes:
+
+\begin{minted}{python}
+import grpc, telemetry_pb2, telemetry_pb2_grpc
+channel = grpc.insecure_channel("localhost:50051")
+stub = telemetry_pb2_grpc.TelemetryServiceStub(channel)
+req = telemetry_pb2.RobotStatusRequest(robot_id="RB-SLOW")
+print(stub.GetRobotStatus(req, timeout=5.0).robot_id)   # succeeds: budget ample
+try:
+    stub.GetRobotStatus(req, timeout=0.05)               # 50 ms < 200 ms stall
+except grpc.RpcError as err:
+    print(err.code())                                    # StatusCode.DEADLINE_EXCEEDED
+\end{minted}
+
+The server-side \texttt{\_require\_budget} re-check after the stall is what
+turns ``slow'' into a clean \texttt{DEADLINE\_EXCEEDED} instead of a late,
+wasted response.
+
+\subsection{War Story: The L4 Hotspot That Pinned All Traffic to One Pod}
+
+A logistics company (thinly fictionalized) ran a gRPC telemetry ingestion
+fleet behind a cloud Layer-4 load balancer: 20 pods, autoscaled, each client
+gateway holding one connection per target. Alerting fired at 03:40: p99
+latency climbing on \emph{one} pod, CPU at 98\%, while the other nineteen
+idled at 8\%. The autoscaler, watching \emph{fleet-average} CPU at 12\%,
+politely did nothing.
+
+The mechanism was exactly Section~\ref{subsec:ch13-operational}'s L4 problem,
+with a queue-theoretic twist. The ingest clients were long-lived sidecars that
+dialed once at boot and kept the connection for days. All twelve sidecars had
+booted during a deploy when pod \texttt{telemetry-7} was the only ready
+endpoint behind the LB --- so all twelve connections, and therefore
+\emph{every RPC}, terminated on that one pod. Kubernetes service load
+balancing had done its job perfectly: it balanced \emph{connections} (twelve
+of them, all during a one-pod window) and had no idea that each connection
+carried thousands of RPCs per second.
+
+The on-call runbook failed twice. Restarting \texttt{telemetry-7} moved the
+hotspot: clients re-dialed, the LB again picked the lowest-connection backend
+--- which was the freshly restarted pod --- and within ninety seconds the new
+pod was the hotspot. Scaling from 20 to 30 pods did nothing at all, because no
+client ever re-dialed to discover the new backends. The incident lasted four
+hours and its ``fix'' --- restarting all the sidecars simultaneously to force
+mass redial --- was indistinguishable from an attack on their own fleet.
+
+The durable fixes, in order of impact: \textbf{(1)} server-side
+\texttt{max\_connection\_age} of five minutes with a thirty-second grace, so
+every connection is periodically and gently recycled across the fleet ---
+this alone would have capped the incident at minutes; \textbf{(2)} client-side
+\texttt{round\_robin} with DNS resolution of all pod IPs, moving balance from
+per-connection to per-RPC; \textbf{(3)} alerting on \emph{per-pod} p99 and
+RPC-count skew (a $10\times$ max/median ratio), not fleet averages. Postmortem
+quote worth memorizing: \emph{``We load-balanced the connections and called it
+load balancing. Nobody owned the RPCs.''}
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch13-exercises}
+
+\begin{enumerate}
+  \item \textbf{Wire decoding.} A server receives the bytes
+        \texttt{00 00 00 00 0A} followed by ten protobuf bytes on stream 3.
+        State the compression flag, message length, and what the receiver does
+        if the stream ends after six of the ten payload bytes.
+  \item \textbf{Framing arithmetic.} A response message serializes to 300
+        bytes. Write out the exact 5-byte prefix in hex. What is the largest
+        gRPC message this framing can express, and what default limit does
+        grpc-python actually enforce (look up \texttt{grpc.max\_receive\_message\_length})?
+  \item \textbf{Mode selection.} For each, pick a mode and defend it:
+        (a)~pushing firmware-update progress to an operator console;
+        (b)~uploading a day of buffered sensor logs; (c)~a trader-style
+        command/ack console; (d)~fetching one robot's current pose.
+  \item \textbf{Deadline math.} A client sets a 500 ms deadline. The proxy hop
+        consumes 40 ms. What \texttt{grpc-timeout} value does the downstream
+        server see (approximately), and in what unit suffix could it be
+        encoded? What happens if the proxy \emph{adds} 50 ms of budget instead?
+  \item \textbf{Retry safety.} The retry policy in Listing~4 names only
+        \texttt{UNAVAILABLE}. Explain precisely why retrying
+        \texttt{DEADLINE\_EXCEEDED} is dangerous for \texttt{UploadTelemetry}
+        but harmless for \texttt{GetRobotStatus}.
+  \item \textbf{Evolution drill.} Product wants to replace
+        \texttt{battery\_pct} (tag 3, \texttt{double}) with
+        \texttt{battery\_millivolts} (\texttt{uint32}). Write the safe two-phase
+        migration using \texttt{reserved} and dual-publish, referencing
+        Chapter~4's compatibility classes.
+  \item \textbf{Interceptor design.} Sketch a server interceptor that enforces
+        a per-token rate limit (Chapter~14 previews the algorithms) and returns
+        \texttt{RESOURCE\_EXHAUSTED} with a \texttt{RetryInfo}-style detail in
+        a \texttt{-bin} trailer. Which of the four handler shapes need
+        different treatment and why?
+  \item \textbf{Debug the symptom.} Clients see \texttt{UNAVAILABLE} spikes
+        every five minutes, synchronized with nothing in the deploy calendar.
+        Given the server options in Listing~2, form a hypothesis and the
+        one-line config change that confirms it.
+  \item \textbf{Transcoding design.} You must expose \texttt{StreamTelemetry}
+        to a browser dashboard. Compare grpc-web vs.\ JSON transcoding vs.\ a
+        bespoke WebSocket shim on contract fidelity, ops cost, and browser
+        support; pick one and justify.
+  \item \textbf{Deep dive.} Explain why \texttt{grpc-status} lives in trailers
+        even for unary calls, what a trailers-only response is, and which
+        intermediary behaviors (caches, L4 proxies, browsers) each property
+        enables or forbids.
+\end{enumerate}
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch13-qa}
+
+Ordered junior $\rightarrow$ staff. Answers are calibrated to what a strong
+candidate says in two to six sentences.
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.5cm]
+  % --- junior ---
+  \item \textbf{What is an RPC, and what are the stub and skeleton?}
+        A remote procedure call is a network invocation dressed as a local
+        function call. The \emph{stub} is client-side generated code exposing
+        the typed signature and marshalling arguments to bytes; the
+        \emph{skeleton} (servicer) is server-side generated glue that
+        unmarshals and calls your implementation. Both derive from one IDL
+        file, so the two ends cannot disagree about types.
+  \item \textbf{What two technologies does gRPC combine, and why?}
+        Protocol Buffers as IDL and binary encoding (compact, typed,
+        evolvable) and HTTP/2 as transport (multiplexed streams, HPACK header
+        compression, flow control). Together they give small payloads, cheap
+        concurrency, and generated contracts~\cite{grpcdocs,protobufdocs}.
+  \item \textbf{Explain the 5-byte gRPC message prefix.}
+        Every message on a stream is length-prefixed: byte 0 is a compression
+        flag (0/1), bytes 1--4 are the big-endian uint32 message length, then
+        the serialized protobuf payload. HTTP/2 DATA frame boundaries are
+        irrelevant to message boundaries --- the prefix is the delimiter, which
+        is what lets one stream carry arbitrarily many ordered messages.
+  \item \textbf{What does the \texttt{:path} pseudo-header look like for a
+        gRPC call?}
+        \texttt{/}\emph{package.Service}\texttt{/}\emph{Method}, e.g.\
+        \texttt{/northwind.telemetry.v1.TelemetryService/GetRobotStatus}. The
+        method is always POST; routing keys entirely off \texttt{:path}.
+  \item \textbf{What \texttt{content-type} does gRPC use, and what HTTP status
+        does a failed gRPC call return?}
+        \texttt{application/grpc} (often \texttt{application/grpc+proto}). The
+        HTTP status is 200 even for failed calls --- the outcome lives in the
+        \texttt{grpc-status} trailer, because for streaming calls the failure
+        may be discovered after response bytes have flowed. Interviewers ask
+        this to see if you have ever looked at the wire.
+  \item \textbf{What is a trailers-only response?}
+        When a call fails before producing any message, the server may send a
+        single HEADERS frame containing \texttt{:status 200},
+        \texttt{grpc-status}, and END\_STREAM --- headers and trailers
+        collapsed into one frame. Most gRPC error responses look like this on
+        the wire.
+  \item \textbf{Name the four RPC modes and a use case for each.}
+        Unary (request/reply --- \texttt{GetRobotStatus}); server streaming
+        (subscriptions, feeds --- \texttt{StreamTelemetry}); client streaming
+        (bulk ingestion --- \texttt{UploadTelemetry}); bidirectional streaming
+        (interactive control sessions --- \texttt{ControlLoop}).
+  \item \textbf{Why does proto3 have no \texttt{required} fields?}
+        Because required fields can never be safely removed: every old reader
+        rejects messages missing them, so the field is load-bearing forever.
+        Proto3 makes everything optional-with-defaults and moves validation to
+        application logic, which can evolve.
+  \item \textbf{What is a \texttt{oneof}?}
+        A set of fields of which at most one is set; setting one clears the
+        others, and presence is preserved on the wire so the receiver can ask
+        \texttt{WhichOneof}. Use it for genuine alternatives, and note the
+        evolution trap: moving an existing field into a \texttt{oneof} changes
+        its wire semantics.
+  \item \textbf{Why must protobuf tag numbers never be reused?}
+        The tag, not the name, is the field's identity on the wire. A stale
+        peer holding old bytes will decode them into the new field silently ---
+        wrong data, no error. Retire tags with \texttt{reserved} so the
+        compiler enforces the ban~\cite{protobufdocs}.
+
+  % --- mid ---
+  \item \textbf{Deadline vs.\ timeout --- is there a difference in gRPC?}
+        In gRPC they are one mechanism seen from two ends: the client sets a
+        timeout (relative), the core converts it to an absolute deadline, and
+        transmits the \emph{remaining} budget in \texttt{grpc-timeout}. The
+        server reads it via \texttt{context.time\_remaining()}. Because only
+        the remainder travels, a multi-hop call tree shares one end-to-end
+        budget --- that is deadline propagation.
+  \item \textbf{Walk through deadline propagation across three hops.}
+        Client budgets 500 ms; hop 1 receives it, spends 40 ms, and calls hop 2
+        with \texttt{timeout=context.time\_remaining()} $\approx$ 460 ms; hop 2
+        repeats to hop 3. Any hop may also cap the budget tighter (a stricter
+        local policy), but must never widen it. When the budget expires, the
+        innermost straggler surfaces DEADLINE\_EXCEEDED and every enclosing
+        call unwinds with the same code.
+  \item \textbf{Per-attempt vs.\ overall deadline --- how do retries
+        interact?}
+        All retry attempts draw from the same overall deadline, spaced by the
+        configured backoff. If the overall deadline is smaller than
+        (attempts $\times$ expected attempt time + backoff), later attempts are
+        dead on arrival. Set overall deadlines from the p99 of a \emph{full}
+        retry sequence, and remember gRPC only retries when it can prove the
+        RPC never reached the server logic (or the method is idempotent).
+  \item \textbf{What is gRPC metadata and what is the \texttt{-bin} suffix?}
+        Metadata is the name/value pairs carried in HTTP/2 header and trailer
+        blocks --- the gRPC equivalent of HTTP headers. Keys are lowercase
+        ASCII; keys ending in \texttt{-bin} carry arbitrary binary (base64 on
+        the wire, raw bytes in the API). Rich error details and auth tokens
+        ride here; \texttt{grpc-*} keys are reserved.
+  \item \textbf{How do you attach authentication to gRPC calls?}
+        As metadata --- conventionally \texttt{authorization: Bearer <token>}
+        --- applied by a \emph{client interceptor} so no call site can forget
+        it, over TLS in production. The server validates in a \emph{server
+        interceptor} and rejects with UNAUTHENTICATED before business logic
+        runs. Channel credentials (TLS) secure the connection; call credentials
+        (the token) authenticate the RPC; gRPC composes the two.
+  \item \textbf{What is an interceptor and where would you use one?}
+        Middleware for gRPC: client interceptors wrap outbound calls (auth,
+        correlation IDs, client metrics, hedging), server interceptors wrap
+        inbound handlers (authz, logging, error mapping, rate limiting). They
+        come in unary and stream flavors for each side; streaming interceptors
+        wrap iterators rather than single messages. Listing~4 and Listing~3 are
+        working examples of both sides.
+  \item \textbf{How do you configure retries in gRPC?}
+        Via a JSON \emph{service config} on the channel:
+        \texttt{retryPolicy} with \texttt{maxAttempts}, exponential backoff
+        (\texttt{initialBackoff}, \texttt{backoffMultiplier},
+        \texttt{maxBackoff}), and \texttt{retryableStatusCodes} --- typically
+        only UNAVAILABLE. Hedging (\texttt{hedgingPolicy}) is the latency
+        twin: fire a duplicate after a delay, take whichever answers first.
+        Both need server-side throttling awareness (\texttt{retryThrottling})
+        to avoid retry storms.
+  \item \textbf{Which status codes are safe to retry?}
+        UNAVAILABLE is the canonical retryable code (transient, and the
+        framework retries only when the attempt provably never ran). ABORTED is
+        retryable for transactional conflicts at the application level.
+        RESOURCE\_EXHAUSTED after the server-supplied delay. Everything else ---
+        INVALID\_ARGUMENT, NOT\_FOUND, PERMISSION\_DENIED, DEADLINE\_EXCEEDED
+        --- retrying unchanged is a bug amplifier.
+  \item \textbf{INVALID\_ARGUMENT vs.\ FAILED\_PRECONDITION vs.\
+        OUT\_OF\_RANGE?}
+        INVALID\_ARGUMENT: the request is malformed regardless of system state
+        (bad enum, missing field). FAILED\_PRECONDITION: the request is fine
+        but system state forbids it (deleting a non-empty warehouse zone).
+        OUT\_OF\_RANGE: a value lies outside a defined valid interval (seeking
+        past the end of a stream). The distinctions matter because clients
+        automate on them: only FAILED\_PRECONDITION hints ``fix state, then
+        retry.''
+  \item \textbf{UNAUTHENTICATED vs.\ PERMISSION\_DENIED?}
+        UNAUTHENTICATED (16): credentials missing, expired, or invalid ---
+        re-authentication may succeed. PERMISSION\_DENIED (7): identity known,
+        access refused --- re-auth will not help. Mapping to HTTP: 401 vs.\ 403.
+        Clients key their token-refresh logic off this distinction, so getting
+        it backwards causes refresh loops or stranded users.
+
+  % --- senior ---
+  \item \textbf{Design error semantics for a streaming RPC.}
+        Three eras: errors \emph{before} the first message can be
+        trailers-only with full details; errors \emph{mid-stream} terminate
+        the stream with \texttt{grpc-status} + trailers, so the client must
+        treat all received messages as a valid prefix and the status as
+        authoritative; errors \emph{per item} that should not kill the stream
+        must be modeled \emph{in the message} (an \texttt{oneof
+        result \{T ok; ItemError err;\}}), not as statuses. Publish which
+        statuses the method can return, attach rich details
+        (\texttt{ErrorInfo}/\texttt{BadRequest}-style) in \texttt{-bin}
+        trailers, and state idempotency so clients know whether resume is safe.
+  \item \textbf{How do rich error details work on the wire?}
+        A \texttt{google.rpc.Status} message --- code, message, and
+        \texttt{repeated Any details} holding typed payloads like
+        \texttt{BadRequest}, \texttt{RetryInfo}, \texttt{QuotaFailure} --- is
+        serialized into the binary trailer \texttt{grpc-status-details-bin}.
+        Clients unpack the typed details and act programmatically (field
+        errors to forms, retry delays to backoff). Our chapter implements the
+        identical pattern with a first-party \texttt{ErrorDetails} message and
+        an \texttt{error-details-bin} trailer.
+  \item \textbf{Why does gRPC need client-side load balancing?}
+        Because gRPC multiplexes many RPCs over one long-lived HTTP/2
+        connection, and L4 balancers balance \emph{connections}, not RPCs: one
+        connection pins all its RPCs to one backend forever. Client-side LB
+        (resolve all backends via DNS, pick per-RPC with \texttt{round\_robin})
+        moves balancing to RPC granularity with no extra network hop. The
+        alternatives are a lookaside control plane (grpclb), xDS from a mesh
+        control plane, or terminating HTTP/2 at an L7 proxy that rebalances
+        per stream~\cite{newman2021microservices}.
+  \item \textbf{What is lookaside load balancing, and what is xDS?}
+        Lookaside: the client queries a dedicated balancer service for a
+        curated backend list, then connects directly --- control traffic via
+        the balancer, data traffic point-to-point (gRPC's historical grpclb).
+        xDS is the CNCF-standardized discovery API family from Envoy ---
+        LDS/CDS/RDS/EDS --- through which a control plane pushes listeners,
+        clusters, routes, and endpoints to data-plane clients; gRPC's proxyless
+        service-mesh mode consumes xDS natively. xDS is where the industry
+        converged; grpclb is legacy context.
+  \item \textbf{How do \texttt{max\_connection\_age} and keepalive improve
+        operability?}
+        \texttt{max\_connection\_age} forces periodic reconnects so
+        long-lived clients rediscover rebalanced backends --- the cheap fix
+        for L4 pinning --- with a grace period to drain in-flight RPCs.
+        Keepalive PINGs detect half-dead peers and keep NAT/firewall state
+        alive on idle connections; client ping intervals must respect the
+        server's minimum or the server answers with GOAWAY (``too many
+        pings'').
+  \item \textbf{How does flow control work for gRPC streams?}
+        Two layers. HTTP/2 gives per-stream and per-connection credit windows:
+        receivers grant bytes with WINDOW\_UPDATE, so a slow consumer pauses
+        the sender's socket writes. gRPC adds application-level flow via your
+        iterator pacing. The operational point: flow control converts
+        slow-consumer problems into \emph{buffered-bytes} problems --- bound
+        queues (Listing~5), bound stream lengths, and watch memory, not just
+        throughput.
+  \item \textbf{What happens on cancellation, end to end?}
+        The client sends RST\_STREAM for the call's stream; the transport
+        tears down stream state; the server's \texttt{context.is\_active()}
+        flips false; well-written handlers observe it between iterations and
+        return promptly. Cancellation is cooperative --- nothing forcibly
+        kills your handler --- and the client observes code CANCELLED. Deadline
+        expiry is the same machinery with DEADLINE\_EXCEEDED.
+  \item \textbf{How would you test gRPC services without a network?}
+        Bind the server to \texttt{localhost:0} (ephemeral port) inside a
+        pytest fixture and exercise the real stack in-process, as Listing~6
+        does --- you get genuine serialization, framing, deadlines, and
+        cancellation with zero infrastructure. For pure unit tests, call the
+        servicer methods with a fake \texttt{ServicerContext}. Reserve mocks of
+        generated stubs for testing \emph{callers}, never the service.
+  \item \textbf{What is server reflection and what does grpcurl need it for?}
+        Reflection is an optional service (\texttt{grpc.reflection\ldots}) that
+        lets clients enumerate services and fetch file descriptors at runtime.
+        \texttt{grpcurl} uses it to build requests without a local
+        \texttt{.proto}: \texttt{grpcurl -plaintext host:port list}. Enable it
+        in dev and staging; consider disabling or authenticating it in
+        production because it advertises your full API surface.
+  \item \textbf{How do you expose a gRPC service to a browser?}
+        Browsers cannot speak raw gRPC (no trailer access, no fine-grained
+        HTTP/2 control), so: \textbf{grpc-web} --- a framed protocol variant
+        through a proxy filter (Envoy), with generated TS stubs, supporting
+        unary and server streaming; or \textbf{HTTP/JSON transcoding} ---
+        \texttt{google.api.http} annotations on the proto, a gateway (Envoy
+        transcoder, gRPC-Gateway) mapping REST paths to RPCs and statuses per
+        Table~\ref{tab:ch13-status}. Transcoding doubles as your public REST
+        facade over an internal gRPC core.
+
+  % --- staff ---
+  \item \textbf{When should a public API \emph{not} use gRPC?}
+        When any of these dominate: browser-first consumers (grpc-web adds a
+        proxy and drops bidi); third-party developers who expect
+        curl-able JSON and familiar HTTP semantics; a need for CDN/edge
+        caching, which is built on HTTP semantics gRPC bypasses; firewalled
+        enterprise networks that pass 443/HTTP but break long-lived HTTP/2;
+        or heavy reliance on web tooling (API gateways, WAFs, scanners) that
+        speaks JSON. The staff answer adds: you can have both --- gRPC
+        internally, transcode at the edge --- and the contract cost of
+        maintaining that mapping is the real decision variable.
+  \item \textbf{Design the load-balancing architecture for a 500-service
+        gRPC mesh.}
+        Layer it: (1) xDS from the mesh control plane for discovery, policy,
+        and subsetting --- clients should not DNS-resolve 500 services
+        themselves; (2) \texttt{round\_robin} (or least-request where
+        available) per-RPC within a locality, with locality weighting to keep
+        traffic in-zone; (3) server-side \texttt{max\_connection\_age} as the
+        safety net for any pinned path; (4) outlier detection to eject sick
+        backends; (5) per-pod skew metrics as SLIs. State explicitly what you
+        are balancing (RPCs), what each layer owns, and how you would detect
+        imbalance before users do.
+  \item \textbf{A teammate proposes gRPC streaming to replace Kafka for event
+        delivery. Evaluate.}
+        Different guarantees. gRPC streams are ordered, flow-controlled, and
+        low-latency, but ephemeral: no durable log, no replay, no consumer
+        groups, no retention --- a disconnected consumer simply misses events.
+        Streams are right for \emph{control-plane} and \emph{live-tail}
+        traffic; the log is right for \emph{facts} you must not lose and must
+        reprocess (Chapter~11). A defensible hybrid: Kafka for the durable
+        spine, gRPC server-streaming as the fan-out edge --- with sequence
+        numbers and a resume offset modeled in your own messages.
+  \item \textbf{How do you version a gRPC API across an organization?}
+        Prefer evolution over versioning: proto3's rules (add-only fields,
+        \texttt{reserved} tags) let most changes ship in place
+        (Chapter~9's discipline applies with tags instead of JSON keys). When a
+        change is genuinely breaking, version the \emph{package}
+        (\texttt{northwind.telemetry.v2}) so both generations coexist on the
+        wire, run dual servers during migration, and retire v1 with measured
+        deprecation. Package-level versions in the \texttt{:path} make routing,
+        metrics, and sunset enforcement trivial --- this is why the version
+        belongs in the package name from day one.
+  \item \textbf{Debug: latency p99 doubles after moving gRPC behind a cloud
+        L4 load balancer; CPU is low everywhere. Hypotheses?}
+        Ordered by prior: (1) connection pinning plus \emph{unequal
+        connection lifetimes} --- a few hot tenants' RPCs concentrate; check
+        per-pod RPC counts. (2) The LB's idle timeout silently reaping
+        connections without keepalive --- clients stall on dead sockets before
+        reconnect; check for synchronized reconnect storms. (3) DNS TTL vs.\
+        client resolver caching, so scale-outs are invisible for minutes. (4)
+        MTU/fragmentation on the new path inflating DATA frame latency. The
+        instrumentation answer: per-connection RPC counts, channel state
+        transitions, and \texttt{grpc-timeout} distributions server-side.
+  \item \textbf{Compare gRPC, REST+JSON, and GraphQL for an internal
+        service-to-service call graph.}
+        REST+JSON: universal tooling and debuggability, weakest contract and
+        heaviest payload; fine at low call rates. GraphQL: client-driven
+        selection kills over/under-fetching at the \emph{aggregation} edge, but
+        its query planning cost and N+1 hazards make it wrong for
+        machine-to-machine hot paths (Chapter~12). gRPC: strongest contract,
+        smallest payload, first-class streaming, best fit for
+        service-to-service --- at the price of human-unfriendly wire format and
+        LB complexity. Staff-level answers pick per \emph{edge}, and can state
+        the organization's default and its exceptions.
+  \item \textbf{What would you standardize in a ``gRPC production checklist''
+        for your company?}
+        Deadlines on every call with propagation through
+        \texttt{time\_remaining()}; \texttt{is\_active()} checks in every
+        stream loop; bounded streams and bounded queues; a documented status
+        code policy with rich details in \texttt{-bin} trailers; interceptors
+        for auth/correlation/metrics, never hand-threaded metadata; retry
+        policy per method with idempotency annotation; client-side LB or xDS
+        plus \texttt{max\_connection\_age}; keepalive tuned to the middlebox
+        reality; health-check service for every server; reflection and grpcurl
+        in non-prod; contract CI that regenerates stubs and rejects
+        tag-reuse diffs. That list \emph{is} this chapter, operationalized.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch13-biblio}
+
+\begin{itemize}
+  \item \textbf{gRPC documentation} --- \texttt{https://grpc.io/docs/}: the
+        authoritative guides for concepts, deadlines, metadata, interceptors,
+        service config, load balancing, and the health-checking and reflection
+        protocols~\cite{grpcdocs}.
+  \item \textbf{gRPC status codes} --- \texttt{https://grpc.io/docs/guides/error/}
+        and \texttt{google/rpc/code.proto}: the canonical code list and the
+        HTTP mapping conventions used in Table~\ref{tab:ch13-status}.
+  \item \textbf{Protocol Buffers documentation} ---
+        \texttt{https://protobuf.dev/}: the proto3 language guide, well-known
+        types, the wire format (pair with Chapter~4), and the officially
+        documented evolution rules~\cite{protobufdocs}.
+  \item \textbf{RFC 9113, \emph{HTTP/2}} --- streams, frames, flow control, and
+        HPACK context that gRPC builds on; Chapter~1's companion
+        reference~\cite{rfc9113}.
+  \item \textbf{Kasun Indrasiri \& Danesh Kuruppu, \emph{gRPC: Up and Running}}
+        (O'Reilly, 2020) --- the standard book-length treatment: IDL design,
+        all four modes in depth, production concerns, and the gRPC ecosystem.
+  \item \textbf{Google AIP (API Improvement Proposals)} ---
+        \texttt{https://aip.dev/}: AIP-121 (resource-oriented design), AIP-122
+        (resource names), AIP-158 (pagination), AIP-193 (errors) --- the design
+        system behind Google's gRPC APIs; steal it wholesale for internal
+        consistency.
+  \item \textbf{CNCF xDS / Envoy documentation} ---
+        \texttt{https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds\_protocol}
+        --- the discovery-API family behind proxyless service mesh and modern
+        gRPC load balancing.
+  \item \textbf{grpc-web} --- \texttt{https://github.com/grpc/grpc-web}: the
+        browser bridge protocol and proxy model.
+  \item \textbf{Martin Kleppmann, \emph{Designing Data-Intensive Applications}}
+        (O'Reilly, 2017) --- the RPC fallacies, schema evolution, and
+        distributed-systems framing underpinning this
+        chapter~\cite{kleppmann2017ddia}.
+  \item \textbf{Sam Newman, \emph{Building Microservices}, 2nd ed.}
+        (O'Reilly, 2021) --- where RPC fits (and does not fit) among
+        inter-service communication styles~\cite{newman2021microservices}.
+\end{itemize}
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch13-capstones}
+
+All capstones are offline-first, use the Northwind Robotics universe, and run
+on Windows/PowerShell with only this chapter's dependencies.
+
+\subsection{Capstone 1 [junior] --- Unary Status Service with Deadline Discipline}
+
+\textbf{Objective.} Stand up a single-RPC gRPC service and prove you understand
+deadlines from both ends of the wire.
+
+\textbf{Inputs/Datasets.} Listing~1's \texttt{telemetry.proto} reduced to
+\texttt{GetRobotStatus} only; the synthetic fleet table
+(\texttt{RB-1001}\ldots\texttt{RB-1003}, \texttt{RB-SLOW}).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Trim the proto, regenerate stubs, implement server and client.
+  \item Set explicit deadlines at every call site; add the
+        \texttt{\_require\_budget} server check.
+  \item Demonstrate \texttt{DEADLINE\_EXCEEDED} against \texttt{RB-SLOW} with a
+        50 ms client budget, and success with a 5 s budget.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] \texttt{pytest} suite passes with happy-path, unknown-robot,
+        and deadline-exceeded cases.
+  \item[$\square$] No call site lacks a \texttt{timeout=}; no handler lacks a
+        budget check.
+  \item[$\square$] \texttt{grpcurl} (or a printed descriptor dump) shows the
+        service shape.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add \texttt{grpc.keepalive\_time\_ms} and log channel
+state transitions; measure call latency at the client interceptor.
+
+\subsection{Capstone 2 [mid] --- Server-Streaming Telemetry Monitor}
+
+\textbf{Objective.} Build a resilient streaming consumer that respects
+cancellation, bounds, and flow control.
+
+\textbf{Inputs/Datasets.} \texttt{StreamTelemetry} from Listing~1; synthetic
+frame generator from Listing~2.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement the server stream with \texttt{max\_frames},
+        \texttt{period\_ms}, \texttt{is\_active()} checks.
+  \item Build a CLI monitor that prints frames and cancels cleanly on
+        KeyboardInterrupt (\texttt{call.cancel()}), verifying the server stops
+        producing.
+  \item Add a client-side rendering budget: drop-and-count frames when the
+        renderer falls behind instead of buffering unboundedly.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Cancellation test passes: after \texttt{cancel()}, the
+        server handler exits within one period.
+  \item[$\square$] Server never emits more than \texttt{max\_frames}; client
+        drop counter is observable.
+  \item[$\square$] Deadline on the stream is enforced and tested.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add a heartbeat frame every $n$ periods; detect a
+stalled stream client-side via per-frame timeout.
+
+\subsection{Capstone 3 [mid] --- Bulk Ingestion with Rich Validation Errors}
+
+\textbf{Objective.} Client-streaming ingestion where bad data produces
+\emph{actionable} errors, not stack traces.
+
+\textbf{Inputs/Datasets.} \texttt{UploadTelemetry}, \texttt{ErrorDetails}, and
+\texttt{FieldViolation} from Listing~1; a synthetic file of 1{,}000 frames,
+5\% deliberately invalid (unknown robots, out-of-range battery).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Implement upload validation and the error-mapping interceptor
+        (Listing~3).
+  \item Extend \texttt{ErrorDetails} with \texttt{first\_bad\_index} so clients
+        can resume after the failure point.
+  \item Write the client-side decoder that renders violations as a table.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Mid-stream abort yields INVALID\_ARGUMENT plus decoded
+        per-field violations and the correlation ID end-to-end.
+  \item[$\square$] A fix-and-resume run accepts exactly the valid 95\%.
+  \item[$\square$] All errors are asserted via \texttt{.code()}, never via
+        message-string matching.
+\end{itemize}
+
+\textbf{Stretch Goals.} Port the details payload to
+\texttt{google.rpc.Status} + \texttt{grpc-status-details-bin} using
+\texttt{googleapis-common-protos}, and show the wire equivalence.
+
+\subsection{Capstone 4 [senior] --- Bidirectional Control Plane with a Full
+Interceptor Stack}
+
+\textbf{Objective.} A production-shaped bidi service: windowed flow control,
+auth + logging + metrics interceptors on both sides, and a retry policy that
+provably cannot duplicate control commands.
+
+\textbf{Inputs/Datasets.} \texttt{ControlLoop} (Listing~1), Listings~3--5; a
+scripted scenario of 500 deterministic commands including estops.
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Add sequence-number idempotency server-side (duplicate
+        \texttt{sequence} $\Rightarrow$ replay cached ack).
+  \item Implement a metrics interceptor (counts, latency histogram buckets per
+        method) and a server authz interceptor rejecting a synthetic bad token
+        with UNAUTHENTICATED.
+  \item Build a two-hop deadline-propagation harness: a proxy servicer that
+        forwards \texttt{ControlLoop} to a backend using
+        \texttt{time\_remaining()}, and show a 300 ms end-to-end budget
+        expiring cleanly at both hops.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] 500-command run: exactly-once \emph{effects} despite forced
+        client retries; ack order preserved.
+  \item[$\square$] Metrics interceptor emits per-cardinality counters without
+        touching business code.
+  \item[$\square$] Deadline test shows the downstream hop observing a
+        \emph{smaller} remaining budget than the client set.
+  \item[$\square$] Bad-token calls fail before any servicer code runs.
+\end{itemize}
+
+\textbf{Stretch Goals.} Add hedging to unary reads only, and measure the p99
+delta against the retry baseline with a deterministic latency-injection hook.
+
+\subsection{Capstone 5 [staff] --- Edge Gateway: Transcoding plus Load-Balancing
+Postmortem Lab}
+
+\textbf{Objective.} Reproduce the war story of Section~\ref{sec:ch13-lab} in
+miniature, fix it three ways, and expose the service safely to JSON clients ---
+then write the incident report.
+
+\textbf{Inputs/Datasets.} The full telemetry service; three server processes on
+loopback ports simulating ``pods''; a connection-pinning harness that dials
+through a single fixed address; a synthetic load script (fixed seed, fixed
+schedule).
+
+\textbf{Steps.}
+\begin{enumerate}
+  \item Demonstrate the hotspot: all clients dialed during a one-pod window;
+        show per-pod RPC counts $10\times$ skewed.
+  \item Apply, and measure separately: \texttt{max\_connection\_age}
+        recycling; client-side \texttt{round\_robin} over all three pod
+        addresses; and a least-loaded selection policy you design.
+  \item Add a JSON transcoding shim (a small HTTP server mapping
+        \texttt{GET /v1/robots/\{id\}/status} to \texttt{GetRobotStatus} and
+        statuses per Table~\ref{tab:ch13-status}) with rich details rendered
+        into an RFC-9457-shaped body.
+  \item Write the postmortem: timeline, mechanism, why restart-and-scale
+        made it worse, and the three fixes with measured before/after skew.
+\end{enumerate}
+
+\textbf{Acceptance Criteria.}
+\begin{itemize}
+  \item[$\square$] Pinned-phase skew $\geq 10\times$; each fix reduces max/median
+        RPC ratio below $1.5\times$ in the harness.
+  \item[$\square$] JSON edge returns correct HTTP codes for NOT\_FOUND,
+        DEADLINE\_EXCEEDED, and INVALID\_ARGUMENT cases, with details intact.
+  \item[$\square$] Postmortem identifies the balance unit (connections vs.\
+        RPCs) as the root cause and states the per-pod SLI that would have
+        paged earlier.
+  \item[$\square$] Everything runs offline with \texttt{pytest -q} green and a
+        single PowerShell driver script.
+\end{itemize}
+
+\textbf{Stretch Goals.} Replace the hand-rolled \texttt{round\_robin} with a
+DNS-name-resolver-based config; add the \texttt{grpc.health.v1} service and
+gate the shim's routing on \texttt{SERVING}.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch13-deps}
+
+\subsection*{\texttt{requirements.txt}}
+
+\begin{minted}{text}
+grpcio>=1.62          # gRPC runtime: channels, server, interceptors, statuses
+grpcio-tools>=1.62    # bundled protoc + Python/gRPC plugins for codegen
+protobuf>=4.25        # message runtime used by generated *_pb2 modules
+pytest>=8             # test runner for the offline suite
+\end{minted}
+
+Install from PowerShell (offline-friendly once wheels are cached):
+
+\begin{minted}{text}
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{\texttt{grpcio}}
+
+\textbf{Description.} The gRPC runtime for Python: channels and connections,
+the threaded server, all four interceptor interfaces, status codes, metadata,
+deadlines, and the service-config/retry machinery.
+
+\textbf{Why included.} It is the subject of the chapter; every listing depends
+on it directly.
+
+\textbf{Alternatives.} \emph{Twirp} (Twitch) --- a simpler HTTP/1.1+JSON/proto
+RPC with a fraction of the features (no bidi streaming, no HTTP/2 multiplexing)
+and a fraction of the operational complexity. \emph{Connect-RPC} (Buf) ---
+gRPC-compatible but also speaks plain HTTP+JSON, easing browser and curl access;
+a strong modern choice when one contract must serve both worlds. \emph{Apache
+Thrift} --- the previous generation: own transport, own IDL, mature, but no
+HTTP/2 semantics and a smaller mindshare today. \emph{Plain HTTP/2} (e.g.\
+\texttt{httpx} + handwritten framing) --- you reimplement stubs, deadlines, and
+statuses yourself; educational, not advisable.
+
+\textbf{Installation.} \texttt{pip install grpcio} (wheels for CPython 3.11+
+on Windows; no compiler needed).
+
+\subsection{\texttt{grpcio-tools}}
+
+\textbf{Description.} Bundles the \texttt{protoc} compiler, the Python and
+gRPC-Python plugins, and the well-known \texttt{.proto} files, exposed as
+\texttt{python -m grpc\_tools.protoc}.
+
+\textbf{Why included.} Code generation is core to the gRPC workflow; bundling
+keeps the pipeline hermetic and offline --- no separate protoc download.
+
+\textbf{Alternatives.} A standalone \texttt{protoc} binary plus
+\texttt{grpc\_python\_plugin}; or the Buf toolchain (\texttt{buf generate}),
+which adds linting and breaking-change detection and is the better choice at
+organization scale.
+
+\textbf{Installation.} \texttt{pip install grpcio-tools}; keep its version in
+lockstep with \texttt{grpcio}.
+
+\subsection{\texttt{protobuf}}
+
+\textbf{Description.} The Protocol Buffers runtime that generated
+\texttt{\_pb2} modules import: message classes, serialization, well-known
+types, reflection over descriptors.
+
+\textbf{Why included.} Transitive but load-bearing: pin it explicitly because
+generated code validates its runtime version, and Chapter~4's hand-rolled codec
+comparisons use it as the reference implementation.
+
+\textbf{Alternatives.} None within the protobuf ecosystem (the runtime is
+mandatory for generated code); the \emph{format-level} alternatives ---
+MessagePack, Avro, CBOR --- are analyzed in Chapter~4.
+
+\textbf{Installation.} \texttt{pip install protobuf}; match the major version
+\texttt{grpcio-tools} generated against.
+
+\subsection{\texttt{pytest}}
+
+\textbf{Description.} The test runner and fixture system used for the offline
+suite (Listing~6).
+
+\textbf{Why included.} Consistent with every prior chapter; fixtures make the
+in-process server pattern (bind port 0, yield stub, stop server) three lines
+long.
+
+\textbf{Alternatives.} \texttt{unittest} (stdlib, zero dependency --- the
+fixture becomes \texttt{setUp/tearDown}); \texttt{nose2} (legacy, not
+recommended).
+
+\textbf{Installation.} \texttt{pip install pytest}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch13-summary}
+
+\begin{itemize}
+  \item gRPC = Protocol Buffers IDL + protobuf binary encoding + HTTP/2
+        transport + generated stubs. The \texttt{.proto} is the contract; both
+        ends are artifacts of it.
+  \item On the wire, one RPC is one HTTP/2 stream; every message carries a
+        5-byte prefix (1-byte compression flag + 4-byte big-endian length);
+        \texttt{:path} is \texttt{/package.Service/Method}; the HTTP status is
+        200 and the real outcome is the \texttt{grpc-status} trailer ---
+        collapsed into a trailers-only HEADERS frame for early failures.
+  \item Four modes --- unary, server streaming, client streaming,
+        bidirectional --- are declared in the IDL and differ in cancellation
+        and flow-control obligations; bound every stream and poll
+        \texttt{is\_active()}.
+  \item Deadlines propagate: \texttt{grpc-timeout} carries the
+        \emph{remaining} budget hop to hop. Set a deadline on every call;
+        re-check \texttt{time\_remaining()} after stalls; size overall budgets
+        for the whole retry sequence.
+  \item The 17 status codes are the error model; rich details travel in
+        \texttt{-bin} trailers (\texttt{google.rpc.Status} or your own typed
+        payload). Branch on \texttt{.code()}; retry only UNAVAILABLE-class
+        failures of idempotent-or-unreached calls.
+  \item Interceptors --- client and server, unary and stream --- are where
+        auth, correlation IDs, logging, metrics, retry, and error mapping
+        live. Business logic never threads metadata by hand.
+  \item Operationally: L4 balancers pin gRPC to single backends (balance
+        RPCs, not connections --- client-side LB, xDS, or
+        \texttt{max\_connection\_age}); keepalive detects dead peers;
+        reflection + \texttt{grpcurl} restore curl-ability; grpc-web or JSON
+        transcoding bridge to browsers; \texttt{grpc.health.v1} is the
+        readiness contract.
+  \item gRPC is for hot internal paths between services you control. Public,
+        browser-first, cache-dependent APIs remain HTTP/JSON territory ---
+        transcode at the edge if one contract must serve both.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch13-quickref}
+
+\subsection*{RPC Mode Selection}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Mode} & \textbf{Pick when} & \textbf{Watch out for} \\
+    \midrule
+    Unary & Single request/reply; command or query. & Missing deadlines; retry only if idempotent. \\
+    Server streaming & Feeds, tailing, large incremental results. & Abandoned streams; bound with max count; check \texttt{is\_active()}. \\
+    Client streaming & Bulk ingestion, uploads, aggregates. & Mid-stream validation must abort with details; buffer bounds. \\
+    Bidirectional & Control sessions, interactive protocols. & No implicit req/resp pairing; app-level backpressure queue. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection*{Status Codes You Must Know Cold}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X l}
+    \toprule
+    \textbf{Code} & \textbf{Meaning} & \textbf{Retry?} \\
+    \midrule
+    OK (0) & Success. & --- \\
+    CANCELLED (1) & Caller cancelled. & Only if safe to redo. \\
+    INVALID\_ARGUMENT (3) & Malformed request. & No. \\
+    DEADLINE\_EXCEEDED (4) & Budget expired. & No (budget already spent). \\
+    NOT\_FOUND (5) & Resource absent. & No. \\
+    PERMISSION\_DENIED (7) & Known caller, refused. & No. \\
+    RESOURCE\_EXHAUSTED (8) & Quota/rate limit. & After server delay. \\
+    FAILED\_PRECONDITION (9) & State forbids op. & After fixing state. \\
+    ABORTED (10) & Concurrency conflict. & Yes, whole operation. \\
+    UNIMPLEMENTED (12) & Method unknown here. & No. \\
+    INTERNAL (13) & Server bug. & No. \\
+    UNAVAILABLE (14) & Transient unavailability. & Yes (canonical). \\
+    UNAUTHENTICATED (16) & Bad/missing credentials. & After re-auth. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Abridged; the full 17-code table with HTTP mappings is
+  Table~\ref{tab:ch13-status}.}
+\end{table}
+
+\subsection*{Deadline \& Cancellation Checklist}
+\begin{itemize}
+  \item[$\square$] Every call site sets \texttt{timeout=}; no infinite defaults.
+  \item[$\square$] Every hop forwards \texttt{context.time\_remaining()}.
+  \item[$\square$] Overall budget $\geq$ attempts $\times$ attempt p99 + backoff.
+  \item[$\square$] Handlers re-check budget after any stall.
+  \item[$\square$] Stream loops poll \texttt{context.is\_active()}.
+  \item[$\square$] Clients \texttt{cancel()} abandoned streams explicitly.
+  \item[$\square$] Retry policy per method; UNAVAILABLE only; idempotency known.
+\end{itemize}
+
+\subsection*{Wire Cheat Sheet}
+\begin{minted}{text}
+message  = [compressed:1B][length:4B big-endian][protobuf payload]
+:path    = /package.Service/Method     content-type = application/grpc
+status   = grpc-status trailer (HTTP :status is 200 even on errors)
+details  = <key>-bin trailer (raw bytes; base64 on the HTTP/2 wire)
+deadline = grpc-timeout header, remaining budget, unit suffix H/M/S/m/u/n
+\end{minted}
+
+\input{chapters/_standard_addendum}

@@ -1,0 +1,73 @@
+# Northwind Robotics Legacy Inventory API v1
+# !!! INTENTIONALLY NON-COMPLIANT - ch20 linter-lab fixture !!!
+# Deliberate violations of the book's chapter 20 style rules:
+#   1. No operationId on any operation.
+#   2. No info.contact and no info.license.
+#   3. Operations lack descriptions (only terse summaries).
+#   4. Error responses (4xx/5xx) missing on every operation.
+#   5. No application/problem+json error model at all.
+#   6. Inconsistent naming: camelCase path params and properties mixed with
+#      snake_case; path segment uses Capitalized_Snake case.
+#   7. No pagination contract on the collection endpoint (no cursor/limit).
+#   8. Tags used but never declared/described.
+#   9. No security scheme declared.
+#  10. Version string is not semver ('v1').
+openapi: 3.1.0
+info:
+  title: Legacy Inventory API
+  version: v1
+paths:
+  /Inventory_Items:
+    get:
+      summary: get inventory
+      tags: [inventory]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/InventoryItem"
+  /Inventory_Items/{partId}:
+    put:
+      summary: update stock
+      tags: [inventory]
+      parameters:
+        - name: partId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StockUpdate"
+      responses:
+        "200":
+          description: ok
+components:
+  schemas:
+    InventoryItem:
+      type: object
+      properties:
+        PartID:
+          type: string
+        warehouse_id:
+          type: string
+        OnHand:
+          type: integer
+        reorderPoint:
+          type: integer
+    StockUpdate:
+      type: object
+      properties:
+        on_hand:
+          type: integer
+        Reason:
+          type: string

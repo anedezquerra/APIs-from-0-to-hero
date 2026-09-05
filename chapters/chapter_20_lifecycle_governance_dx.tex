@@ -1,0 +1,3082 @@
+%% ============================================================================
+%% Chapter 20: API Lifecycle, Governance & Developer Experience
+%% Mastering APIs: From Zero to Production Guru
+%% ============================================================================
+\chapter{API Lifecycle, Governance \& Developer Experience}
+\label{ch:lifecycle}
+
+%% ----------------------------------------------------------------------------
+%% 1. Executive Summary
+%% ----------------------------------------------------------------------------
+Every API you have built in this book is immortal until proven otherwise.
+The moment a consumer integrates against an endpoint --- the FastAPI
+services of Chapter~\ref{ch:fastapi}, the versioned contracts of
+Chapter~\ref{ch:versioning}, the rate-limited public surfaces of
+Chapter~\ref{ch:rate_limiting} --- you have created an obligation that
+outlives the enthusiasm that created it. Teams change, roadmaps pivot,
+funding moves on, but the consumer's production workload keeps calling.
+The difference between an API organization and a pile of endpoints is not
+technical talent; it is \emph{lifecycle management}: knowing which states
+an API can be in, what evidence is required to move between states, who is
+allowed to decide, and how the people on the other side of the contract
+experience every transition.
+
+This chapter treats the API lifecycle as a \textbf{formal state machine}:
+\textsf{design} $\rightarrow$ \textsf{review} $\rightarrow$
+\textsf{published} (operate) $\rightarrow$ \textsf{deprecated}
+$\rightarrow$ \textsf{sunset} $\rightarrow$ \textsf{retired}, with explicit
+entry and exit criteria per state and a small set of legal transitions.
+On top of that machine we build \textbf{design-first governance}: a style
+guide that standardizes exactly the things consumers can observe (naming,
+pagination, errors, authentication, versioning), enforced not by review
+heroics but by linting --- Spectral-style rulesets executed as data in CI
+--- plus a design-review process with service-level expectations, API
+decision records, and the honesty to say that governance is a trade-off
+between fleet-wide consistency and team autonomy. The resolution of that
+trade-off is the \emph{paved path}: make the compliant way the easiest
+way, and measure how many teams choose it voluntarily.
+
+We then turn the lens around to \textbf{developer experience (DX)
+engineering}. A developer portal with a searchable catalog, docs-as-code
+pipelines that render OpenAPI into reference documentation
+\cite{openapi31}, SDK generation (and a clear-eyed account of when
+generated SDKs hurt more than they help), deterministic sandbox
+environments, and above all \textbf{time-to-first-call (TTFC)} --- the
+single activation metric that predicts whether an API will be adopted or
+abandoned. Because APIs are \textbf{products}, we cover consumer research,
+tiering and pricing models, support models, changelog discipline, and the
+SLA/SLO/SLI relationship~\cite{beyer2016sre}, including the reasoning
+behind the rule that a contractual SLA must be strictly looser than the
+internal SLO that defends it. \textbf{Deprecation and sunsetting at scale}
+gets a full treatment: discovering who actually calls what from gateway
+telemetry (including the shadow APIs nobody owns), migration campaigns
+with communication cadences, kill dates, brownouts, and escape hatches,
+and the very different policies that apply to internal versus external
+consumers. Finally we address \textbf{regulatory and data governance}
+(PII boundaries in payloads and logs, retention, audit trails, GDPR-style
+deletion propagation, classification labels in schemas) and
+\textbf{platform economics} (build-versus-buy, funding models for platform
+teams~\cite{newman2021microservices}, and measuring platform ROI in
+adoption, TTFC, and incident reduction).
+
+Everything is backed by five complete, offline, deterministic Python~3.11
+tools against the synthetic Northwind Robotics universe: a mini
+Spectral-style linter with rules-as-data and CI exit codes, an OpenAPI
+$\rightarrow$ Markdown docs generator, a TTFC funnel analyzer over
+synthetic onboarding events, a deprecation campaign tracker that prints
+retirement readiness and the communication schedule, and a catalog
+manifest generator that emits Backstage-style API entries from a folder of
+specs.
+
+\begin{keyconceptbox}
+Governance that lives in documents is a wish; governance that lives in
+code is a system. A style guide nobody can execute is enforced by the
+scarcest resource you have --- senior reviewer attention --- and decays
+the moment that attention is needed elsewhere. The platform-engineering
+move is to convert every ``should'' into a lint rule, a template, a
+generated artifact, or a default, so that compliance is the path of least
+resistance and reviewer attention is reserved for the genuinely hard
+questions: Is this the right API? Should it exist at all? What happens to
+its consumers when it dies?
+\end{keyconceptbox}
+
+%% ----------------------------------------------------------------------------
+\section{Learning Objectives \& Prerequisites}
+\label{sec:ch20-objectives}
+
+\subsection*{Learning Objectives}
+After completing this chapter, its lab, and its exercises, you will be able to:
+
+\begin{enumerate}[label=\textbf{LO-\arabic*.}, leftmargin=2.6cm]
+  \item Model an API's life as a state machine with named states, legal
+        transitions, and evidence-based entry/exit criteria, and identify
+        which transition a given organizational event represents.
+  \item Write an API style guide that standardizes consumer-observable
+        surfaces (naming, pagination, errors, authentication, versioning),
+        express it as an executable Spectral-style ruleset with custom
+        rules, and wire it into CI with meaningful exit codes.
+  \item Run a design-review process that respects team autonomy ---
+        paved paths, API decision records, review SLAs --- and articulate
+        precisely which decisions are centralized and which are not.
+  \item Engineer developer experience as a measurable system: portals and
+        catalogs, docs-as-code, SDK generation policy, sandboxes, and
+        TTFC instrumentation with per-step funnel conversion.
+  \item Operate an API as a product: tiering and pricing, support models,
+        changelog discipline, and the SLA~$<$~SLO rule with its
+        error-budget rationale~\cite{beyer2016sre}.
+  \item Design and execute a deprecation campaign at scale: consumer
+        discovery from gateway telemetry, communication cadence, brownouts
+        as escape hatches, kill dates, and internal-versus-external policy
+        differences (extending Chapter~\ref{ch:versioning}).
+  \item Apply data-governance controls to API ecosystems: PII boundaries,
+        retention, audit trails, deletion propagation, and schema-level
+        classification labels.
+  \item Evaluate platform economics: build-versus-buy for portals and
+        gateways, platform team funding models, and an ROI scorecard in
+        adoption, activation, and reliability terms.
+\end{enumerate}
+
+\subsection*{Prerequisites}
+This chapter assumes you have completed Chapters~0--19 and are comfortable
+with:
+
+\begin{itemize}
+  \item \textbf{Chapter~\ref{ch:fastapi}} (building APIs with FastAPI) ---
+        the services being governed here are the ones you learned to
+        build; \textbf{Chapter~\ref{ch:versioning}} (versioning \&
+        evolution) --- deprecation and sunset policy extend the
+        compatibility algebra developed there; \textbf{Chapter~\ref{ch:testing}}
+        (testing \& quality engineering) --- lint gates are another
+        quality gate in the same CI supply chain.
+  \item OpenAPI~3.1 document structure~\cite{openapi31} from
+        Chapters~\ref{ch:fastapi} and~\ref{ch:testing}: \texttt{info},
+        \texttt{paths}, operations, \texttt{components.schemas}, and
+        extension properties (\texttt{x-*}).
+  \item RFC~9457 problem details (Chapter~\ref{ch:problem_details}),
+        cursor pagination (Chapter~\ref{ch:pagination}), and
+        rate-limit/deprecation headers (Chapters~\ref{ch:rate_limiting}
+        and~\ref{ch:versioning}), since the style guide standardizes
+        exactly these surfaces.
+  \item SLI/SLO vocabulary and error budgets from
+        Chapter~\ref{ch:observability}~\cite{beyer2016sre}.
+  \item Python~3.11+, PyYAML, and pytest; all code runs offline on
+        Windows/PowerShell with synthetic Northwind Robotics data only.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Deep Technical Mechanics \& Architectural Concepts}
+\label{sec:ch20-mechanics}
+
+\subsection{The API Lifecycle as a State Machine}
+\label{sec:ch20-statemachine}
+
+An ``API lifecycle diagram'' drawn as a circle of buzzwords is decoration.
+A lifecycle you can \emph{operate} is a state machine: a finite set of
+states, a small alphabet of events, legal transitions, and --- the part
+everyone skips --- the \textbf{evidence required} to take each transition.
+
+\begin{definition}[API Lifecycle State]
+An \emph{API lifecycle state} is a tuple $(s, O_s, E_s, X_s)$ where $s$ is
+the state name, $O_s$ the set of operational obligations in force while in
+$s$ (e.g., SLA coverage, on-call, changelog duty), $E_s$ the entry
+criteria (evidence that must exist to enter), and $X_s$ the exit criteria
+(evidence required to leave). A \emph{transition} $s \xrightarrow{e} s'$
+is an event $e$ fired by a named role and recorded in an audit log.
+\end{definition}
+
+The seven states we operate at Northwind Robotics are
+\textsf{design}, \textsf{review}, \textsf{published},
+\textsf{deprecated}, \textsf{sunset}, and \textsf{retired} --- with
+``operate'' being the normal dwell mode of \textsf{published}. The states
+are not a maturity gradient; an API in \textsf{deprecated} is not
+``worse'' than one in \textsf{published}, it is \emph{under a different
+contract}. Each state changes what consumers may assume, what the provider
+must do, and what the platform automates.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=stealth, node distance=0.9cm and 1.15cm,
+  statebox/.style={rectangle, draw, rounded corners, align=center,
+    minimum width=2.5cm, minimum height=0.95cm},
+  terminal/.style={rectangle, draw, double, rounded corners,
+    align=center, minimum width=2.5cm, minimum height=0.95cm},
+  ev/.style={font=\footnotesize\itshape, text=packtgray}]
+  \node[statebox] (design) {\textsf{design}\\ \footnotesize spec in repo, no traffic};
+  \node[statebox, right=of design] (review) {\textsf{review}\\ \footnotesize lint + design review};
+  \node[statebox, right=of review] (published) {\textsf{published}\\ \footnotesize catalog, SLA, on-call};
+  \node[statebox, right=of published] (deprecated) {\textsf{deprecated}\\ \footnotesize frozen, \texttt{Sunset} header};
+  \node[statebox, right=of deprecated] (sunset) {\textsf{sunset}\\ \footnotesize brownouts, 410};
+  \node[terminal, right=of sunset] (retired) {\textsf{retired}\\ \footnotesize catalog entry removed};
+
+  \draw[->] (design) -- node[ev, above] {submit for review} (review);
+  \draw[->] (review) -- node[ev, above] {approved, lint clean} (published);
+  \draw[->, bend left=28] (review) to node[ev, above] {changes requested} (design);
+  \draw[->] (published) -- node[ev, above] {sunset announced} (deprecated);
+  \draw[->] (deprecated) -- node[ev, above] {kill date reached} (sunset);
+  \draw[->] (sunset) -- node[ev, above] {post-sunset audit clean} (retired);
+  \draw[->, bend right=30] (deprecated) to
+    node[ev, below] {exception: un-deprecate (rare, ADR required)} (published);
+  \path (published.south) ++(0,-0.75) node[note]
+    {dwell state: operate --- monitor SLOs, ship backward-compatible changes, honor changelog};
+\end{tikzpicture}
+\caption{The API lifecycle as a state machine. Each transition is an
+audited event with named preconditions; \textsf{published} is the dwell
+state where normal operation (and only backward-compatible evolution) happens.}
+\label{fig:ch20-lifecycle}
+\end{figure}
+
+Table~\ref{tab:ch20-states} gives the entry/exit criteria. Two details
+matter more than the rest. First, \textbf{entry into \textsf{published}
+requires evidence, not opinion}: a clean lint run, a completed design
+review, an owner in the catalog, and a declared SLO. Second,
+\textbf{\textsf{deprecated} is a first-class operational state with real
+machinery}: the contract is frozen (no new features, security fixes only),
+every response carries a \texttt{Sunset} header
+(Chapter~\ref{ch:versioning}), and the migration campaign
+(Section~\ref{sec:ch20-deprecation}) is running against a public kill
+date.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{State} & \textbf{Entry criteria (evidence)} & \textbf{Exit criteria (evidence)} \\
+\midrule
+design & problem statement + ADR approved to proceed & spec in repo; lint clean; review packet complete \\
+review & lint gate green in CI; owner identified & review board sign-off; open questions resolved or ADR'd \\
+published (operate) & catalog entry, rendered docs, declared SLO, on-call rotation, sandbox live & announcement of deprecation date + replacement path \\
+deprecated & deprecation ADR; consumer census from gateway telemetry; \texttt{Sunset}/\texttt{Deprecation} headers live & kill date reached; residual traffic below policy floor \\
+sunset & brownout schedule executed; final warnings sent & post-sunset audit: 410 traffic $\approx$ 0 for one audit window \\
+retired & audit clean; catalog entry archived; runbooks deleted & terminal state --- no exit \\
+\bottomrule
+\end{tabularx}
+\caption{Lifecycle states with evidence-based entry/exit criteria.}
+\label{tab:ch20-states}
+\end{table}
+
+The state machine earns its keep in three ways. It makes
+\textbf{ownership answerable at any moment}: every state names an
+accountable role (in \textsf{design} the proposing team; from
+\textsf{published} onward the owning team of record in the catalog). It
+makes \textbf{tooling targetable}: lint gates fire on the
+\textsf{design}$\rightarrow$\textsf{review} transition, catalog rendering
+on \textsf{review}$\rightarrow$\textsf{published}, telemetry diffing on
+\textsf{published}$\rightarrow$\textsf{deprecated}. And it makes
+\textbf{audits trivial}: ``which APIs entered \textsf{deprecated} without
+a consumer census?'' is a log query, not an inquisition.
+
+\subsection{Design-First Governance}
+\label{sec:ch20-governance}
+
+\subsubsection{What a Style Guide Standardizes --- and What It Leaves Alone}
+A style guide that tries to standardize everything standardizes nothing,
+because teams route around it. The discipline is to standardize only the
+\textbf{consumer-observable seam} and leave internals to the teams. Our
+canonical list, built up through the book:
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X l}
+\toprule
+\textbf{Surface} & \textbf{Standard (Northwind Robotics)} & \textbf{Chapter} \\
+\midrule
+Path naming & kebab-case segments, plural nouns, no verbs & \ref{ch:rest_style} \\
+Operation IDs & camelCase, unique, verb+noun (\texttt{listRobots}) & \ref{ch:fastapi} \\
+Pagination & cursor-based, \texttt{limit} + \texttt{cursor} + \texttt{nextCursor} & \ref{ch:pagination} \\
+Errors & RFC~9457 \texttt{application/problem+json} on every 4xx/5xx & \ref{ch:problem_details} \\
+Authentication & OAuth2 client credentials; scopes named \texttt{domain:action} & \ref{ch:api_security} \\
+Versioning & URI major version; \texttt{info.version} strict semver; \texttt{Sunset} header on deprecation & \ref{ch:versioning} \\
+Idempotency & \texttt{Idempotency-Key} on all unsafe operations & \ref{ch:idempotency} \\
+Rate limiting & standard \texttt{RateLimit}-* headers + 429 with \texttt{Retry-After} & \ref{ch:rate_limiting} \\
+\bottomrule
+\end{tabularx}
+\caption{The consumer-observable surfaces a style guide must pin down.}
+\label{tab:ch20-styleguide}
+\end{table}
+
+Everything not in the table --- language, framework, datastore, internal
+module layout --- is deliberately ungoverned. This is the
+\textbf{consistency-versus-autonomy trade-off} made explicit: consistency
+buys fleet-wide learnability (a developer who knows one Northwind API
+knows them all) and tooling leverage (one docs renderer, one SDK
+generator, one linter); autonomy buys team speed and local fit. The
+mistake is paying for consistency you cannot cash: mandating internal
+choices produces compliance theater, while under-specifying the seam
+produces fifty dialects of pagination.
+
+\subsubsection{Spectral-Style Linting: Rules as Data}
+A style guide becomes real when it compiles. Spectral (the open-source
+OpenAPI linter this section's code imitates) expresses rules as
+\emph{data}: a YAML ruleset where each rule names a target (a JSONPath-ish
+expression over the document), a severity, and a function (truthy, pattern,
+casing, schema\ldots). The anatomy generalizes:
+
+\begin{itemize}
+  \item \textbf{Rule identity and severity.} Stable IDs
+        (\texttt{operation-id-camel-case}) so violations can be
+        referenced, suppressed, and trended; severities mapped to CI
+        semantics (\texttt{error} fails the build, \texttt{warn} does
+        not --- yet).
+  \item \textbf{Targets.} Where the rule looks: every operation, every
+        path segment, a single pointer like \texttt{/info/contact}.
+  \item \textbf{Functions.} The check itself: casing, regex match,
+        required-field presence, or a domain predicate like ``every
+        operation declares an \texttt{application/problem+json} error
+        response''.
+  \item \textbf{Messages with JSON paths.} A violation that cannot point
+        at the offending node (\texttt{\$.paths["/RobotParts"].get})
+        doubles the cost of fixing it.
+\end{itemize}
+
+Custom rules are where governance encodes \emph{your} history. The rule
+\texttt{pagination-required-on-lists} exists because a 2019 incident
+(Chapter~\ref{ch:pagination}'s war story) traced an outage to an
+unpaginated collection endpoint. A ruleset is an institutional memory with
+a \texttt{main()} function.
+
+\subsubsection{Design Review: Process, Not Tribunal}
+With lint absorbing the mechanical checks, human review is reserved for
+judgment: Is the resource model right? Is this operation idempotent? Does
+this API deserve to exist? A healthy review process has four properties:
+(1)~\textbf{review SLA} --- feedback within two business days, or the
+review is waived by default (a slow gate teaches teams to bypass gates);
+(2)~\textbf{a written packet} --- the spec, the lint report, and a short
+ADR for each non-obvious decision; (3)~\textbf{advisory-by-default
+verdicts} with a short list of blocking conditions (security, data
+classification, contract-breaking changes to published APIs);
+(4)~\textbf{appeals} --- a route past the reviewer to an architecture
+council, used rarely and publicly.
+
+\subsubsection{API Decision Records}
+An ADR for APIs is a one-page document: \emph{context} (forces and
+constraints), \emph{decision} (what we will do), \emph{status}
+(proposed/accepted/superseded), \emph{consequences} (what becomes easier
+and harder), and \emph{alternatives considered}. Two ADR habits pay
+outsized dividends in API programs: recording \textbf{rejected
+alternatives} (they are the answers to next year's ``why not GraphQL?''
+mail; see Chapter~\ref{ch:graphql}), and linking ADRs \textbf{from the
+spec} via an \texttt{x-decisions} extension so the rationale travels with
+the contract.
+
+\subsubsection{Paved Paths (Golden Paths)}
+The synthesis of style guide, linter, and review is the \textbf{paved
+path}: a blessed, fully tooled route from idea to published API ---
+repository template with a compliant OpenAPI skeleton, pre-wired CI with
+the ruleset, generated docs, automatic catalog registration, a sandbox,
+and dashboards from Chapter~\ref{ch:observability}. Teams may leave the
+paved path, but then they own the paving. Figure~\ref{fig:ch20-pavedpath}
+shows the flow; the essential property is that \emph{every arrow is
+automation}, and the humans only appear where judgment is irreducible.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=stealth, node distance=0.8cm and 1.0cm]
+  \node[flowstep] (design) {\textbf{design}\\ OpenAPI spec from repo template\\
+    \footnotesize ADR for non-obvious decisions};
+  \node[flowstep, right=of design] (lint) {\textbf{lint (CI)}\\ ruleset as data\\
+    \footnotesize exit 1 blocks merge};
+  \node[flowstep, right=of lint] (review) {\textbf{review}\\ judgment only\\
+    \footnotesize 2-day SLA, advisory default};
+  \node[flowstep, right=of review] (publish) {\textbf{publish}\\ registry + gateway route\\
+    \footnotesize SLO declared, on-call set};
+  \node[flowstep, right=of publish] (portal) {\textbf{portal}\\ catalog, docs, sandbox, keys\\
+    \footnotesize TTFC clock starts};
+  \draw[->] (design) -- (lint);
+  \draw[->] (lint) -- (review);
+  \draw[->] (review) -- (publish);
+  \draw[->] (publish) -- (portal);
+  \draw[->, bend left=25, dashed] (lint) to node[note, above] {violations} (design);
+  \draw[->, bend right=30, dashed] (review) to node[note, below] {changes requested} (design);
+  \node[modcap, below=0.5cm of review] {every solid arrow is automation; dashed arrows are feedback};
+\end{tikzpicture}
+\caption{The paved path: design $\rightarrow$ lint $\rightarrow$ review
+$\rightarrow$ publish $\rightarrow$ portal. Compliance is the default
+because the compliant route is the one with tooling.}
+\label{fig:ch20-pavedpath}
+\end{figure}
+
+\subsection{Developer Experience Engineering}
+\label{sec:ch20-dx}
+
+Developer experience is not a documentation gloss applied at launch; it is
+an engineering discipline with instrumentation, funnels, and budgets. The
+unit of analysis is the \emph{developer journey}: discover $\rightarrow$
+evaluate $\rightarrow$ activate $\rightarrow$ integrate $\rightarrow$
+scale. Most API programs instrument only the last two stages, which is why
+they cannot explain their adoption numbers.
+
+\subsubsection{Developer Portals and Catalogs}
+The portal's foundation is a \textbf{catalog of record}: every API, its
+owner, its lifecycle state, its spec, and its SLO --- Backstage's
+\texttt{kind: API} entity being the reference shape. A catalog answers the
+two questions that otherwise consume engineering weeks: \emph{does an API
+for X already exist?} and \emph{who owns API Y?} (the war story in
+Section~\ref{sec:ch20-lab} is what happens when the second question has no
+answer). The catalog is also where the lifecycle state machine becomes
+visible: filtering by state turns governance from a spreadsheet ritual
+into a query. Catalog entries must be \emph{generated} from the spec repo
+(Listing~20.7), never hand-maintained --- a hand-maintained
+catalog is a rumor with a search box.
+
+\subsubsection{Docs-as-Code}
+Docs-as-code means the reference documentation is a \emph{build artifact
+of the contract}: OpenAPI in, rendered reference out (Redoc, Stoplight
+Elements, or the stdlib renderer in Listing~20.4), versioned
+with the spec, deployed by the same pipeline. The invariant worth
+tattooing: \textbf{humans edit the spec; machines edit the docs}. The
+moment someone hot-fixes the published HTML, docs and contract diverge and
+trust in both collapses (Pitfall~\ref{pit:docs-drift}). Guides and
+tutorials remain hand-written, but they too live in the repo and are
+reviewed like code.
+
+\subsubsection{SDK Generation from OpenAPI}
+The openapi-generator flow is seductive: one spec, $N$ languages, clients
+regenerated in CI on every spec change. When it works, it is a superpower
+--- typed models, retry hooks, and auth wiring for free. The caveats are
+real: generated code is idiomatic in \emph{no} language (Java-flavored
+Python and Python-flavored Java), generated clients lag generator bugs and
+language evolution, and an unmaintained SDK is \emph{worse than none}
+because it carries your logo into its own bit-rot. Our decision rule:
+\textbf{generate SDKs when} the spec is stable, the consumer count justifies
+maintenance, and regeneration is wired to CI with publish automation;
+\textbf{ship a great OpenAPI document plus a 15-minute quickstart instead}
+when the API is young, consumers are few, or the team cannot commit to
+owning the SDK as a product. An interactive sandbox plus copy-paste
+\texttt{httpx} snippets (Chapter~\ref{ch:consuming_python}) covers the
+long tail at near-zero marginal cost.
+
+\subsubsection{Sandbox Environments}
+A sandbox is a deterministic, self-service environment with synthetic data
+--- the same offline-first discipline this book applies to itself. Its
+purpose is to compress evaluation time: a developer should be able to make
+a realistic call within minutes, against data that never changes under
+their feet (seeded fixtures, fixed clocks where relevant), with no sales
+call and no approval queue. Sandbox keys are issued instantly and
+self-service; production keys may carry vetting. A sandbox that requires a
+ticket is not a sandbox; it is a waiting room with a URL.
+
+\subsubsection{TTFC: The Activation Metric}
+\begin{definition}[Time to First Call (TTFC)]
+For developer $d$, $\mathrm{TTFC}(d) = t_d(\text{first successful 2xx}) -
+t_d(\text{signup})$, where ``successful'' means the developer received a
+\emph{useful} response, not merely a response. Reported fleet-wide as the
+median: $\mathrm{TTFC} = \mathrm{median}_d\,\mathrm{TTFC}(d)$.
+\end{definition}
+
+We instrument TTFC as a funnel --- \textsf{signup} $\rightarrow$
+\textsf{key issued} $\rightarrow$ \textsf{first call} $\rightarrow$
+\textsf{first 200} --- because the aggregate number hides \emph{where}
+developers stall. With per-step counts $N_i$ and conversions
+$C_i = N_i / N_{i-1}$, the funnel localizes the friction: a weak
+\textsf{signup}$\rightarrow$\textsf{key} step points at key-issuance
+bureaucracy; weak \textsf{key}$\rightarrow$\textsf{first call} points at
+documentation and quickstart quality; weak \textsf{first
+call}$\rightarrow$\textsf{first 200} points at authentication friction and
+error-message quality (this is where Chapter~\ref{ch:problem_details}'s
+\texttt{detail} field pays rent). TTFC is \emph{the} activation metric
+because it is the earliest signal that correlates with long-term adoption:
+developers who succeed in the first hour almost never churn in the first
+month. Every DX investment --- portal search, quickstarts, sandboxes, SDKs
+--- is justified, and prioritized, by its modeled effect on one funnel
+step. Listing~20.5 computes the funnel from synthetic event
+logs.
+
+\subsubsection{API Analytics for Product Decisions}
+Beyond TTFC, the analytics that change roadmap decisions are:
+\textbf{endpoint adoption} (which operations are used at all --- candidates
+for deprecation are born here), \textbf{error mix per consumer} (a
+consumer whose 4xx rate spikes after a release is a support case you can
+open \emph{before} the email arrives), \textbf{version distribution}
+(Chapter~\ref{ch:versioning}'s migration telemetry), and \textbf{top
+consumers by revenue and by support cost} --- the ratio of which is the
+most honest pricing input you own. The ethical boundary: analytics observe
+\emph{traffic}, not payload content, unless the consumer contract says
+otherwise (Section~\ref{sec:ch20-datagov}).
+
+\subsection{API as a Product}
+\label{sec:ch20-product}
+
+\subsubsection{Consumer Research and Tiering}
+API product management begins with consumer research that is boringly
+concrete: interview ten consumers, read their integration code, and
+count their workarounds. Pricing and packaging then follow the value
+metric --- the unit that scales with the consumer's success (calls, seats,
+robots managed). A canonical three-tier structure: \textbf{free} (sandbox
+plus low-rate production, community support, best-effort availability ---
+the adoption engine), \textbf{usage-based} (pay per unit of the value
+metric, business-hours support, contractual SLA), and \textbf{enterprise}
+(committed volumes, dedicated support channel, custom SLOs, contractual
+sunset protection). The tier boundary that matters most technically is
+rate limits (Chapter~\ref{ch:rate_limiting}): tiers must be enforceable
+at the gateway, or the pricing page is fiction.
+
+\subsubsection{SLA, SLO, SLI --- and Why SLA $<$ SLO}
+Recall the stack from Chapter~\ref{ch:observability}~\cite{beyer2016sre}:
+an \textbf{SLI} is a measurement (fraction of requests succeeding in
+under 300\,ms), an \textbf{SLO} is an internal target on that SLI
+(99.9\% monthly), and an \textbf{SLA} is the contractual promise with
+penalties (99.5\%, service credits below). The invariant is
+$\text{SLA} < \text{SLO}$, and the rationale is the error budget. If the
+internal objective is tighter than the external promise, the gap
+$1 - \text{SLO}$ versus $1 - \text{SLA}$ is a buffer in which the team can
+\emph{detect, decide, and act} --- page humans, roll back, freeze deploys
+--- before any contractual breach. With monthly SLI $p$ measured against
+an SLA floor $p_{\text{SLA}}$, budget remaining is
+$(p - p_{\text{SLA}})/(1 - p_{\text{SLA}})$; it must still be positive
+when the SLO budget $(p - p_{\text{SLO}})/(1 - p_{\text{SLO}})$ is
+exhausted, which holds iff $\text{SLA} < \text{SLO}$. An SLA equal to or
+tighter than the SLO means customers discover your incidents before your
+error-budget policy does. (The reversed mistake is
+Pitfall~\ref{pit:sla}.)
+
+\subsubsection{Support Models and Changelog Discipline}
+Support scales by self-service: docs, a searchable issue history, status
+page, and only then humans --- community forum for free tier, ticketed
+queue for paid, named contacts for enterprise. Changelog discipline is the
+cheapest trust instrument in the product: every consumer-visible change,
+classified (added/changed/deprecated/removed/fixed/security), dated, and
+linked from the \texttt{Deprecation} machinery of
+Chapter~\ref{ch:versioning}. A changelog that lags the deploy train
+teaches consumers to distrust every other signal you send.
+
+\subsubsection{Developer Relations as a Feedback Loop}
+DevRel closes the loop between consumers and governance: funnel analytics
+and support tickets flow into style-guide and paved-path evolution;
+governance changes flow out through changelog, portal, and migration
+guides. Figure~\ref{fig:ch20-loop} shows the loop. The failure mode to
+guard against is DevRel as \emph{megaphone} --- outbound only --- which
+produces beautiful launches of APIs nobody can integrate.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small, >=stealth, node distance=1.5cm and 2.6cm]
+  \node[flowstep] (govern) {\textbf{governance}\\ style guide, rulesets, ADRs};
+  \node[flowstep, right=of govern] (platform) {\textbf{platform}\\ lint CI, registry, portal, sandbox};
+  \node[flowstep, below=of platform] (consumers) {\textbf{consumers}\\ integrate, activate, scale};
+  \node[flowstep, left=of consumers] (telemetry) {\textbf{telemetry}\\ gateway census, TTFC funnel,\\ error mix, version drift};
+  \draw[->] (govern) -- node[note, above] {rules as data} (platform);
+  \draw[->] (platform) -- node[note, right] {paved path} (consumers);
+  \draw[->] (consumers) -- node[note, below] {observed behavior} (telemetry);
+  \draw[->] (telemetry) -- node[note, left] {evidence $\rightarrow$ rule changes} (govern);
+  \draw[->, dashed, bend left=18] (telemetry) to
+    node[note, above, sloped] {\footnotesize product signals (adoption, churn risk)} (platform);
+  \node[modcap, below=0.4cm of telemetry] {};
+\end{tikzpicture}
+\caption{The governance feedback loop: standards flow to consumers through
+tooling; observed consumer behavior flows back as evidence that revises
+the standards.}
+\label{fig:ch20-loop}
+\end{figure}
+
+\subsection{Deprecation \& Sunsetting at Scale}
+\label{sec:ch20-deprecation}
+
+Chapter~\ref{ch:versioning} taught the mechanics of signaling change
+(\texttt{Deprecation} and \texttt{Sunset} headers, version negotiation);
+this section is about the \emph{campaign}: retiring a version that
+hundreds of consumers depend on, without breaking their production or
+your reputation.
+
+\subsubsection{Consumer Discovery: Who Uses What?}
+You cannot migrate consumers you cannot name. The discovery order is:
+(1)~\textbf{gateway telemetry} --- join API keys/client IDs to consumer
+identities and aggregate calls per (consumer, version, endpoint); this is
+ground truth because packets do not lie; (2)~\textbf{the catalog of
+record} --- the declared mapping, useful for owners and escalation
+contacts; (3)~\textbf{contract registries} from
+Chapter~\ref{ch:testing}. The gap between (1) and (2) is where
+\textbf{shadow consumers} live: integrations nobody declared, often built
+by departed employees, and --- worse --- \emph{shadow APIs}: provider
+endpoints serving real traffic with no catalog entry at all. Both are
+found by diffing observed traffic against declared registrations, which is
+why consumer discovery is a telemetry problem before it is a process
+problem.
+
+\subsubsection{Migration Campaigns}
+A campaign is a dated communication plan with a hard end state, run like a
+release. The skeleton (implemented in Listing~20.6):
+\textbf{T-180} announce (changelog, portal banner, email to registered
+owners, \texttt{Deprecation} header on); \textbf{T-90/T-60} reminders to
+non-migrated consumers, escalating to their engineering leads;
+\textbf{T-30} first \textbf{brownout} --- a short, announced window where
+the old version returns 410/404, the escape hatch that flushes out
+consumers who never read email; \textbf{T-14} final warning with sponsor
+escalation; \textbf{T-7} second, longer brownout; \textbf{T-0} permanent
+sunset (HTTP 410 with a problem+json body pointing at the migration
+guide); \textbf{T+7} post-sunset audit of residual traffic. Escape
+hatches: a \emph{documented} extension process (time-boxed, signed by the
+consumer's director, carrying an explicit new kill date) and a per-consumer
+allowlist so a laggard can be carved out of a brownout without delaying
+the campaign for everyone else.
+
+\subsubsection{The Organizational Cost of Breaking Changes}
+Breaking changes externalize cost onto every consumer simultaneously:
+each must schedule, implement, test, and deploy a migration --- work with
+zero feature value to them. The total cost of a v1$\rightarrow$v2 break
+scales with consumer count, which is why the calculus of
+Chapter~\ref{ch:versioning} (expand--migrate--contract, parallel change)
+is not politeness but economics: every backward-compatible expansion you
+ship instead of a break is $N$ consumer migrations you did not force.
+Budget for the campaign itself too: provider-side migration tooling,
+shims, and the support surge around brownouts are real engineering weeks.
+
+\subsubsection{Internal versus External Policy}
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{Policy lever} & \textbf{Internal consumers} & \textbf{External consumers} \\
+\midrule
+Notice period & 60--90 days; sprint-plannable & 6--12 months; often contractual \\
+Enforcement & platform can mandate via CI/deploy gates & persuasion, pricing, brownouts; contract terms govern \\
+Escape hatch & CTO-approved exception with expiry & paid extended-support tier, time-boxed \\
+Discovery & catalog + telemetry + org chart & telemetry + contracts; no org chart to consult \\
+Sunset mechanics & hard kill dates, brownouts acceptable & brownouts announced per contract; 410 body with migration link mandatory \\
+\bottomrule
+\end{tabularx}
+\caption{Deprecation policy: internal versus external consumers.}
+\label{tab:ch20-internal-external}
+\end{table}
+
+\subsection{Regulatory \& Data Governance}
+\label{sec:ch20-datagov}
+
+API governance that ignores data governance is a compliance incident on a
+timer. Five controls, each cheap at design time and brutal retrofitted:
+
+\begin{enumerate}
+  \item \textbf{PII boundaries in payloads and logs.} Classify every
+        schema field; payloads carry only what the consumer's purpose
+        requires (data minimization), and logs capture metadata ---
+        never payload bodies by default. Chapter~\ref{ch:observability}'s
+        structured logging must enforce redaction lists, and
+        Chapter~\ref{ch:api_security}'s scopes should be
+        classification-aware.
+  \item \textbf{Classification labels in schemas.} Machine-readable
+        labels such as \texttt{x-classification: pii|internal|public} on
+        schema properties (used by our specs and surfaced by the docs
+        generator in Listing~20.4) let linters fail builds that
+        log, export, or widen access to classified fields.
+  \item \textbf{Retention policies.} Every persisted representation has a
+        retention clock and an owner; API audit logs, analytics events,
+        and backups each get explicit, possibly different, windows.
+  \item \textbf{Audit trails.} Lifecycle transitions (who moved this API
+        to \textsf{deprecated}, on what evidence), admin operations, and
+        data-access events are append-only, timestamped, and attributable.
+  \item \textbf{Deletion propagation.} A GDPR-style erasure request is a
+        \emph{workflow across the API ecosystem}, not a row delete:
+        primary store, derived stores, analytics events, caches
+        (Chapter~\ref{ch:idempotency}), backups (handled by expiry, not
+        surgical edits), and downstream consumers you pushed data to via
+        async APIs (Chapter~\ref{ch:async_apis}) --- each acknowledged and
+        auditable. Designing erasure as an event with tombstones and
+        fan-out receipts, rehearsed quarterly, beats discovering your
+        propagation gaps during a regulator's deadline.
+\end{enumerate}
+
+\subsection{Platform Economics}
+\label{sec:ch20-economics}
+
+\textbf{Build versus buy.} Buy (or adopt managed) when the capability is
+undifferentiated and mature --- gateways, key management, hosted docs.
+Build when the capability encodes \emph{your} conventions --- the ruleset,
+the paved-path templates, the catalog enrichment that knows your org
+chart. The composite answer is usual: a managed gateway, Backstage-style
+open-source portal core, and thin bespoke glue (like this chapter's
+manifest generator) that stamps your conventions onto commodity
+infrastructure. \textbf{Funding models.} Platform teams fail when funded
+as ticket-taking cost centers; they succeed as \emph{product teams with
+internal customers}~\cite{newman2021microservices} --- funded on a
+multi-year horizon, with adoption as their success metric and voluntary
+uptake as the forcing function (a platform that must mandate usage is a
+platform whose paved path is not paved well enough). \textbf{Measuring
+ROI.} The honest scorecard has three columns: \emph{adoption} (APIs
+onboarded to the paved path, share of traffic behind the gateway),
+\emph{activation} (TTFC median and funnel conversion, trended), and
+\emph{risk removed} (lint-blocked non-compliant designs, incidents
+attributed to governed versus ungoverned APIs, sunset campaigns completed
+without escalation). Report it quarterly; a platform that cannot show its
+value eventually meets someone who cannot see it.
+
+%% ----------------------------------------------------------------------------
+\section{Production-Ready Code Implementation}
+\label{sec:ch20-code}
+
+All listings live under \texttt{code\textbackslash{}ch20\textbackslash{}}
+and together form a \emph{mini platform}: lint a spec, generate its docs,
+publish its catalog entry, measure onboarding, and run a deprecation
+campaign. Everything is offline, deterministic (the tracker takes
+\texttt{--today} explicitly; the funnel reads a fixed synthetic fixture),
+and uses the Northwind Robotics synthetic universe only. Install once:
+
+\begin{minted}{powershell}
+cd code\ch20
+pip install -r requirements.txt
+python -m pytest -q
+\end{minted}
+
+\subsection{Listing 20.1 --- The Ruleset as Data}
+\label{sec:ch20-listing-ruleset}
+
+The style guide of Table~\ref{tab:ch20-styleguide} compiles into a YAML
+ruleset. Six rules cover contact ownership, semver versioning, path and
+operation naming, RFC~9457 error coverage, and pagination on collection
+endpoints. Adding a rule is a \emph{data} change, reviewed in a pull
+request like any other --- governance as pull request, not as meeting.
+
+\begin{minted}{yaml}
+# Northwind Robotics API style ruleset (rules as data).
+# Each rule: id, severity (error|warn), kind, and kind-specific params.
+rules:
+  - id: info-contact-required
+    severity: error
+    kind: require-field
+    pointer: /info/contact
+    message: info.contact must name an owning team or alias.
+
+  - id: semver-info-version
+    severity: error
+    kind: match
+    pointer: /info/version
+    pattern: '^\d+\.\d+\.\d+$'
+    message: info.version must be strict semver (MAJOR.MINOR.PATCH).
+
+  - id: path-segment-kebab-case
+    severity: error
+    kind: casing
+    target: path_segment
+    style: kebab
+    message: Path segments must be kebab-case.
+
+  - id: operation-id-camel-case
+    severity: error
+    kind: casing
+    target: operation_id
+    style: camel
+    message: operationId must be camelCase.
+
+  - id: problem-json-errors
+    severity: error
+    kind: problem-json-errors
+    message: >-
+      Every operation must declare a 4xx/5xx or default response carrying
+      application/problem+json (RFC 9457).
+
+  - id: pagination-required-on-lists
+    severity: warn
+    kind: pagination-required
+    params: [limit, cursor]
+    message: >-
+      Collection GET endpoints must accept limit and cursor query
+      parameters.
+\end{minted}
+
+\subsection{Listing 20.2 --- \texttt{mini\_spectral.py}: A Spectral-Style Linter}
+\label{sec:ch20-listing-linter}
+
+The linter loads the spec and ruleset, evaluates each rule \emph{kind}
+(\texttt{require-field}, \texttt{match}, \texttt{casing},
+\texttt{problem-json-errors}, \texttt{pagination-required}), and reports
+violations with JSON paths. The exit code is the CI contract: 0 clean, 1
+error-severity violations, 2 usage or parse failure --- so a pipeline can
+distinguish ``your API is non-compliant'' from ``the gate itself broke''.
+
+\begin{minted}{python}
+r"""mini_spectral.py -- a miniature Spectral-style OpenAPI linter.
+
+Loads an OpenAPI YAML document and a ruleset expressed as data (YAML),
+evaluates every rule, reports violations with JSON paths, and returns a
+CI-friendly exit code:
+
+    0 -- no error-severity violations
+    1 -- at least one error-severity violation
+    2 -- usage error, unreadable file, or malformed document/ruleset
+
+Usage (PowerShell):
+    python mini_spectral.py .\specs\northwind_robots.yaml --ruleset .\ruleset.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+import yaml
+
+HTTP_METHODS = frozenset(
+    {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+)
+
+CASING_PATTERNS: dict[str, re.Pattern[str]] = {
+    "kebab": re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$"),
+    "snake": re.compile(r"^[a-z0-9]+(_[a-z0-9]+)*$"),
+    "camel": re.compile(r"^[a-z][a-zA-Z0-9]*$"),
+}
+
+SEVERITIES = ("error", "warn")
+
+
+@dataclass(frozen=True)
+class Violation:
+    """A single rule breach located by a JSON-path-ish string."""
+
+    rule_id: str
+    severity: str
+    path: str
+    message: str
+
+    def render(self) -> str:
+        return (
+            f"[{self.severity.upper():5}] {self.rule_id} "
+            f"at {self.path}: {self.message}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Document navigation helpers
+# --------------------------------------------------------------------------
+
+def resolve_pointer(doc: Any, pointer: str) -> Any:
+    """Resolve a minimal JSON Pointer ('/info/contact'); None if absent."""
+    node = doc
+    for token in pointer.strip("/").split("/"):
+        if not isinstance(node, dict) or token not in node:
+            return None
+        node = node[token]
+    return node
+
+
+def json_path(*parts: str) -> str:
+    """Build a readable JSON path, quoting keys that contain slashes."""
+    out = "$"
+    for part in parts:
+        if re.fullmatch(r"[A-Za-z0-9_-]+", part):
+            out += f".{part}"
+        else:
+            out += f'["{part}"]'
+    return out
+
+
+def iter_operations(doc: dict[str, Any]):
+    """Yield (json_path, path_key, method, operation) for every operation."""
+    paths = doc.get("paths") or {}
+    if not isinstance(paths, dict):
+        return
+    for path_key, path_item in paths.items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method.lower() in HTTP_METHODS and isinstance(operation, dict):
+                yield (
+                    json_path("paths", path_key, method.lower()),
+                    path_key,
+                    method.lower(),
+                    operation,
+                )
+
+
+# --------------------------------------------------------------------------
+# Rule kinds -- each takes (doc, rule) and yields Violations
+# --------------------------------------------------------------------------
+
+def check_require_field(
+    doc: dict[str, Any], rule: dict[str, Any]
+) -> list[Violation]:
+    pointer = str(rule["pointer"])
+    if resolve_pointer(doc, pointer) is None:
+        return [
+            Violation(
+                rule["id"],
+                rule["severity"],
+                "$" + pointer.replace("/", "."),
+                rule["message"],
+            )
+        ]
+    return []
+
+
+def check_match(doc: dict[str, Any], rule: dict[str, Any]) -> list[Violation]:
+    pointer = str(rule["pointer"])
+    value = resolve_pointer(doc, pointer)
+    pattern = re.compile(str(rule["pattern"]))
+    if value is None or not pattern.fullmatch(str(value)):
+        return [
+            Violation(
+                rule["id"],
+                rule["severity"],
+                "$" + pointer.replace("/", "."),
+                f"{rule['message']} (found: {value!r})",
+            )
+        ]
+    return []
+
+
+def check_casing(doc: dict[str, Any], rule: dict[str, Any]) -> list[Violation]:
+    style = str(rule["style"])
+    pattern = CASING_PATTERNS[style]
+    violations: list[Violation] = []
+
+    if rule["target"] == "operation_id":
+        for op_path, _pk, _m, operation in iter_operations(doc):
+            op_id = operation.get("operationId")
+            if op_id is None or not pattern.fullmatch(str(op_id)):
+                violations.append(
+                    Violation(
+                        rule["id"],
+                        rule["severity"],
+                        f"{op_path}.operationId",
+                        f"{rule['message']} (found: {op_id!r})",
+                    )
+                )
+    elif rule["target"] == "path_segment":
+        paths = doc.get("paths") or {}
+        for path_key in paths:
+            for segment in str(path_key).split("/"):
+                if not segment or (segment.startswith("{") and segment.endswith("}")):
+                    continue
+                if not pattern.fullmatch(segment):
+                    violations.append(
+                        Violation(
+                            rule["id"],
+                            rule["severity"],
+                            json_path("paths", path_key),
+                            f"{rule['message']} (segment: {segment!r})",
+                        )
+                    )
+    else:  # defensive: ruleset is data too, and data can be wrong
+        raise ValueError(f"unknown casing target: {rule['target']!r}")
+    return violations
+
+
+def check_problem_json_errors(
+    doc: dict[str, Any], rule: dict[str, Any]
+) -> list[Violation]:
+    violations = []
+    for op_path, _pk, _m, operation in iter_operations(doc):
+        responses = operation.get("responses") or {}
+        ok = False
+        for status, response in responses.items():
+            code = str(status)
+            if not (code.startswith(("4", "5")) or code == "default"):
+                continue
+            content = (response or {}).get("content") or {}
+            if "application/problem+json" in content:
+                ok = True
+                break
+        if not ok:
+            violations.append(
+                Violation(
+                    rule["id"],
+                    rule["severity"],
+                    f"{op_path}.responses",
+                    rule["message"],
+                )
+            )
+    return violations
+
+
+def check_pagination_required(
+    doc: dict[str, Any], rule: dict[str, Any]
+) -> list[Violation]:
+    required_params = [str(p) for p in rule.get("params", ["limit", "cursor"])]
+    violations = []
+    for op_path, path_key, method, operation in iter_operations(doc):
+        is_collection_get = method == "get" and not str(path_key).rstrip("/").endswith("}")
+        if not is_collection_get:
+            continue
+        present = {
+            str(p.get("name"))
+            for p in operation.get("parameters") or []
+            if isinstance(p, dict) and p.get("in") == "query"
+        }
+        missing = [p for p in required_params if p not in present]
+        if missing:
+            violations.append(
+                Violation(
+                    rule["id"],
+                    rule["severity"],
+                    f"{op_path}.parameters",
+                    f"{rule['message']} (missing: {', '.join(missing)})",
+                )
+            )
+    return violations
+
+
+RULE_KINDS: dict[
+    str, Callable[[dict[str, Any], dict[str, Any]], list[Violation]]
+] = {
+    "require-field": check_require_field,
+    "match": check_match,
+    "casing": check_casing,
+    "problem-json-errors": check_problem_json_errors,
+    "pagination-required": check_pagination_required,
+}
+
+
+# --------------------------------------------------------------------------
+# Engine
+# --------------------------------------------------------------------------
+
+def load_yaml_file(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def lint(spec: dict[str, Any], ruleset: dict[str, Any]) -> list[Violation]:
+    """Evaluate every rule in the ruleset against the spec document."""
+    if not isinstance(spec, dict) or "openapi" not in spec:
+        raise ValueError("document does not look like an OpenAPI spec")
+    rules = (ruleset or {}).get("rules") or []
+    violations: list[Violation] = []
+    for rule in rules:
+        kind = rule.get("kind")
+        handler = RULE_KINDS.get(str(kind))
+        if handler is None:
+            raise ValueError(f"unknown rule kind: {kind!r}")
+        if rule.get("severity") not in SEVERITIES:
+            raise ValueError(f"rule {rule.get('id')!r}: bad severity")
+        violations.extend(handler(spec, rule))
+    return violations
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Mini Spectral-style linter.")
+    parser.add_argument("spec", type=Path, help="OpenAPI YAML file")
+    parser.add_argument(
+        "--ruleset", type=Path, required=True, help="Ruleset YAML file"
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        spec = load_yaml_file(args.spec)
+        ruleset = load_yaml_file(args.ruleset)
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"error: cannot load input: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        violations = lint(spec, ruleset)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    for violation in violations:
+        print(violation.render())
+
+    errors = sum(1 for v in violations if v.severity == "error")
+    warnings = sum(1 for v in violations if v.severity == "warn")
+    print(f"\n{args.spec.name}: {errors} error(s), {warnings} warning(s)")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+The deliberately non-compliant legacy warehouse spec
+(\texttt{fixtures\textbackslash{}noncompliant\_spec.yaml}) trips five of
+the six rules:
+
+\begin{minted}{yaml}
+openapi: 3.1.0
+info:
+  title: Northwind Robotics Warehouse Legacy API
+  version: v2-final   # NOT semver: violates semver-info-version
+  description: Legacy warehouse endpoints kept alive for one partner.
+  # no contact block: violates info-contact-required
+paths:
+  /RobotParts:        # PascalCase segment: violates path-segment-kebab-case
+    get:
+      operationId: list_parts   # snake_case: violates operation-id-camel-case
+      summary: List all parts without pagination
+      responses:
+        '200':
+          description: Every part in one giant payload
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Part'
+        '500':
+          description: Boom, plain text
+          content:
+            text/plain:
+              schema:
+                type: string
+  /robot-parts/{partId}:
+    delete:
+      operationId: deletePart
+      summary: Delete a part
+      parameters:
+        - name: partId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found, bare JSON
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  schemas:
+    Part:
+      type: object
+      properties:
+        sku:
+          type: string
+        bin:
+          type: string
+\end{minted}
+
+Running the linter against it produces one violation per breach, each
+pinpointed by JSON path, and exit code 1:
+
+\begin{minted}{text}
+[ERROR] info-contact-required at $.info.contact: info.contact must name an owning team or alias.
+[ERROR] semver-info-version at $.info.version: info.version must be strict semver (MAJOR.MINOR.PATCH). (found: 'v2-final')
+[ERROR] path-segment-kebab-case at $.paths["/RobotParts"]: Path segments must be kebab-case. (segment: 'RobotParts')
+[ERROR] operation-id-camel-case at $.paths["/RobotParts"].get.operationId: operationId must be camelCase. (found: 'list_parts')
+[ERROR] problem-json-errors at $.paths["/RobotParts"].get.responses: Every operation must declare a 4xx/5xx or default response carrying application/problem+json (RFC 9457).
+[ERROR] problem-json-errors at $.paths["/robot-parts/{partId}"].delete.responses: Every operation must declare a 4xx/5xx or default response carrying application/problem+json (RFC 9457).
+[WARN ] pagination-required-on-lists at $.paths["/RobotParts"].get.parameters: Collection GET endpoints must accept limit and cursor query parameters. (missing: limit, cursor)
+
+noncompliant_spec.yaml: 6 error(s), 1 warning(s)
+\end{minted}
+
+The compliant fleet spec passes clean (exit 0):
+
+\begin{minted}{text}
+
+northwind_robots.yaml: 0 error(s), 0 warning(s)
+\end{minted}
+
+\subsection{Listing 20.3 --- Linter Tests, Including the Non-Compliant Spec}
+\label{sec:ch20-listing-linter-tests}
+
+The test suite treats the exit-code contract as first-class behavior: the
+compliant spec exits 0, the non-compliant one exits 1 with every expected
+rule ID in the output, a missing file exits 2, and warn-severity
+violations provably do not fail the build --- the property that lets you
+roll out new rules as warnings before flipping them to errors.
+
+\begin{minted}{python}
+"""Tests for mini_spectral.py, including a deliberately non-compliant spec."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+import mini_spectral as ms
+
+HERE = Path(__file__).parent
+RULESET = HERE / "ruleset.yaml"
+COMPLIANT = HERE / "specs" / "northwind_robots.yaml"
+NONCOMPLIANT = HERE / "fixtures" / "noncompliant_spec.yaml"
+
+
+def load(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------
+# End-to-end CLI behaviour (exit codes are the CI contract)
+# --------------------------------------------------------------------------
+
+def test_compliant_spec_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    code = ms.main([str(COMPLIANT), "--ruleset", str(RULESET)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "0 error(s)" in out
+
+
+def test_noncompliant_spec_exits_one_and_names_rules(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = ms.main([str(NONCOMPLIANT), "--ruleset", str(RULESET)])
+    out = capsys.readouterr().out
+    assert code == 1
+    for rule_id in (
+        "info-contact-required",
+        "semver-info-version",
+        "path-segment-kebab-case",
+        "operation-id-camel-case",
+        "problem-json-errors",
+        "pagination-required-on-lists",
+    ):
+        assert rule_id in out
+    # violations carry JSON paths
+    assert '$.paths["/RobotParts"].get.operationId' in out
+    assert "6 error(s), 1 warning(s)" in out
+
+
+def test_missing_file_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
+    code = ms.main([str(HERE / "nope.yaml"), "--ruleset", str(RULESET)])
+    assert code == 2
+    assert "cannot load input" in capsys.readouterr().err
+
+
+def test_not_an_openapi_doc_exits_two(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bogus = tmp_path / "bogus.yaml"
+    bogus.write_text("just: a mapping\n", encoding="utf-8")
+    code = ms.main([str(bogus), "--ruleset", str(RULESET)])
+    assert code == 2
+    assert "OpenAPI" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Unit behaviour of individual rule kinds
+# --------------------------------------------------------------------------
+
+def test_casing_patterns() -> None:
+    assert ms.CASING_PATTERNS["kebab"].fullmatch("robot-parts")
+    assert not ms.CASING_PATTERNS["kebab"].fullmatch("RobotParts")
+    assert ms.CASING_PATTERNS["camel"].fullmatch("listRobots")
+    assert not ms.CASING_PATTERNS["camel"].fullmatch("list_parts")
+
+
+def test_resolve_pointer_missing() -> None:
+    assert ms.resolve_pointer({"info": {}}, "/info/contact") is None
+    assert ms.resolve_pointer({"info": {"contact": {}}}, "/info/contact") == {}
+
+
+def test_template_path_params_are_not_linted_as_segments() -> None:
+    doc = load(COMPLIANT)
+    ruleset = {
+        "rules": [
+            {
+                "id": "path-segment-kebab-case",
+                "severity": "error",
+                "kind": "casing",
+                "target": "path_segment",
+                "style": "kebab",
+                "message": "kebab only",
+            }
+        ]
+    }
+    assert ms.lint(doc, ruleset) == []
+
+
+def test_unknown_rule_kind_is_a_ruleset_error() -> None:
+    doc = load(COMPLIANT)
+    with pytest.raises(ValueError, match="unknown rule kind"):
+        ms.lint(doc, {"rules": [{"id": "x", "severity": "error",
+                                 "kind": "telepathy"}]})
+
+
+def test_warn_severity_does_not_fail_build(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The compliant spec trips the pagination rule if we demand a
+    # non-existent parameter -- warnings must not change the exit code.
+    ruleset_text = RULESET.read_text(encoding="utf-8").replace(
+        "params: [limit, cursor]", "params: [limit, cursor, locale]"
+    )
+    violations = ms.lint(load(COMPLIANT), yaml.safe_load(ruleset_text))
+    assert violations and all(v.severity == "warn" for v in violations)
+\end{minted}
+
+\subsection{Listing 20.4 --- \texttt{docs\_generator.py}: OpenAPI $\rightarrow$ Markdown}
+\label{sec:ch20-listing-docs}
+
+Docs-as-code in eighty lines of stdlib-plus-PyYAML: endpoints with
+parameter and response tables, the first response example as a fenced JSON
+block, and schema tables that surface \texttt{x-classification} labels so
+data governance is visible in the published reference. Because the docs
+are generated, they cannot drift from the spec without the pipeline
+noticing.
+
+\begin{minted}{python}
+r"""docs_generator.py -- render an OpenAPI YAML spec as Markdown reference docs.
+
+Stdlib + PyYAML only. Docs-as-code in miniature: the spec is the single
+source of truth and the rendered reference is a build artifact, so docs
+can never drift from the contract without the build noticing.
+
+Usage (PowerShell):
+    python docs_generator.py .\specs\northwind_robots.yaml
+    python docs_generator.py .\specs\northwind_robots.yaml --out fleet-api.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+HTTP_METHODS = ("get", "put", "post", "delete", "patch", "options", "head")
+
+
+def schema_type(schema: dict[str, Any]) -> str:
+    """Human-readable type label, resolving local $refs to their name."""
+    if "$ref" in schema:
+        return str(schema["$ref"]).rsplit("/", 1)[-1]
+    base = schema.get("type", "any")
+    if base == "array":
+        return f"array[{schema_type(schema.get('items') or {})}]"
+    if "enum" in schema:
+        return "enum(" + ", ".join(str(v) for v in schema["enum"]) + ")"
+    if "format" in schema:
+        return f"{base} ({schema['format']})"
+    return str(base)
+
+
+def render_parameters(operation: dict[str, Any]) -> list[str]:
+    params = operation.get("parameters") or []
+    if not params:
+        return []
+    lines = [
+        "",
+        "| Name | In | Required | Type |",
+        "|---|---|---|---|",
+    ]
+    for param in params:
+        schema = param.get("schema") or {}
+        lines.append(
+            f"| `{param.get('name', '?')}` | {param.get('in', '?')} | "
+            f"{'yes' if param.get('required') else 'no'} | "
+            f"{schema_type(schema)} |"
+        )
+    return lines
+
+
+def render_responses(operation: dict[str, Any]) -> list[str]:
+    responses = operation.get("responses") or {}
+    lines = ["", "| Status | Meaning | Body |", "|---|---|---|"]
+    for status, response in responses.items():
+        content = (response or {}).get("content") or {}
+        bodies = ", ".join(
+            f"{media} -> {schema_type((cfg or {}).get('schema') or {})}"
+            for media, cfg in content.items()
+        ) or "-"
+        lines.append(
+            f"| `{status}` | {(response or {}).get('description', '')} "
+            f"| {bodies} |"
+        )
+    return lines
+
+
+def render_example(operation: dict[str, Any]) -> list[str]:
+    """Emit the first response example found, as a fenced JSON block."""
+    for _status, response in (operation.get("responses") or {}).items():
+        for _media, cfg in ((response or {}).get("content") or {}).items():
+            if isinstance(cfg, dict) and "example" in cfg:
+                return [
+                    "",
+                    "Example:",
+                    "",
+                    "```json",
+                    json.dumps(cfg["example"], indent=2),
+                    "```",
+                ]
+    return []
+
+
+def render_markdown(spec: dict[str, Any]) -> str:
+    info = spec.get("info") or {}
+    lines: list[str] = [
+        f"# {info.get('title', 'Untitled API')}",
+        "",
+        f"**Version:** {info.get('version', 'n/a')}",
+        "",
+        (info.get("description") or "").strip(),
+        "",
+    ]
+    for server in spec.get("servers") or []:
+        lines.append(f"- Server: `{server.get('url')}` "
+                     f"({server.get('description', '')})")
+    lines.append("")
+    lines.append("## Endpoints")
+
+    paths = spec.get("paths") or {}
+    for path_key, path_item in paths.items():
+        for method in HTTP_METHODS:
+            operation = (path_item or {}).get(method)
+            if not isinstance(operation, dict):
+                continue
+            lines += [
+                "",
+                f"### `{method.upper()} {path_key}`",
+                "",
+                operation.get("summary", ""),
+            ]
+            lines += render_parameters(operation)
+            lines += render_responses(operation)
+            lines += render_example(operation)
+            lines.append("")
+
+    schemas = ((spec.get("components") or {}).get("schemas")) or {}
+    if schemas:
+        lines.append("## Schemas")
+    for name, schema in schemas.items():
+        required = set(schema.get("required") or [])
+        lines += [
+            "",
+            f"### {name}",
+            "",
+            "| Property | Type | Required | Notes |",
+            "|---|---|---|---|",
+        ]
+        for prop, prop_schema in (schema.get("properties") or {}).items():
+            notes = prop_schema.get("description", "")
+            if "x-classification" in prop_schema:
+                notes = (notes + " " if notes else "") + (
+                    f"[classification: {prop_schema['x-classification']}]"
+                )
+            lines.append(
+                f"| `{prop}` | {schema_type(prop_schema)} | "
+                f"{'yes' if prop in required else 'no'} | {notes} |"
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="OpenAPI -> Markdown docs.")
+    parser.add_argument("spec", type=Path, help="OpenAPI YAML file")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="Write Markdown here (default: stdout)")
+    args = parser.parse_args(argv)
+
+    try:
+        spec = yaml.safe_load(args.spec.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"error: cannot load spec: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(spec, dict) or "openapi" not in spec:
+        print("error: not an OpenAPI document", file=sys.stderr)
+        return 2
+
+    markdown = render_markdown(spec)
+    if args.out:
+        args.out.write_text(markdown, encoding="utf-8")
+        print(f"wrote {args.out} ({len(markdown)} chars)")
+    else:
+        print(markdown)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+Demo output (truncated to the first endpoint; the full document covers all
+operations and schemas):
+
+\begin{minted}{text}
+# Northwind Robotics Fleet API
+
+**Version:** 2.4.0
+
+Manages the Northwind Robotics synthetic robot fleet: registration, health telemetry summaries, and decommissioning workflows.
+
+- Server: `https://api.northwind-robotics.example/fleet/v2` (Production (synthetic))
+
+## Endpoints
+
+### `GET /robots`
+
+List robots in the fleet
+
+| Name | In | Required | Type |
+|---|---|---|---|
+| `limit` | query | no | integer |
+| `cursor` | query | no | string |
+
+| Status | Meaning | Body |
+|---|---|---|
+| `200` | A page of robots | application/json -> RobotPage |
+| `default` | Unexpected error | application/problem+json -> Problem |
+
+Example:
+
+```json
+{
+  "items": [
+    {
+(...)
+\end{minted}
+
+\subsection{Listing 20.5 --- \texttt{ttfc\_funnel.py}: Activation Analytics}
+\label{sec:ch20-listing-ttfc}
+
+The funnel analyzer reads a JSONL event log (one synthetic onboarding
+event per line), reconstructs per-developer journeys, and reports the
+ordered funnel with per-step and cumulative conversion plus median
+inter-step gaps. It is defensive by design: malformed lines are counted
+and skipped, non-funnel events (like \texttt{docs\_viewed}) are ignored,
+and a developer is only counted at a step if all prior steps are present
+--- out-of-order telemetry cannot fabricate conversions. The fixture (head
+shown below) holds 222 events for 60 synthetic developers:
+
+\begin{minted}{text}
+{"ts": "2026-03-02T09:07:00Z", "developer_id": "dev-001", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:09:00Z", "developer_id": "dev-001", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:14:00Z", "developer_id": "dev-002", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:16:00Z", "developer_id": "dev-002", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:21:00Z", "developer_id": "dev-003", "event": "signup", "channel": "conference"}
+{"ts": "2026-03-02T09:23:00Z", "developer_id": "dev-003", "event": "docs_viewed", "page": "quickstart"}
+{"ts": "2026-03-02T09:28:00Z", "developer_id": "dev-004", "event": "signup", "channel": "docs-site"}
+{"ts": "2026-03-02T09:30:00Z", "developer_id": "dev-004", "event": "docs_viewed", "page": "quickstart"}
+(...)
+\end{minted}
+
+\begin{minted}{python}
+r"""ttfc_funnel.py -- onboarding funnel and time-to-first-call analytics.
+
+Reads a JSONL event log (one synthetic onboarding event per line) and
+computes the activation funnel
+
+    signup -> key_issued -> first_call -> first_200
+
+with per-step absolute counts, step-to-step conversion, and median
+elapsed minutes between steps. TTFC is reported as the median time from
+signup to first_200 -- the first moment a developer received a *useful*
+response.
+
+Usage (PowerShell):
+    python ttfc_funnel.py .\fixtures\onboarding_events.jsonl
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+FUNNEL_STEPS = ("signup", "key_issued", "first_call", "first_200")
+
+
+@dataclass
+class DeveloperJourney:
+    """First occurrence of each funnel step for one developer."""
+
+    first_seen: dict[str, datetime] = field(default_factory=dict)
+
+
+def parse_ts(raw: str) -> datetime:
+    return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_journeys(path: Path) -> tuple[dict[str, DeveloperJourney], int]:
+    """Build per-developer journeys; returns (journeys, skipped_lines)."""
+    journeys: dict[str, DeveloperJourney] = {}
+    skipped = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                dev = str(record["developer_id"])
+                event = str(record["event"])
+                ts = parse_ts(str(record["ts"]))
+            except (ValueError, KeyError, TypeError):
+                skipped += 1  # never let one bad line kill the report
+                continue
+            if event not in FUNNEL_STEPS:
+                continue  # telemetry like docs_viewed is not a funnel step
+            journey = journeys.setdefault(dev, DeveloperJourney())
+            journey.first_seen.setdefault(event, ts)
+    return journeys, skipped
+
+
+def reached(journeys: dict[str, DeveloperJourney], step: str) -> set[str]:
+    """Developers who completed this step AND every step before it."""
+    index = FUNNEL_STEPS.index(step)
+    required = FUNNEL_STEPS[: index + 1]
+    return {
+        dev
+        for dev, journey in journeys.items()
+        if all(s in journey.first_seen for s in required)
+    }
+
+
+def median_gap_minutes(
+    journeys: dict[str, DeveloperJourney], start: str, end: str
+) -> float | None:
+    gaps = [
+        (j.first_seen[end] - j.first_seen[start]).total_seconds() / 60.0
+        for j in journeys.values()
+        if start in j.first_seen and end in j.first_seen
+    ]
+    return statistics.median(gaps) if gaps else None
+
+
+def build_report(journeys: dict[str, DeveloperJourney]) -> list[str]:
+    lines = [
+        "Onboarding funnel (unique developers, ordered steps)",
+        "=" * 68,
+        f"{'step':<14}{'reached':>9}{'step conv.':>12}{'cum. conv.':>12}"
+        f"{'median gap (min)':>18}",
+        "-" * 68,
+    ]
+    total = len(reached(journeys, FUNNEL_STEPS[0])) or 1  # avoid div-by-zero
+    previous_count: int | None = None
+    previous_step: str | None = None
+    for step_name in FUNNEL_STEPS:
+        count = len(reached(journeys, step_name))
+        step_conv = (
+            100.0 * count / previous_count
+            if previous_count
+            else 100.0
+        )
+        gap = (
+            median_gap_minutes(journeys, previous_step, step_name)
+            if previous_step
+            else None
+        )
+        lines.append(
+            f"{step_name:<14}{count:>9}{step_conv:>11.1f}%"
+            f"{100.0 * count / total:>11.1f}%"
+            f"{('n/a' if gap is None else f'{gap:.0f}'):>18}"
+        )
+        previous_count, previous_step = count, step_name
+
+    ttfc = median_gap_minutes(journeys, "signup", "first_200")
+    lines += [
+        "-" * 68,
+        f"TTFC (median signup -> first_200): "
+        f"{('n/a' if ttfc is None else f'{ttfc:.0f} minutes')} "
+        f"({('' if ttfc is None else f'{ttfc / 60:.1f} h')})",
+    ]
+    return lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="TTFC funnel analytics.")
+    parser.add_argument("events", type=Path, help="JSONL onboarding events")
+    args = parser.parse_args(argv)
+
+    try:
+        journeys, skipped = load_journeys(args.events)
+    except OSError as exc:
+        print(f"error: cannot read events: {exc}", file=sys.stderr)
+        return 2
+    if not journeys:
+        print("error: no usable events found", file=sys.stderr)
+        return 2
+
+    for line in build_report(journeys):
+        print(line)
+    if skipped:
+        print(f"note: skipped {skipped} malformed line(s)", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+The printed funnel table is the artifact you put in front of the DX
+review board:
+
+\begin{minted}{text}
+Onboarding funnel (unique developers, ordered steps)
+====================================================================
+step            reached  step conv.  cum. conv.  median gap (min)
+--------------------------------------------------------------------
+signup               60      100.0%      100.0%               n/a
+key_issued           45       75.0%       75.0%                69
+first_call           33       73.3%       55.0%               194
+first_200            24       72.7%       40.0%                93
+--------------------------------------------------------------------
+TTFC (median signup -> first_200): 431 minutes (7.2 h)
+\end{minted}
+
+Read it as a product manager: 75\% of signups obtain a key in a median 69
+minutes, but only 73\% of those make a first call, and the
+key$\rightarrow$call gap (194 minutes median) is the largest in the funnel
+--- the quickstart, not key issuance, is where Northwind Robotics loses
+developers. One instrumentation subtlety: \textsf{first call} and
+\textsf{first 200} are separate steps because an 11\% slice of first calls
+in this fixture return 401 (expired sandbox keys), which is exactly the
+kind of friction TTFC exists to expose.
+
+\subsection{Listing 20.6 --- \texttt{deprecation\_tracker.py}: Campaign Management}
+\label{sec:ch20-listing-deprecation}
+
+The tracker models a campaign as a registry --- API, version, replacement,
+announce and kill dates, and a consumer census with per-consumer status,
+traffic, and notes --- and renders two artifacts: the retirement-readiness
+report (residual traffic, blockers, verdict) and the full communication
+schedule derived from the kill date. The exit code is 1 while any
+non-migrated consumer still has traffic, so the retirement runbook can be
+gated in CI. The registry (note the last entry --- a shadow integration
+found by gateway telemetry, with no owner in the catalog):
+
+\begin{minted}{yaml}
+# Synthetic deprecation campaign registry for the legacy Fleet API v1.
+api: fleet
+version: v1
+replacement: v2
+announce_date: "2026-03-02"
+kill_date: "2026-09-01"   # hard sunset: version returns HTTP 410 after this
+consumers:
+  - name: fleet-dashboard
+    owner: team-telemetry
+    tier: internal
+    status: migrated
+    weekly_calls: 0
+    last_contact: "2026-05-04"
+    notes: Cut over to v2 in sprint 12.
+  - name: maintenance-planner
+    owner: team-operations
+    tier: internal
+    status: in_progress
+    weekly_calls: 8200
+    last_contact: "2026-06-29"
+    notes: Blocked on v2 bulk endpoint; ETA 2026-08-01.
+  - name: partner-robologix
+    owner: external:robologix
+    tier: external
+    status: in_progress
+    weekly_calls: 41000
+    last_contact: "2026-06-21"
+    notes: Contracted migration window ends 2026-08-15.
+  - name: warehouse-scanner
+    owner: team-warehouse
+    tier: internal
+    status: not_started
+    weekly_calls: 1300
+    last_contact: "2026-04-10"
+    notes: Team dissolved; ownership transferred to team-fleet-platform.
+  - name: legacy-billing-hook
+    owner: unknown
+    tier: internal
+    status: unresponsive
+    weekly_calls: 95
+    last_contact: null
+    notes: Discovered via gateway telemetry; no owner in catalog. Shadow API!
+\end{minted}
+
+\begin{minted}{python}
+r"""deprecation_tracker.py -- retirement readiness + communication schedule.
+
+Reads a deprecation campaign registry (YAML) and produces:
+
+  1. a retirement-readiness report (per consumer, plus traffic-weighted
+     migration percentage), and
+  2. the communication schedule relative to the kill date
+     (announcement, reminders, brownouts, sunset, post-sunset audit).
+
+The report is deterministic: the evaluation date is supplied explicitly
+(--today) so CI output and this book's examples never drift.
+
+Usage (PowerShell):
+    python deprecation_tracker.py .\fixtures\deprecation_registry.yaml --today 2026-07-15
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+# Statuses that block retirement even at zero reported traffic.
+ACTIVE_STATUSES = ("in_progress", "not_started")
+
+# Communication cadence, as offsets (in days) from the kill date.
+# Brownouts (scheduled short 410 windows) are the escape hatch that flushes
+# out consumers who ignore email -- see Chapters 9 and 14.
+CADENCE: tuple[tuple[int, str, str], ...] = (
+    (-180, "announcement", "all consumers: email + changelog + portal banner"),
+    (-90, "reminder", "all consumers not yet migrated"),
+    (-60, "reminder", "non-migrated consumers + their owning teams' leads"),
+    (-30, "brownout #1", "1-hour 410 window, business hours, with notice"),
+    (-14, "final warning", "non-migrated consumers, escalation to sponsors"),
+    (-7, "brownout #2", "4-hour 410 window with notice"),
+    (0, "sunset", "permanent HTTP 410 + final changelog entry"),
+    (7, "post-sunset audit", "gateway log sweep for residual 410 traffic"),
+)
+
+
+@dataclass(frozen=True)
+class Consumer:
+    name: str
+    owner: str
+    tier: str
+    status: str
+    weekly_calls: int
+    notes: str = ""
+
+
+def load_registry(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or "consumers" not in data:
+        raise ValueError("registry must contain a 'consumers' list")
+    return data
+
+
+def parse_consumers(registry: dict[str, Any]) -> list[Consumer]:
+    consumers = []
+    for raw in registry["consumers"]:
+        consumers.append(
+            Consumer(
+                name=str(raw["name"]),
+                owner=str(raw.get("owner", "unknown")),
+                tier=str(raw.get("tier", "internal")),
+                status=str(raw.get("status", "not_started")),
+                weekly_calls=int(raw.get("weekly_calls", 0)),
+                notes=str(raw.get("notes", "")),
+            )
+        )
+    return consumers
+
+
+def readiness_report(
+    registry: dict[str, Any], consumers: list[Consumer], today: date
+) -> list[str]:
+    kill = date.fromisoformat(str(registry["kill_date"]))
+    # Migrated consumers no longer call v1, so the meaningful readiness
+    # metric is residual traffic: calls still arriving from consumers that
+    # have NOT finished migrating.
+    residual = [c for c in consumers if c.status != "migrated"]
+    residual_calls = sum(c.weekly_calls for c in residual)
+
+    lines = [
+        f"Retirement readiness: {registry['api']} {registry['version']} "
+        f"(replacement: {registry.get('replacement', 'n/a')})",
+        "=" * 72,
+        f"today: {today.isoformat()}   kill date: {kill.isoformat()}   "
+        f"days remaining: {(kill - today).days}",
+        "",
+        f"{'consumer':<22}{'tier':<10}{'status':<14}{'calls/wk':>10}  owner",
+        "-" * 72,
+    ]
+    for c in sorted(consumers, key=lambda c: -c.weekly_calls):
+        lines.append(
+            f"{c.name:<22}{c.tier:<10}{c.status:<14}{c.weekly_calls:>10}  "
+            f"{c.owner}"
+        )
+    lines += [
+        "-" * 72,
+        f"residual v1 traffic: {residual_calls} calls/wk across "
+        f"{len(residual)} non-migrated consumer(s)",
+        "",
+    ]
+
+    blockers = [
+        c for c in consumers
+        if c.status in ACTIVE_STATUSES
+        or (c.status == "unresponsive" and c.weekly_calls > 0)
+    ]
+    if blockers:
+        lines.append("verdict: NOT READY TO RETIRE -- blockers:")
+        for c in blockers:
+            lines.append(f"  - {c.name} ({c.status}, {c.weekly_calls} "
+                         f"calls/wk): {c.notes}")
+    else:
+        lines.append("verdict: READY TO RETIRE -- no live traffic on "
+                     "non-migrated consumers.")
+    return lines
+
+
+def schedule_report(registry: dict[str, Any]) -> list[str]:
+    kill = date.fromisoformat(str(registry["kill_date"]))
+    lines = [
+        "",
+        f"Communication schedule (kill date {kill.isoformat()})",
+        "-" * 72,
+        f"{'date':<12}{'T-minus':>9}  action / audience",
+        "-" * 72,
+    ]
+    for offset, action, audience in CADENCE:
+        when = kill + timedelta(days=offset)
+        label = f"T{offset:+d}" if offset else "T-0"
+        lines.append(f"{when.isoformat():<12}{label:>9}  {action}: {audience}")
+    return lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Deprecation campaign tracker.")
+    parser.add_argument("registry", type=Path, help="campaign registry YAML")
+    parser.add_argument(
+        "--today",
+        required=True,
+        help="evaluation date, ISO format (kept explicit for determinism)",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        today = date.fromisoformat(args.today)
+    except ValueError:
+        print("error: --today must be ISO format, e.g. 2026-07-15",
+              file=sys.stderr)
+        return 2
+    try:
+        registry = load_registry(args.registry)
+        consumers = parse_consumers(registry)
+    except (OSError, ValueError, KeyError, yaml.YAMLError) as exc:
+        print(f"error: cannot parse registry: {exc}", file=sys.stderr)
+        return 2
+
+    for line in readiness_report(registry, consumers, today):
+        print(line)
+    for line in schedule_report(registry):
+        print(line)
+    # Non-zero exit while blocked so CI can gate the retirement runbook.
+    blocked = any(
+        c.status in ACTIVE_STATUSES
+        or (c.status == "unresponsive" and c.weekly_calls > 0)
+        for c in consumers
+    )
+    return 1 if blocked else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+\begin{minted}{text}
+Retirement readiness: fleet v1 (replacement: v2)
+========================================================================
+today: 2026-07-15   kill date: 2026-09-01   days remaining: 48
+
+consumer              tier      status          calls/wk  owner
+------------------------------------------------------------------------
+partner-robologix     external  in_progress        41000  external:robologix
+maintenance-planner   internal  in_progress         8200  team-operations
+warehouse-scanner     internal  not_started         1300  team-warehouse
+legacy-billing-hook   internal  unresponsive          95  unknown
+fleet-dashboard       internal  migrated               0  team-telemetry
+------------------------------------------------------------------------
+residual v1 traffic: 50595 calls/wk across 4 non-migrated consumer(s)
+
+verdict: NOT READY TO RETIRE -- blockers:
+  - maintenance-planner (in_progress, 8200 calls/wk): Blocked on v2 bulk endpoint; ETA 2026-08-01.
+  - partner-robologix (in_progress, 41000 calls/wk): Contracted migration window ends 2026-08-15.
+  - warehouse-scanner (not_started, 1300 calls/wk): Team dissolved; ownership transferred to team-fleet-platform.
+  - legacy-billing-hook (unresponsive, 95 calls/wk): Discovered via gateway telemetry; no owner in catalog. Shadow API!
+
+Communication schedule (kill date 2026-09-01)
+------------------------------------------------------------------------
+date          T-minus  action / audience
+------------------------------------------------------------------------
+2026-03-05      T-180  announcement: all consumers: email + changelog + portal banner
+2026-06-03       T-90  reminder: all consumers not yet migrated
+2026-07-03       T-60  reminder: non-migrated consumers + their owning teams' leads
+2026-08-02       T-30  brownout #1: 1-hour 410 window, business hours, with notice
+2026-08-18       T-14  final warning: non-migrated consumers, escalation to sponsors
+2026-08-25        T-7  brownout #2: 4-hour 410 window with notice
+2026-09-01        T-0  sunset: permanent HTTP 410 + final changelog entry
+2026-09-08        T+7  post-sunset audit: gateway log sweep for residual 410 traffic
+\end{minted}
+
+\subsection{Listing 20.7 --- \texttt{catalog\_manifest.py}: Backstage-Style Entries}
+\label{sec:ch20-listing-catalog}
+
+The manifest generator scans a directory of OpenAPI specs and emits one
+catalog document per API, pulling lifecycle state and owner from the
+spec's \texttt{info.x-lifecycle} block so the catalog is generated from
+the contract of record rather than curated by hand. Non-OpenAPI files in
+the folder are skipped with a warning, not a crash.
+
+\begin{minted}{python}
+r"""catalog_manifest.py -- generate Backstage-style API catalog entries.
+
+Scans a directory of OpenAPI YAML specs and emits one catalog manifest
+document per spec (apiVersion backstage.io/v1alpha1, kind: API), with
+ownership and lifecycle read from the spec's info.x-lifecycle block so
+the catalog, like the docs, is generated from the contract rather than
+maintained by hand.
+
+Usage (PowerShell):
+    python catalog_manifest.py .\specs
+    python catalog_manifest.py .\specs --out catalog-apis.yaml
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+DEFAULT_OWNER = "platform-team"
+DEFAULT_LIFECYCLE = "production"
+
+
+def slugify(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug or "unnamed-api"
+
+
+def manifest_for(spec_path: Path, spec: dict[str, Any], root: Path) -> dict[str, Any]:
+    info = spec.get("info") or {}
+    lifecycle_block = info.get("x-lifecycle") or {}
+    rel_path = spec_path.relative_to(root.parent).as_posix()
+    return {
+        "apiVersion": "backstage.io/v1alpha1",
+        "kind": "API",
+        "metadata": {
+            "name": slugify(str(info.get("title", spec_path.stem))),
+            "description": " ".join(
+                str(info.get("description", "")).split()
+            )[:200],
+            "annotations": {
+                "northwind/spec-version": str(info.get("version", "0.0.0")),
+            },
+        },
+        "spec": {
+            "type": "openapi",
+            "lifecycle": str(lifecycle_block.get("state", DEFAULT_LIFECYCLE)),
+            "owner": str(lifecycle_block.get("owner", DEFAULT_OWNER)),
+            "definition": {"$text": f"./{rel_path}"},
+        },
+    }
+
+
+def scan(spec_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    manifests: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    candidates = sorted(
+        [*spec_dir.glob("*.yaml"), *spec_dir.glob("*.yml")]
+    )
+    if not candidates:
+        warnings.append(f"no .yaml/.yml files found in {spec_dir}")
+    for spec_path in candidates:
+        try:
+            spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            warnings.append(f"{spec_path.name}: YAML parse error: {exc}")
+            continue
+        if not isinstance(spec, dict) or "openapi" not in spec:
+            warnings.append(f"{spec_path.name}: not an OpenAPI doc, skipped")
+            continue
+        manifests.append(manifest_for(spec_path, spec, spec_dir))
+    return manifests, warnings
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Emit Backstage-style API manifests for a spec folder."
+    )
+    parser.add_argument("spec_dir", type=Path, help="directory of OpenAPI YAML")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="write manifests here (default: stdout)")
+    args = parser.parse_args(argv)
+
+    if not args.spec_dir.is_dir():
+        print(f"error: not a directory: {args.spec_dir}", file=sys.stderr)
+        return 2
+
+    manifests, warnings = scan(args.spec_dir)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+    text = "---\n" + "---\n".join(
+        yaml.safe_dump(m, sort_keys=False) for m in manifests
+    )
+    if args.out:
+        args.out.write_text(text, encoding="utf-8")
+        print(f"wrote {len(manifests)} manifest(s) to {args.out}")
+    else:
+        print(text, end="")
+    return 0 if manifests else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+\end{minted}
+
+\begin{minted}{text}
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: northwind-robotics-fleet-api
+  description: 'Manages the Northwind Robotics synthetic robot fleet: registration,
+    health telemetry summaries, and decommissioning workflows.'
+  annotations:
+    northwind/spec-version: 2.4.0
+spec:
+  type: openapi
+  lifecycle: published
+  owner: team-fleet-platform
+  definition:
+    $text: ./specs/northwind_robots.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: northwind-robotics-telemetry-api
+  description: Batch ingestion and querying of synthetic robot telemetry streams (motor
+    current, battery voltage, wheel odometry).
+  annotations:
+    northwind/spec-version: 1.1.0
+spec:
+  type: openapi
+  lifecycle: published
+  owner: team-telemetry
+  definition:
+    $text: ./specs/northwind_telemetry.yaml
+\end{minted}
+
+\subsection{Listing 20.8 --- Smoke Tests for the Platform Tools}
+\label{sec:ch20-listing-smoke}
+
+A compact suite pins the cross-tool behaviors the lab relies on: docs
+render classification labels, the funnel counts 60 developers and computes
+the median TTFC of the fixture, malformed event lines are tolerated, the
+tracker flags the shadow consumer and renders the T-0 sunset, and the
+catalog scan emits one entry per spec.
+
+\begin{minted}{python}
+"""Smoke tests for the docs, funnel, deprecation, and catalog tools."""
+
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+import yaml
+
+import catalog_manifest
+import deprecation_tracker
+import docs_generator
+import ttfc_funnel
+
+HERE = Path(__file__).parent
+
+
+def test_docs_generator_renders_endpoints_and_schemas() -> None:
+    spec = yaml.safe_load(
+        (HERE / "specs" / "northwind_robots.yaml").read_text(encoding="utf-8")
+    )
+    md = docs_generator.render_markdown(spec)
+    assert "# Northwind Robotics Fleet API" in md
+    assert "### `GET /robots`" in md
+    assert "application/problem+json -> Problem" in md
+    assert "[classification: internal]" in md  # data classification surfaced
+
+
+def test_funnel_counts_and_ttfc() -> None:
+    journeys, skipped = ttfc_funnel.load_journeys(
+        HERE / "fixtures" / "onboarding_events.jsonl"
+    )
+    assert skipped == 0
+    assert len(journeys) == 60
+    assert len(ttfc_funnel.reached(journeys, "first_200")) == 24
+    ttfc = ttfc_funnel.median_gap_minutes(journeys, "signup", "first_200")
+    assert ttfc == pytest.approx(431.0)
+
+
+def test_funnel_survives_malformed_lines(tmp_path: Path) -> None:
+    bad = tmp_path / "events.jsonl"
+    bad.write_text(
+        '{"ts": "2026-03-02T09:00:00Z", "developer_id": "d1", '
+        '"event": "signup"}\nnot json at all\n',
+        encoding="utf-8",
+    )
+    journeys, skipped = ttfc_funnel.load_journeys(bad)
+    assert skipped == 1 and len(journeys) == 1
+
+
+def test_deprecation_tracker_blocked_and_schedule() -> None:
+    registry = deprecation_tracker.load_registry(
+        HERE / "fixtures" / "deprecation_registry.yaml"
+    )
+    consumers = deprecation_tracker.parse_consumers(registry)
+    report = "\n".join(
+        deprecation_tracker.readiness_report(
+            registry, consumers, today=date(2026, 7, 15)
+        )
+    )
+    assert "NOT READY TO RETIRE" in report
+    assert "legacy-billing-hook" in report  # the shadow API shows up
+    schedule = "\n".join(deprecation_tracker.schedule_report(registry))
+    assert "T-0" in schedule and "brownout #2" in schedule
+
+
+def test_catalog_manifest_scans_both_specs() -> None:
+    manifests, warnings = catalog_manifest.scan(HERE / "specs")
+    assert warnings == []
+    names = {m["metadata"]["name"] for m in manifests}
+    assert names == {
+        "northwind-robotics-fleet-api",
+        "northwind-robotics-telemetry-api",
+    }
+    assert all(m["kind"] == "API" for m in manifests)
+    assert manifests[0]["spec"]["owner"].startswith("team-")
+\end{minted}
+
+Full suite:
+
+\begin{minted}{text}
+..............                                                           [100%]
+14 passed in 0.59s
+\end{minted}
+
+%% ----------------------------------------------------------------------------
+\section{Common Pitfalls \& Anti-Patterns}
+\label{sec:ch20-pitfalls}
+
+\subsection{Governance as Gatekeeping Theater}
+\label{pit:theater}
+A review board that meets fortnightly, demands slide decks, and rules on
+naming by taste is not governance; it is theater with a queue. Symptoms:
+review wait times measured in weeks, ``shadow reviews'' in hallway
+conversations, teams shipping unreviewed APIs and begging forgiveness.
+The fix is to move everything mechanical into lint (advisory first,
+blocking later), cap review scope at judgment calls, and give the review
+itself an SLA --- a gate slower than the bypass will be bypassed.
+
+\subsection{Style Guide Without Linter Enforcement}
+\label{pit:noenforce}
+A wiki page of conventions decays the day it is published; enforcement
+falls on senior reviewers, who become bottlenecks and then, inevitably,
+inconsistent ones --- rule application becomes a function of which
+reviewer you drew. If a rule cannot be expressed as executable data, the
+honest options are to drop it or to reclassify it as advisory guidance.
+Rules-as-data plus CI exit codes is the only enforcement mechanism that
+scales past a handful of teams.
+
+\subsection{The Portal Nobody Can Search}
+\label{pit:portal}
+A portal whose catalog is hand-curated decays into a museum: half the
+entries are stale, search ranks marketing pages above reference docs, and
+developers learn to ask in chat instead --- after which the portal team
+declares ``developers don't use portals.'' Generate catalog entries from
+the spec repo (Listing~20.7), render docs from the spec (Listing~20.4),
+and instrument search queries with zero results; an unsearchable portal
+is worse than none because it teaches developers to stop looking.
+
+\subsection{SDKs Promised but Unmaintained}
+\label{pit:sdk}
+Announcing ``SDKs for seven languages'' at launch is a mortgage: every
+spec change, generator bug, and language release comes due, in public,
+under your brand. An unmaintained SDK with stale models teaches consumers
+that your API cannot be trusted --- worse than no SDK, because the failure
+arrives wearing your logo. Generate only what CI regenerates and
+publishes automatically, and sunset SDKs with the same campaign
+discipline as APIs.
+
+\subsection{SLA Looser Than SLO, Reversed}
+\label{pit:sla}
+Promising a 99.95\% SLA while engineering to a 99.9\% SLO means the
+contract runs out of budget before the team does: customers hit breach
+before your alerting policy fires, and every incident becomes a legal
+event. The invariant is SLA~$<$~SLO, with the gap sized as reaction time
+in error-budget terms~\cite{beyer2016sre}. If sales demands SLA~$\geq$
+SLO, the correct response is to raise the SLO \emph{and the engineering
+investment}, not to sign the number.
+
+\subsection{Sunsetting Without Telemetry}
+\label{pit:notelemetry}
+Announcing a kill date from a spreadsheet of ``known consumers'' retires
+only the consumers you already knew about. The first brownout then
+pages a team nobody mapped to an API key --- or worse, a production
+workload whose owner left the company two reorganizations ago. Consumer
+discovery \emph{must} start from gateway telemetry; the registry of
+declared consumers is the escalation directory, not the census. No
+census, no kill date.
+
+\subsection{Docs Drifting From Spec}
+\label{pit:docs-drift}
+Hand-maintained reference docs diverge from the contract on the first
+hotfix, and every divergence costs a consumer hours and costs you trust.
+Docs-as-code (generate from OpenAPI, deploy from CI) makes drift a build
+failure instead of a slow betrayal; the linter can even enforce that
+every operation carries a \texttt{summary} so the generated docs are
+never vacuous.
+
+\begin{warningbox}
+The compound anti-pattern is \textbf{governance without telemetry}:
+style rules nobody measures, a portal nobody instruments, deprecations
+announced to a census nobody verified. Each pitfall above is survivable
+alone; together they produce the organization that discovers its real
+API surface during an incident. If you fund only two things from this
+chapter, fund the gateway consumer census and the TTFC funnel --- they
+are the instruments every other control depends on.
+\end{warningbox}
+
+%% ----------------------------------------------------------------------------
+\section{Hands-On Production Lab \& Real-World Case Study}
+\label{sec:ch20-lab}
+
+\subsection{Lab: Stand Up the Mini Platform}
+Work from \texttt{code\textbackslash{}ch20\textbackslash{}} in PowerShell.
+Expected duration: 60--90 minutes.
+
+\begin{enumerate}
+  \item \textbf{Install and baseline.} \texttt{pip install -r
+        requirements.txt}, then \texttt{python -m pytest -q} --- all 14
+        tests pass.
+  \item \textbf{Lint the fleet.} Run \texttt{mini\_spectral.py} against
+        both specs in \texttt{specs\textbackslash{}} and the
+        non-compliant fixture; confirm exit codes 0, 0, 1 (use
+        \texttt{\$LASTEXITCODE}). Identify which rule catches the most
+        violations.
+  \item \textbf{Author a rule.} Add a warn-severity rule
+        \texttt{summary-required} to \texttt{ruleset.yaml} (hint: new rule
+        kind not needed --- extend \texttt{check\_casing}-style iteration
+        with a \texttt{require-operation-field} kind, or reuse
+        \texttt{problem-json-errors} as a template). Verify the
+        non-compliant fixture still exits 1 and the rule appears in
+        output.
+  \item \textbf{Generate docs.} Render the fleet spec with
+        \texttt{docs\_generator.py --out fleet-api.md}; confirm the
+        \texttt{x-classification} label appears in the Robot schema
+        table.
+  \item \textbf{Publish the catalog.} Run
+        \texttt{catalog\_manifest.py .\textbackslash{}specs --out catalog-apis.yaml}
+        and verify two entries with correct owners and lifecycle states.
+  \item \textbf{Measure activation.} Run \texttt{ttfc\_funnel.py} on the
+        fixture; write one sentence identifying the weakest funnel step
+        and one DX investment that targets it.
+  \item \textbf{Run the campaign.} Execute the deprecation tracker at
+        \texttt{--today 2026-07-15} (expect exit 1, blocked) and again at
+        \texttt{--today 2026-09-02} after editing all consumers to
+        \texttt{migrated} (expect exit 0). Note how the communication
+        schedule dates shift with the kill date.
+\end{enumerate}
+
+\subsection{Case Study: The Shadow API Nobody Owned}
+\begin{examplebox}
+\textbf{Northwind Robotics, incident INC-2291 (synthetic but typical).}
+At 14:07 on a Tuesday, the fulfillment team deploys a routine change to
+the \texttt{/shipments} service. Eight minutes later, checkout error
+rates spike --- but checkout never calls \texttt{/shipments}. Forty
+minutes of war-room archaeology later, gateway telemetry reveals the
+coupling: an undocumented endpoint, \texttt{/shipments/internal-quote},
+deployed eighteen months earlier by a contractor, serving 3{,}000 calls a
+day from a billing integration whose owner field in the wiki pointed to a
+team dissolved in the last reorganization. No catalog entry, no linter
+history (the spec was never in the spec repo), no SLO, no on-call ---
+and, fatally, no entry in the impact-assessment step of the fulfillment
+team's change checklist, because as far as the platform was concerned the
+endpoint did not exist.
+
+The postmortem actions read like this chapter's table of contents:
+(1)~diff observed gateway routes against the catalog weekly and quarantine
+unregistered traffic behind an explicit registration step; (2)~require a
+catalog entry --- and therefore an owner --- as an \emph{entry criterion
+for} \textsf{published}; (3)~run the deprecation tracker's census step
+against telemetry, not the wiki; (4)~treat ``unknown owner with nonzero
+traffic'' as a severity-2 finding in its own right. The endpoint was
+eventually owned, spec'd, linted, and published properly; the campaign to
+retire it took four months and appears, disguised, as
+\texttt{legacy-billing-hook} in Listing~20.6's registry.
+\end{examplebox}
+
+The lab's through-line is the loop of Figure~\ref{fig:ch20-loop}: lint and
+catalog generation are the outward flow of governance; the funnel and the
+campaign census are the telemetry flowing back. Running them side by side
+makes the feedback tangible in under two hours.
+
+%% ----------------------------------------------------------------------------
+\section{Self-Assessment Exercises \& Deep-Dive Questions}
+\label{sec:ch20-exercises}
+
+\begin{enumerate}
+  \item \textbf{State machine fluency.} For each event, name the
+        transition and the evidence that must accompany it: (a)~a team
+        opens a PR adding a new endpoint to a published spec;
+        (b)~security flags an unauthenticated endpoint in a spec under
+        review; (c)~a brownout reveals an unknown consumer three weeks
+        before the kill date.
+  \item \textbf{Rule authoring.} Write (in YAML, using the Listing~20.2
+        rule kinds) a rule that requires every \texttt{POST} operation to
+        document a \texttt{201} or \texttt{202} response. Which kind did
+        you need, and what gap in the kind taxonomy did you find?
+  \item \textbf{Severity economics.} Argue both sides: should
+        \texttt{pagination-required-on-lists} be error or warn severity
+        for a company at 40 APIs? At 400?
+  \item \textbf{Funnel diagnosis.} The fixture's key$\rightarrow$first-call
+        step converts at 73.3\% with a 194-minute median gap. Propose two
+        distinct hypotheses and the instrument (not the fix) you would add
+        to distinguish them.
+  \item \textbf{SLA math.} An API measures 99.93\% monthly success. Its
+        SLO is 99.9\%, its SLA 99.5\%. Compute both error budgets
+        remaining. A change would spend another 0.05\%; which budget
+        governs the decision and why?
+  \item \textbf{Design the exception.} Draft the one-paragraph ADR for
+        exempting a legacy partner endpoint from
+        \texttt{problem-json-errors} for six months. What makes the
+        exemption time-boxed and auditable rather than permanent?
+  \item \textbf{Docs drift forensics.} Your generated docs and your
+        hand-written quickstart disagree about a parameter name. Trace
+        the failure: which artifact is wrong, which process allowed it,
+        and what lint rule prevents recurrence?
+  \item \textbf{Campaign design.} Using Listing~20.6's cadence, schedule
+        a campaign for an API announced today with a 6-month notice
+        period, one contracted enterprise consumer, and twelve internal
+        consumers. Which cadence rows change for the enterprise consumer?
+  \item \textbf{Shadow-API hunt.} Describe the exact telemetry query
+        (fields, joins, thresholds) that surfaces an unregistered
+        endpoint with real traffic, and the runbook for the first 24
+        hours after it fires.
+  \item \textbf{Platform ROI.} Your platform team of six costs \$1.4M/year.
+        Construct the strongest honest one-slide ROI case using only
+        adoption, TTFC, and incident-reduction evidence --- and identify
+        the weakest assumption in your own slide.
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{Interview Q\&A Vault}
+\label{sec:ch20-interviews}
+
+\begin{enumerate}[label=\textbf{Q\arabic*.}, leftmargin=1.7cm]
+  \item \emph{[junior]} \textbf{Name the API lifecycle states and what
+        fundamentally changes between \textsf{published} and
+        \textsf{deprecated}.} Design, review, published (operate),
+        deprecated, sunset, retired. At deprecation the contract freezes
+        --- no new features, security fixes only --- the provider starts
+        signaling (\texttt{Deprecation}/\texttt{Sunset} headers), and a
+        dated migration campaign begins; the API still serves traffic
+        under its SLA until the kill date.
+  \item \emph{[junior]} \textbf{What belongs in an API style guide?}
+        Only consumer-observable surfaces: naming, pagination, error
+        shapes, authentication, versioning, idempotency, rate-limit
+        signaling. Internal implementation choices stay with the team ---
+        standardizing everything guarantees the guide is routed around.
+  \item \emph{[junior]} \textbf{What is Spectral?} An open-source linter
+        for OpenAPI: rulesets written as YAML data target parts of the
+        spec (JSONPath-ish) with functions (casing, pattern, truthy,
+        custom), run in CI so style-guide compliance is checked by
+        machines, not reviewer memory.
+  \item \emph{[junior]} \textbf{What is a developer portal?} The
+        self-service front door: searchable API catalog, rendered docs,
+        key issuance, sandbox access, status, and changelog. Its
+        foundation is a machine-generated catalog of record; a
+        hand-maintained portal decays into a museum.
+  \item \emph{[junior]} \textbf{What is docs-as-code?} Documentation
+        generated from the contract of record (OpenAPI), versioned and
+        deployed by the same pipeline as the spec. Humans edit the spec;
+        machines edit the docs --- so reference docs can never silently
+        diverge from what the API does.
+  \item \emph{[junior]} \textbf{What is TTFC and how do you reduce it?}
+        Time-to-first-call: median elapsed time from signup to first
+        successful (2xx) call. Reduce it by attacking the funnel step
+        with the worst conversion: self-service instant keys
+        (signup$\rightarrow$key), a 15-minute quickstart and sandbox
+        (key$\rightarrow$call), and actionable error messages
+        (call$\rightarrow$200). Instrument first; never optimize the
+        funnel blind.
+  \item \emph{[junior]} \textbf{SLA vs SLO vs SLI --- relationship?}
+        SLI is the measurement, SLO the internal target on it, SLA the
+        contractual promise with penalties. Invariant: SLA strictly
+        looser than SLO, so the error-budget gap gives the team room to
+        detect and fix before breaching the contract~\cite{beyer2016sre}.
+  \item \emph{[junior]} \textbf{Deprecation vs sunset vs retirement?}
+        Deprecation is the announcement (signal, freeze, campaign start);
+        sunset is the enforcement window (brownouts, then permanent 410
+        at the kill date); retirement is the aftermath (audit clean,
+        catalog archived, runbooks removed).
+  \item \emph{[mid]} \textbf{How do you enforce a style guide without
+        killing velocity?} Convert rules to lint executed in CI
+        (fast, impartial, self-service feedback in minutes), roll new
+        rules out as warnings before errors, keep human review scoped to
+        judgment with a two-day SLA, and invest the savings in the paved
+        path so compliance is the easiest route --- enforcement should
+        feel like autocomplete, not customs inspection.
+  \item \emph{[mid]} \textbf{What makes a good custom lint rule?} A
+        stable ID, an honest severity, a precise target, an actionable
+        message with a JSON path to the offender, and a story --- the
+        incident or inconsistency the rule exists to prevent. Rules
+        without stories get litigated every review; rules with stories
+        get quoted.
+  \item \emph{[mid]} \textbf{When do generated SDKs hurt DX?} When the
+        team cannot commit to owning them: generated code is unidiomatic
+        in every language, lags language evolution, and a stale SDK
+        under your brand is worse than none. Rule of thumb: generate when
+        the spec is stable and CI regenerates and publishes
+        automatically; otherwise ship an excellent OpenAPI doc, a
+        quickstart, and a sandbox.
+  \item \emph{[mid]} \textbf{Your funnel shows strong key issuance but
+        weak first-call conversion. Diagnosis path?} The failure is
+        between ``has credential'' and ``made a call'': quickstart
+        quality, missing base-URL clarity, confusing scopes, or no
+        sandbox. Instrument docs-viewed events and quickstart completion,
+        time five developers through the getting-started flow, and check
+        the \textsf{first call}$\rightarrow$\textsf{first 200} step too
+        --- if 401s dominate first calls, the auth docs are the real
+        culprit.
+  \item \emph{[mid]} \textbf{What goes into a design-review packet?} The
+        spec diff, the lint report, the resource model rationale, and an
+        ADR per non-obvious decision (versioning strategy, pagination
+        choice, error model deviations). The packet exists so the
+        reviewer spends the two-day SLA window on judgment, not
+        archaeology.
+  \item \emph{[mid]} \textbf{Why ADRs for APIs specifically?} API
+        decisions are unusually permanent --- consumers hard-code around
+        them --- and unusually relitigated, because every new team
+        re-asks ``why not GraphQL/why cursor pagination/why problem+json''.
+        Recording rejected alternatives answers next year's mail without
+        a meeting.
+  \item \emph{[mid]} \textbf{How do you find out who consumes an API?}
+        Gateway telemetry joined from API key/client ID to consumer
+        identity --- ground truth, because packets don't lie. The catalog
+        of record supplies owners and escalation contacts; the diff
+        between observed and declared consumers is where shadow
+        integrations live. Never run a census from a wiki.
+  \item \emph{[mid]} \textbf{What is a paved path and how do you measure
+        it?} The blessed, fully tooled route from idea to published API:
+        repo template, pre-wired lint CI, generated docs, auto-catalog
+        registration, sandbox, dashboards. Measure voluntary adoption
+        (share of new APIs on the path) and time-to-publish versus the
+        unpaved route; if teams need mandates, the path isn't paved well
+        enough.
+  \item \emph{[mid]} \textbf{Changelog discipline --- what does it look
+        like operationally?} Every consumer-visible change, classified
+        (added/changed/deprecated/removed/fixed/security), dated,
+        shipped with the deploy, and machine-linked to deprecation
+        headers. The changelog is a trust instrument: one lagging release
+        teaches consumers to distrust every other signal you send.
+  \item \emph{[mid]} \textbf{What makes a sandbox good?} Self-service
+        instant keys, deterministic seeded synthetic data, no approvals,
+        realistic failure modes (you can trigger a 429 and a 422 on
+        purpose), and isolation from production. Its success metric is
+        TTFC; a sandbox requiring a ticket is a waiting room with a URL.
+  \item \emph{[senior]} \textbf{Design a sunset campaign for a v1 API
+        with 200 consumers.} Census from gateway telemetry (expect
+        unknowns); segment internal/external and by traffic; announce at
+        T-180 via changelog, portal banner, email, and
+        \texttt{Deprecation} headers; publish the kill date and a
+        migration guide with a shim where feasible; reminders at T-90/60
+        escalating to engineering leads; brownouts at T-30 (1 hour) and
+        T-7 (4 hours) as escape hatches for non-readers; a documented,
+        time-boxed extension process signed by the laggard's director;
+        permanent 410 with a problem+json body at T-0; post-sunset
+        traffic audit at T+7. Track readiness traffic-weighted and gate
+        the retirement runbook on it.
+  \item \emph{[senior]} \textbf{Why must the SLA be strictly looser than
+        the SLO?} Because the gap between the internal budget
+        ($1-\text{SLO}$) and the contractual budget ($1-\text{SLA}$) is
+        reaction time measured in errors: alerting, rollback, and deploy
+        freezes must consume SLO budget \emph{before} SLA budget is
+        touched. SLA $\geq$ SLO means customers discover your incidents
+        before your policy does, and every incident becomes a contract
+        negotiation~\cite{beyer2016sre}.
+  \item \emph{[senior]} \textbf{Brownouts: purpose, mechanics, risks?}
+        Short, announced windows where the old version returns errors,
+        flushing out consumers who ignore email before the permanent
+        kill. Mechanics: gateway-level 410/404 with a problem body,
+        per-consumer allowlist for carve-outs, business-hours timing so
+        the right humans are awake. Risks: a brownout that pages the
+        \emph{wrong} team (your census failed), and crying wolf ---
+        brownouts that are always rolled back teach consumers to ignore
+        them.
+  \item \emph{[senior]} \textbf{Where do you draw the
+        consistency-versus-autonomy line?} At the consumer-observable
+        seam: everything a caller can see is standardized; everything
+        behind the route table is the team's business. Revisit the line
+        only with telemetry --- if an ungoverned internal choice keeps
+        causing cross-team incidents, it earns promotion into the guide
+        via ADR, not via decree.
+  \item \emph{[senior]} \textbf{Kill date arrives; one consumer is
+        unresponsive but still calling. What do you do?} Follow the
+        pre-agreed policy, which existed precisely for this moment:
+        confirm the escape-hatch criteria (is this a carve-out case or an
+        abandonment case?), attempt final escalation through the census
+        owner chain, brownout on schedule, and sunset --- with a
+        documented reactivation path. Bending the kill date for silence
+        teaches 199 other consumers that deadlines are negotiable.
+  \item \emph{[senior]} \textbf{Design GDPR-style erasure propagation
+        across an API ecosystem.} Erasure is an event, not a DELETE:
+        a tombstone workflow fans out to the primary store, derived
+        stores, caches, analytics, and downstream consumers you pushed
+        data to, with per-hop acknowledgments; backups expire data by
+        retention schedule rather than surgical edits. Schema-level
+        classification labels tell you what to erase; the audit trail
+        proves you did; quarterly rehearsals prove the workflow still
+        works.
+  \item \emph{[senior]} \textbf{How do you keep PII out of API logs at
+        platform scale?} Don't rely on developer discipline: classify
+        fields in the schema (\texttt{x-classification}), log only
+        allow-listed metadata fields at the gateway and framework
+        middleware level (never bodies by default), lint specs for
+        classification coverage, and run periodic payload-sampling audits
+        with automated detectors. The control lives in the pipeline, not
+        in the style guide.
+  \item \emph{[senior]} \textbf{Internal vs external deprecation policy
+        --- what differs and why?} Notice period (sprint-plannable
+        60--90 days vs contractual 6--12 months), enforcement lever (CI
+        and deploy mandates vs persuasion, pricing, and brownouts within
+        contract terms), and discovery (org chart available vs contracts
+        and telemetry only). The substance is identical --- census,
+        cadence, brownouts, kill date --- but external consumers hold
+        contractual rights you must design around, not through.
+  \item \emph{[senior]} \textbf{What telemetry should revise your style
+        guide?} Lint violations by rule (a rule everyone suppresses is
+        wrong or mistargeted), review findings that recur (recurrence
+        means the guide is silent or unclear), support-ticket themes,
+        funnel step conversions after docs changes, and error-mix shifts
+        per consumer after releases. Governance without this feedback
+        loop ossifies into theater.
+  \item \emph{[staff]} \textbf{Build vs buy for portals and gateways ---
+        your framework?} Buy the undifferentiated and mature (gateway,
+        key management, hosted docs rendering); build what encodes your
+        conventions (rulesets, paved-path templates, catalog enrichment
+        glued to your org chart); default to composing: managed gateway,
+        open-source portal core (Backstage-style), thin bespoke glue.
+        The decisive question is not features but \emph{who operates it
+        at 3 a.m.} and what it costs to leave.
+  \item \emph{[staff]} \textbf{How should a platform team be funded, and
+        why do cost-center models fail?} Fund as a product team with
+        internal customers on a multi-year horizon, success measured by
+        voluntary adoption. Cost-center funding turns the team into a
+        ticket queue: roadmap by loudest stakeholder, no investment in
+        self-service (which would ``reduce demand'' for the team), and
+        eventual mandate-driven adoption that destroys the feedback loop
+        that keeps the paved path paved~\cite{newman2021microservices}.
+  \item \emph{[staff]} \textbf{How do you measure platform ROI?} Three
+        columns: adoption (APIs on the paved path, traffic share behind
+        the gateway), activation (TTFC median and funnel conversion,
+        trended), and risk removed (lint-blocked non-compliant designs,
+        incident rates of governed vs ungoverned APIs, sunsets completed
+        without escalation). Report quarterly; translate to money only
+        where the counterfactual is defensible.
+  \item \emph{[staff]} \textbf{You inherit 500 APIs across 50 teams with
+        zero governance. First 90 days?} Days 1--30: instrument ---
+        gateway census, catalog skeleton generated from whatever specs
+        exist, TTFC baseline. Days 31--60: publish the v1 style guide
+        (consumer-observable surfaces only), ship the linter as
+        \emph{advisory}, and stand up one paved path for \emph{new} APIs.
+        Days 61--90: flip two high-value rules to blocking, run the first
+        review-SLA'd design reviews, and publish the first transparency
+        report. Never begin with a mandate to retrofit all 500.
+  \item \emph{[staff]} \textbf{A strong team demands an exception to the
+        error-shape rule ``just this once.'' Your process?} Exceptions
+        are ADRs, not conversations: written context, explicit
+        time-boxing, a named owner, a suppression comment in the spec
+        referencing the ADR, and a review date. Permanent undocumented
+        exceptions compound; time-boxed documented ones are governance
+        working as intended --- the rule learns where its edges are.
+  \item \emph{[staff]} \textbf{Your largest revenue account refuses to
+        migrate off v1. Sunset anyway?} This is a business decision the
+        campaign should have surfaced at T-90, not T-7. Options, in
+        order: dedicated migration engineering (often cheaper than the
+        standoff), a paid extended-support tier with a contractual final
+        date, or accepting v1 as a frozen, ring-fenced deployment with
+        its own cost model charged back. What you don't do is quietly
+        extend forever --- an undead v1's maintenance cost is invisible
+        precisely because nobody is measuring it.
+  \item \emph{[staff]} \textbf{What organizational signals tell you
+        governance has become theater?} Review queues measured in weeks
+        while ship rates stay flat (teams are bypassing); lint suppressions
+        clustering on the same rules; a catalog whose entries disagree
+        with gateway telemetry; style-guide pages last edited by someone
+        who left; and --- the tell --- governance metrics that report
+        \emph{activity} (reviews held) instead of \emph{outcomes}
+        (consistency, adoption, TTFC, sunset success rate).
+\end{enumerate}
+
+%% ----------------------------------------------------------------------------
+\section{External Bibliography \& Further Reading}
+\label{sec:ch20-bibliography}
+
+\begin{itemize}
+  \item \textbf{OpenAPI Specification v3.1.0}~\cite{openapi31} --- the
+        contract of record this chapter's linter, docs generator, and
+        catalog all consume.
+  \item \textbf{Gehl \& Higginbotham, \emph{API Design Patterns}
+        (Manning, 2021)}~\cite{gehl2021apidesign} --- pattern-level
+        grounding for the style-guide surfaces: naming, pagination,
+        versioning, and long-running operations.
+  \item \textbf{Beyer et al., \emph{Site Reliability Engineering}
+        (O'Reilly, 2016)}~\cite{beyer2016sre} --- SLOs, error budgets,
+        and the SLA~$<$~SLO doctrine.
+  \item \textbf{Newman, \emph{Building Microservices}, 2nd ed.
+        (O'Reilly, 2021)}~\cite{newman2021microservices} --- platform and
+        team-boundary thinking behind paved paths.
+  \item \textbf{The Twelve-Factor App}~\cite{twelvefactor} ---
+        config-in-environment discipline that sandbox and portal key
+        issuance builds on.
+  \item \textbf{Spectral documentation},
+        \texttt{https://docs.stoplight.io/docs/spectral} --- ruleset
+        anatomy, built-in functions, custom rules; the production
+        counterpart of Listing~20.2.
+  \item \textbf{Backstage documentation},
+        \texttt{https://backstage.io/docs} --- software catalog and
+        \texttt{kind: API} entity model behind Listing~20.7.
+  \item \textbf{openapi-generator},
+        \texttt{https://openapi-generator.tech} --- the reference SDK
+        generation pipeline, including its templating and CI regeneration
+        story.
+  \item \textbf{Redocly / Redoc} (\texttt{https://redocly.com/docs}) and
+        \textbf{Stoplight Elements} --- production docs-as-code renderers
+        whose role Listing~20.4 miniaturizes.
+  \item \textbf{Skelton \& Pais, \emph{Team Topologies} (IT Revolution,
+        2019)} --- the platform-team-as-product funding and interaction
+        models of Section~\ref{sec:ch20-economics}.
+  \item \textbf{Google AIP program}, \texttt{https://google.aip.dev} ---
+        a mature, public, lint-enforced API design standard; study its
+        AIP-122 (resource names) and AIP-158 (pagination) alongside
+        Table~\ref{tab:ch20-styleguide}.
+  \item \textbf{Stripe, Slack, and Twilio engineering blogs}
+        (\texttt{https://stripe.com/blog}, \texttt{https://slack.engineering},
+        \texttt{https://www.twilio.com/blog}) --- primary sources on DX
+        engineering at scale: Stripe's API versioning and changelog
+        discipline, Slack's developer-platform iterations, Twilio's
+        helper-library (SDK) maintenance economics.
+  \item \textbf{RFC~8594 (the \texttt{Sunset} header)} and the
+        deprecation-header draft --- the wire-level machinery behind
+        Section~\ref{sec:ch20-deprecation}, introduced in
+        Chapter~\ref{ch:versioning}.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Capstone Projects}
+\label{sec:ch20-capstones}
+
+\subsection*{Capstone 20.1 [junior] --- Three New Rules for the Fleet}
+\textbf{Objective:} Extend the Northwind ruleset with three custom rules
+and prove each one bites.
+
+\textbf{Inputs/Datasets:} \texttt{code\textbackslash{}ch20\textbackslash{}}
+(\texttt{mini\_spectral.py}, \texttt{ruleset.yaml}, both spec fixtures).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Add rules: \texttt{summary-required} (every operation has a
+        non-empty \texttt{summary}), \texttt{no-verbs-in-paths}
+        (path segments match a noun-only denylist: \texttt{get},
+        \texttt{create}, \texttt{delete}, \texttt{fetch}),
+        \texttt{cursor-type-string} (any \texttt{cursor} parameter is
+        \texttt{type: string}).
+  \item Extend the linter with any new rule kinds needed, keeping rules
+        as data.
+  \item Add one violating case per rule to a copy of the non-compliant
+        fixture; assert exit codes and rule IDs in new tests.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Compliant specs still exit 0; the extended fixture
+        exits 1 with all three new rule IDs.
+  \item[$\square$] Each violation carries a JSON path pinpointing the
+        offending node.
+  \item[$\square$] New rule kinds are unit-tested, including a
+        bad-ruleset (unknown kind) test exiting 2.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add per-rule suppression comments
+(\texttt{x-lint-ignore: [rule-id]}) honored by the engine and logged as
+warnings.
+
+\subsection*{Capstone 20.2 [mid] --- Docs-as-Code Pipeline}
+\textbf{Objective:} Assemble lint $\rightarrow$ docs $\rightarrow$
+catalog into one offline pipeline script with a CI gate.
+
+\textbf{Inputs/Datasets:} \texttt{code\textbackslash{}ch20\textbackslash{}};
+the two specs under \texttt{specs\textbackslash{}}.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Write \texttt{pipeline.py}: lint every spec (block on errors),
+        render Markdown docs to \texttt{docs\textbackslash{}}, and emit
+        \texttt{catalog-apis.yaml}.
+  \item Add a staleness check: if a spec changed but its rendered docs
+        did not regenerate (compare content hashes stored in a manifest),
+        exit 1 with a clear message.
+  \item Record a one-page ADR describing the pipeline's blocking policy.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] One command produces docs and catalog for all specs;
+        a non-compliant spec blocks the run.
+  \item[$\square$] Editing a spec without rerunning the generator fails
+        the staleness gate.
+  \item[$\square$] Everything runs offline; output is byte-deterministic
+        across runs.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a Markdown link checker (stdlib) over the
+generated docs.
+
+\subsection*{Capstone 20.3 [mid] --- TTFC Instrumentation Pack}
+\textbf{Objective:} Extend the funnel analyzer from report to decision
+tool.
+
+\textbf{Inputs/Datasets:} \texttt{ttfc\_funnel.py},
+\texttt{fixtures\textbackslash{}onboarding\_events.jsonl} (222 synthetic
+events, 60 developers).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Add a \texttt{--by channel} breakdown (the fixture's
+        \texttt{channel} field) computing per-channel funnels.
+  \item Add a weekly cohort table (signups grouped by ISO week) with
+        per-cohort TTFC medians.
+  \item Write a ``DX experiment'' report: propose one intervention,
+        state which funnel step it targets, and the metric movement that
+        would confirm it.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Per-channel funnels show conversion deltas with
+        counts (no percentage without an $n$).
+  \item[$\square$] Cohort table is deterministic and sorted; malformed
+        events are still counted and skipped, never fatal.
+  \item[$\square$] The experiment report names one metric, one step, and
+        one falsifiable threshold.
+\end{itemize}
+
+\textbf{Stretch Goals:} Flag small-$n$ cohorts ($n < 10$) in the output
+to discourage over-reading noise.
+
+\subsection*{Capstone 20.4 [senior] --- Sunset Campaign for Fleet API v1}
+\textbf{Objective:} Design and simulate the full retirement of a legacy
+version with heterogeneous consumers.
+
+\textbf{Inputs/Datasets:} \texttt{deprecation\_tracker.py},
+\texttt{fixtures\textbackslash{}deprecation\_registry.yaml}; a 12-consumer
+registry you extend it into (add tiers, contract dates, one shadow
+consumer).
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Extend the registry schema with \texttt{notice\_days} per tier
+        and \texttt{extension\_until} per consumer; validate
+        defensively.
+  \item Add a simulation mode: given a migration-velocity assumption per
+        tier, project residual traffic weekly until the kill date.
+  \item Produce the campaign plan: cadence rows adjusted per tier,
+        brownout scope, carve-out list, and the go/no-go checklist for
+        T-0.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] The projection flags, in advance, the consumers who
+        will miss the date under stated velocity.
+  \item[$\square$] The plan differentiates internal vs external policy
+        per Table~\ref{tab:ch20-internal-external}.
+  \item[$\square$] Exit codes remain CI-meaningful; all dates are
+        explicit CLI inputs (deterministic).
+\end{itemize}
+
+\textbf{Stretch Goals:} Model one extension request and show its effect
+on the brownout schedule for non-extended consumers.
+
+\subsection*{Capstone 20.5 [staff] --- Platform ROI Scorecard \& Governance Operating Model}
+\textbf{Objective:} Design the quarterly platform review for a fictional
+50-team Northwind Robotics.
+
+\textbf{Inputs/Datasets:} This chapter's tools plus invented-but-plausible
+baselines (document all assumptions); no real company data.
+
+\textbf{Steps:}
+\begin{enumerate}
+  \item Define the scorecard: adoption, activation (TTFC funnel), risk
+        removed; a data source and an owner per metric.
+  \item Build \texttt{scorecard.py}: reads the funnel fixture, a lint
+        history CSV you synthesize, and an incident log you synthesize;
+        renders the one-page scorecard.
+  \item Write the operating model: rule lifecycle (propose $\rightarrow$
+        advisory $\rightarrow$ blocking $\rightarrow$ retire), review
+        SLA, exception process, and the platform team's funding ask with
+        the ROI narrative.
+\end{enumerate}
+
+\textbf{Acceptance Criteria:}
+\begin{itemize}
+  \item[$\square$] Every scorecard number traces to a reproducible
+        computation from synthetic inputs.
+  \item[$\square$] The ROI narrative states its weakest assumption
+        explicitly.
+  \item[$\square$] The operating model fits on two pages and names
+        decision rights for every governance event.
+\end{itemize}
+
+\textbf{Stretch Goals:} Add a counterfactual section: estimated incident
+cost avoided using governed-vs-ungoverned incident rates, with the
+selection-bias caveat addressed.
+
+%% ----------------------------------------------------------------------------
+\section{Python Dependencies Appendix}
+\label{sec:ch20-dependencies}
+
+The chapter's code targets Python~3.11+ and needs four third-party
+packages (only PyYAML and pytest are exercised at runtime; the other two
+support the program-level patterns referenced below):
+
+\begin{minted}{text}
+pyyaml>=6.0
+jsonschema>=4.21
+pydantic>=2.7
+pytest>=8
+\end{minted}
+
+Install on Windows/PowerShell (virtual environment recommended):
+
+\begin{minted}{powershell}
+cd code\ch20
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+\end{minted}
+
+\subsection{PyYAML (\texttt{pyyaml>=6.0})}
+\textbf{Description:} The de-facto YAML parser for Python.
+\textbf{Why included:} OpenAPI documents and rulesets in this chapter are
+YAML; \texttt{yaml.safe\_load} parses specs, rulesets, registries, and
+catalog emission uses \texttt{yaml.safe\_dump}. Safe loaders only ---
+\texttt{yaml.load} without a safe loader is a code-execution hazard on
+untrusted input.
+\textbf{Alternatives:} \texttt{ruamel.yaml} (round-trip editing with
+comments preserved, useful if you want a linter that \emph{fixes} specs);
+the real Spectral CLI (Node.js) for production-grade linting; Redocly CLI
+for lint-plus-bundle.
+\textbf{Installation:} \texttt{pip install pyyaml>=6.0} (PowerShell;
+quote as \texttt{"pyyaml>=6.0"} if your shell interprets \texttt{>}).
+
+\subsection{jsonschema (\texttt{jsonschema>=4.21})}
+\textbf{Description:} JSON Schema validation for Python; OpenAPI~3.1
+schemas are JSON Schema dialects~\cite{openapi31}.
+\textbf{Why included:} The natural next layer after structural linting is
+\emph{schema-aware} rules --- e.g., validating that a spec's example
+payloads actually satisfy their declared schemas, or that a registry YAML
+conforms to a published registry schema (the defensive parsing in
+Listings~20.2 and~20.6 is the hand-rolled floor; \texttt{jsonschema} is
+the ceiling).
+\textbf{Alternatives:} \texttt{openapi-spec-validator} and
+\texttt{openapi-schema-validator} (OpenAPI-aware validation);
+Spectral/Redocly for schema checks embedded in a lint pipeline.
+\textbf{Installation:} \texttt{pip install "jsonschema>=4.21"}.
+
+\subsection{Pydantic (\texttt{pydantic>=2.7})}
+\textbf{Description:} Type-annotated data modeling and validation.
+\textbf{Why included:} The chapter's tools deliberately use stdlib
+dataclasses for transparency, but a production platform models its
+catalog entries, registry records, and ruleset schema as pydantic models
+--- gaining validation errors with field paths, JSON Schema export for
+free, and parity with the FastAPI services of
+Chapter~\ref{ch:fastapi}~\cite{openapi31}.
+\textbf{Alternatives:} stdlib \texttt{dataclasses} (as used here) plus
+\texttt{jsonschema} for boundary validation; \texttt{msgspec} for
+speed-critical parsing; \texttt{attrs} for lightweight class ergonomics.
+\textbf{Installation:} \texttt{pip install "pydantic>=2.7"}.
+
+\subsection{pytest (\texttt{pytest>=8})}
+\textbf{Description:} The standard Python test runner.
+\textbf{Why included:} Both test suites (Listings~20.3 and~20.8) use
+pytest's \texttt{tmp\_path} and \texttt{capsys} fixtures to exercise CLI
+exit codes --- the CI contract of the linter and tracker --- without
+shelling out, keeping tests offline and deterministic per
+Chapter~\ref{ch:testing}.
+\textbf{Alternatives:} \texttt{unittest} (stdlib, more ceremony);
+\texttt{nox}/\texttt{tox} as session runners on top of pytest; MkDocs is
+\emph{not} a test alternative but is the natural companion for publishing
+this chapter's generated Markdown as a docs site.
+\textbf{Installation:} \texttt{pip install "pytest>=8"}.
+
+%% ----------------------------------------------------------------------------
+\section{Chapter Summary \& Key Takeaways}
+\label{sec:ch20-summary}
+
+\begin{itemize}
+  \item \textbf{The lifecycle is a state machine, not a poster.} Seven
+        states with evidence-based entry/exit criteria make ownership,
+        tooling, and audits mechanical. The \textsf{deprecated} state is
+        first-class: frozen contract, \texttt{Sunset} headers, live
+        campaign.
+  \item \textbf{Governance compiles or it doesn't exist.} Style guides
+        standardize only the consumer-observable seam; Spectral-style
+        rulesets enforce them as data in CI with exit codes that
+        distinguish ``non-compliant'' from ``gate broken''; review keeps
+        a two-day SLA and advisory-by-default verdicts; ADRs make
+        exceptions and rejected alternatives permanent public record.
+  \item \textbf{DX is a measured funnel.} Portals and catalogs are
+        generated, not curated; docs are build artifacts of the spec;
+        SDKs are generated only when CI regenerates them forever; TTFC
+        (signup $\rightarrow$ key $\rightarrow$ call $\rightarrow$ 200)
+        is the activation metric, and every DX investment names the
+        funnel step it moves.
+  \item \textbf{APIs are products with contract discipline.} Tier on a
+        value metric enforceable at the gateway; keep SLA strictly
+        looser than SLO so error budget is reaction
+        time~\cite{beyer2016sre}; changelogs are trust instruments.
+  \item \textbf{Sunsetting is a campaign run on telemetry.} The census
+        comes from the gateway, not the wiki; cadence runs T-180 to T+7
+        with brownouts as escape hatches; internal and external consumers
+        get different levers but the same dates.
+  \item \textbf{Data governance rides the contract.} Classification
+        labels in schemas, payload minimization, redaction by default,
+        retention clocks, and rehearsed deletion propagation across
+        stores, caches, and downstream consumers.
+  \item \textbf{Platform economics justify the platform.} Buy the
+        undifferentiated, build the conventional; fund the platform team
+        as a product team~\cite{newman2021microservices}; report ROI in
+        adoption, TTFC, and risk removed --- or watch the budget leave.
+\end{itemize}
+
+%% ----------------------------------------------------------------------------
+\section{Quick-Reference Card}
+\label{sec:ch20-quickref}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+\textbf{State} & \textbf{Consumer may assume} & \textbf{Provider must do} \\
+\midrule
+design & nothing & spec in repo, ADR for hard choices \\
+review & nothing & lint green; review within SLA \\
+published & stable contract, SLO, docs & operate, changelog, compatible evolution only \\
+deprecated & works until kill date; no new features & headers on, campaign running, security fixes only \\
+sunset & brownouts then 410 & final warnings, 410 + problem body with migration link \\
+retired & nothing (404/410 forever) & audit clean, catalog archived \\
+\bottomrule
+\end{tabularx}
+\caption{Lifecycle states: the contract each side is under.}
+\label{tab:ch20-states-quick}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Surface} & \textbf{Core rule (lint-enforced)} \\
+\midrule
+Naming & kebab-case path segments; camelCase \texttt{operationId} \\
+Versioning & \texttt{info.version} strict semver; URI major version \\
+Errors & every operation declares \texttt{application/problem+json} on 4xx/5xx/default \\
+Pagination & collection GETs accept \texttt{limit} + \texttt{cursor} \\
+Ownership & \texttt{info.contact} + \texttt{x-lifecycle.owner} required \\
+Governance hygiene & rules as data; warn $\rightarrow$ error rollout; suppressions are ADR-linked \\
+\bottomrule
+\end{tabularx}
+\caption{Style-guide core rules and their enforcement.}
+\label{tab:ch20-rules-quick}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Metric} & \textbf{Definition / target practice} \\
+\midrule
+TTFC & median $t(\text{first 200}) - t(\text{signup})$; the activation metric \\
+Funnel conversion & $C_i = N_i/N_{i-1}$ per step; fix the weakest step first \\
+Census coverage & \% of gateway traffic mapped to cataloged consumers; target 100\%, diff weekly \\
+Paved-path adoption & \% of new APIs via the paved path; voluntary, trended \\
+SLA/SLO gap & SLA $<$ SLO; gap = reaction budget in errors~\cite{beyer2016sre} \\
+Campaign readiness & residual traffic on non-migrated consumers; T-0 gate \\
+Portal health & zero-result searches, docs-to-spec staleness hash \\
+\bottomrule
+\end{tabularx}
+\caption{DX and governance metrics cheat sheet.}
+\label{tab:ch20-metrics-quick}
+\end{table}
+
+\input{chapters/_standard_addendum}

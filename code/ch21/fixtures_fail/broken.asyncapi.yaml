@@ -1,0 +1,14 @@
+asyncapi: "2.6.0"
+info:
+  title: Legacy Widget Events
+  version: "1.0.0"
+channels:
+  widget.updated:
+    publish:
+      message:
+        name: WidgetUpdated
+        payload:
+          type: object
+          properties:
+            widget_id: { type: string }
+            name: { type: string }

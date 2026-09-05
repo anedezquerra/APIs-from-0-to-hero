@@ -1,0 +1,9 @@
+warehouse_id,code,name,city,country,capacity_m2
+W-01,DET,Motor City Depot,Detroit,United States,42000
+W-02,RDM,Rainier Distribution Hub,Redmond,United States,28000
+W-03,GDL,Jalisco Robotics Center,Guadalajara,Mexico,21000
+W-04,HAM,Hanseatic Logistics Park,Hamburg,Germany,35000
+W-05,WAW,Vistula Fulfillment Site,Warsaw,Poland,19000
+W-06,OSA,Kansai Automation Depot,Osaka,Japan,26000
+W-07,SIN,Straits Regional Hub,Singapore,Singapore,17000
+W-08,SYD,Harbour Spares Facility,Sydney,Australia,14000

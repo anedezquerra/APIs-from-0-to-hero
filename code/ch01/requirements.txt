@@ -1,0 +1,2 @@
+# requirements.txt  (chapter 1 - optional tooling only; core is stdlib)
+h2>=4.1.0

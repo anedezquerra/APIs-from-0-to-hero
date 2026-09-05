@@ -1,0 +1,102 @@
+\section{Standardized Evidence Addendum}
+\subsection{Benchmark Snapshot Template}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c c c}
+    \toprule
+    \textbf{Config} & \textbf{p50 latency} & \textbf{p99 latency} & \textbf{Error rate} & \textbf{Throughput} \\
+    \midrule
+    Baseline & -- & -- & -- & 1.00x \\
+    Candidate A & -- & -- & -- & -- \\
+    Candidate B & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Minimum benchmark table to keep per chapter.}
+\end{table}
+
+\subsection{Request Trace Template}
+\begin{itemize}
+  \item \textbf{Request:} one representative API call for this chapter's topic.
+  \item \textbf{Before:} behavior (headers, payload, latency, failure mode) with the naive approach.
+  \item \textbf{After:} behavior with the technique in this chapter.
+  \item \textbf{Result:} what changed in correctness, resilience, latency, and operability.
+\end{itemize}
+
+\subsection{Cost and Latency Budget Snapshot}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l c c}
+    \toprule
+    \textbf{Stage} & \textbf{Latency budget} & \textbf{Cost driver} \\
+    \midrule
+    TLS / connection setup & -- & handshake round trips, keep-alive hit rate \\
+    Request validation & -- & schema complexity, CPU per request \\
+    Business logic and I/O & -- & downstream fan-out, query cost \\
+    Serialization and egress & -- & payload size, compression ratio \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Operational budget template for this chapter's technique.}
+\end{table}
+
+\section{Configuration Preset Template}
+\begin{minted}{text}
+# api_policy.yaml
+policy_version: "v1.0.0"
+component: "<chapter_topic>"
+timeout_ms: 0
+retry_budget: 0
+fallback_strategy: "fail_fast"
+rollback_trigger: "error_budget_burn_gt_threshold"
+\end{minted}
+
+\section{CI Quality Gate Specification}
+\begin{itemize}
+  \item contract tests green against the pinned OpenAPI/AsyncAPI/Protobuf spec,
+  \item no breaking schema changes without a version bump,
+  \item error responses conform to RFC 9457 problem-details shape,
+  \item benchmark deltas within approved regression bounds (latency and throughput),
+  \item policy version and rollback plan present in release metadata.
+\end{itemize}
+
+\section{Incident Runbook Template}
+\begin{enumerate}
+  \item Detect regression from SLO burn-rate alerts or consumer reports.
+  \item Scope impacted endpoints, versions, and consumer segments.
+  \item Contain impact (rollback, feature flag, rate-limit tightening, or traffic shift).
+  \item Diagnose with traces, structured logs, and contract diffs.
+  \item Recover with validated fix and verified rollout procedure.
+  \item Prevent recurrence via new regression tests and CI gates.
+\end{enumerate}
+
+\section{Cross-Chapter Decision Card}
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabularx}{\textwidth}{l X X}
+    \toprule
+    \textbf{Dimension} & \textbf{Choose this approach when} & \textbf{Prefer an alternative when} \\
+    \midrule
+    Use case & -- & -- \\
+    Latency budget & -- & -- \\
+    Operational cost & -- & -- \\
+    Team maturity & -- & -- \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Decision card to complete per chapter.}
+\end{table}
+
+\section{ROI Model and Build-vs-Buy}
+\begin{itemize}
+  \item \textbf{Build when:} the capability is differentiating, compliance forbids vendors, or scale makes vendor pricing irrational.
+  \item \textbf{Buy when:} the capability is commodity (auth, gateways, observability), time-to-market dominates, or staffing is thin.
+  \item \textbf{Hidden costs to model:} on-call load, upgrade cadence, expertise ramp, data egress fees.
+\end{itemize}
+
+\section{Disaster Recovery Notes (RPO/RTO)}
+\begin{itemize}
+  \item Define recovery point objective (RPO): maximum acceptable data loss window.
+  \item Define recovery time objective (RTO): maximum acceptable restoration time.
+  \item Test restores regularly; an untested backup is not a backup.
+\end{itemize}
